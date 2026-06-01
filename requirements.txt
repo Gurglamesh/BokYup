@@ -1,0 +1,6 @@
+argon2-cffi>=23.1.0
+cryptography>=42.0.0
+fastapi>=0.110.0
+uvicorn>=0.29.0
+pywebview>=5.0
+pytest>=8.0.0
