@@ -78,7 +78,8 @@ def _ops(session: BookSession = Depends(_session)) -> BookOps:
 
 def create_app(app_dir: str | Path | None = None,
                autolock_seconds: int = DEFAULT_AUTOLOCK_SECONDS,
-               sweep_interval: int = DEFAULT_SWEEP_INTERVAL) -> FastAPI:
+               sweep_interval: int = DEFAULT_SWEEP_INTERVAL,
+               serve_ui: bool = True) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         task = asyncio.create_task(_autolock_sweeper(app))
@@ -95,6 +96,13 @@ def create_app(app_dir: str | Path | None = None,
 
     _register_exception_handlers(app)
     app.include_router(_build_router())
+
+    # Serve the web frontend (Layer 8) at /app from this same server.
+    if serve_ui:
+        from fastapi.staticfiles import StaticFiles
+        static_dir = Path(__file__).parent / "static"
+        if static_dir.is_dir():
+            app.mount("/app", StaticFiles(directory=str(static_dir), html=True), name="ui")
     return app
 
 

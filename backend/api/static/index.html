@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bokföring</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Bokföring</div>
+    <div id="book-tabs" class="book-tabs"></div>
+    <div class="spacer"></div>
+    <div id="active-book" class="active-book"></div>
+  </header>
+
+  <main id="view" class="view"></main>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- Simple modal used for passphrase prompts and new-book form -->
+  <div id="modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal">
+      <h3 id="modal-title"></h3>
+      <div id="modal-body"></div>
+      <div class="modal-actions">
+        <button id="modal-cancel" class="btn ghost">Avbryt</button>
+        <button id="modal-ok" class="btn">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

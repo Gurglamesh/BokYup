@@ -177,7 +177,12 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       reference + bookkeeping + reports + export/import routes, domain→HTTP error
       mapping (401/404/409/423). DONE, all tests pass. NOTE: localhost single-user
       backend — db/bundle paths in requests are trusted; do not expose on a network.
-- [ ] Layer 8 — Web frontend (tabbed UI), served via pywebview for desktop.
+- [x] **Layer 8 — Web frontend** (`api/static/{index.html,styles.css,app.js}`,
+      `desktop.py`) + tests (`tests/test_web.py`). Vanilla-JS tabbed SPA (multi-book
+      tabs, unlock/lock, record income/expense, pending→paid, customers/suppliers/
+      categories, momsdeklaration + SIE download), served at /app by the same FastAPI
+      server; pywebview desktop launcher (`python -m backend.desktop`). DONE; JS
+      `node --check`'d, server wiring tested, full stack live-smoke-tested.
 - [ ] Later — phone wrappers (Android/iOS) against the same API; camera receipt capture.
 
 ## Working agreement
