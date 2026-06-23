@@ -144,11 +144,21 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
 ## Build status
 
 - [x] **Layer 1 — Crypto core** (`core/crypto.py`) + tests (`tests/test_crypto.py`). DONE, all tests pass.
-- [ ] Layer 2 — Database manager (registry of books; create/open/import/export; tabs).
-- [ ] Layer 3 — Schema (transactions, verifikationer, customers, suppliers,
-      categories↔BAS, RUT lifecycle, period locks, rättelse model).
-- [ ] Layer 4 — Core operations (book purchase, book income, RUT state machine,
-      reference edits with rättelse/snapshot logic).
+- [x] **Layer 2 — Database manager** (`db/manager.py`) + tests (`tests/test_manager.py`).
+      Registry of books, create/open/lock sessions, recovery-key unlock, per-DB DEK in
+      memory only. DONE, all tests pass. (Import/export bundle deferred to Layer 5.)
+- [x] **Layer 3 — Schema** (`models/schema.py`) + tests (`tests/test_schema.py`).
+      All tables (verifikation/posting, transaktion/moms_line, customer, supplier,
+      category↔BAS, rut_claim, period_lock, rättelse via `verifikation.rattelse_of`),
+      DB-level immutability triggers, personnummer Luhn + money (öre) helpers.
+      DONE, all tests pass. NOTE: money stored as integer ören everywhere; the
+      RUT/ROT cap is editable config (default 75 000 kr — VERIFY vs Skatteverket).
+- [x] **Layer 4 — Core operations** (`db/operations.py`) + tests (`tests/test_operations.py`).
+      Reference CRUD, kontantmetod pending→paid booking with balanced double-entry +
+      unbroken verifikationsnummer, RUT state machine (2 verifikationer), rättelse via
+      mirror postings, snapshot-on-invoice, period-lock enforcement. DONE, all tests pass.
+      NOTE: all system BAS-konton are config (account_bank/ingaende_moms/utgaende_moms_*
+      /rut_fordran) — verify `account_rut_fordran` (default 1513) with a revisor.
 - [ ] Layer 5 — Export/import (.buyn bundle, full-restore, checksum, schema version).
 - [ ] Layer 6 — Reports (momsdeklaration → simplified deklaration → SIE).
 - [ ] Layer 7 — FastAPI API layer over the above.
