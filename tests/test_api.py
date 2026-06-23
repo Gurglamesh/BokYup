@@ -174,6 +174,21 @@ class TestBookkeeping:
         assert rev.status_code == 201
         assert rev.json()["ver_number"] == 2
 
+    def test_year_end_accrual(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Försäljning", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "ACME AB"}).json()["kundnummer"]
+        # unpaid invoice dated in the closing year
+        client.post(f"/books/{book}/incomes",
+                    json={"customer_id": kid, "category_id": cat,
+                          "lines": [{"rate_code": "25", "amount_ore": 1250}],
+                          "trans_date": "2026-12-20"})
+        resp = client.post(f"/books/{book}/year-end-accruals",
+                           json={"fiscal_year_end": "2026-12-31"})
+        assert resp.status_code == 201
+        assert resp.json()["count"] == 1
+
 
 # ---------------------------------------------------------------------------
 # Reports

@@ -305,3 +305,83 @@ class TestPeriodLock:
         ops.lock_period("2026-01-01", "2026-03-31")
         assert ops.is_period_locked("2026-02-15")
         assert not ops.is_period_locked("2026-04-15")
+
+
+# ---------------------------------------------------------------------------
+# Rättelse now nets the moms/result reports (item 3a)
+# ---------------------------------------------------------------------------
+
+class TestRattelseNetting:
+    def _sale_paid(self, ops):
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="ACME AB")
+        return ops.record_income(kid, cat, [{"rate_code": "25", "amount_ore": 1250}],
+                                 "2026-02-10", paid_date="2026-02-10")
+
+    def test_reversed_sale_nets_momsdeklaration(self, ops: BookOps):
+        from backend.reports import vat
+        res = self._sale_paid(ops)
+        before = vat.momsdeklaration(ops.conn, "2026-01-01", "2026-03-31")
+        assert before["boxes"]["10"] == 250
+        ops.reverse_verifikation(res["verifikation_id"], "makulerad", reg_date="2026-02-20")
+        after = vat.momsdeklaration(ops.conn, "2026-01-01", "2026-03-31")
+        assert after["boxes"]["10"] == 0      # output VAT netted by the rättelse
+        assert after["boxes"]["05"] == 0      # sales base netted too
+
+    def test_reversed_sale_nets_result(self, ops: BookOps):
+        from backend.reports import result
+        res = self._sale_paid(ops)
+        ops.reverse_verifikation(res["verifikation_id"], "makulerad", reg_date="2026-02-20")
+        rep = result.result_report(ops.conn, "2026-01-01", "2026-03-31")
+        assert rep["income_ore"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Year-end accrual (bokslut) — item 2
+# ---------------------------------------------------------------------------
+
+class TestYearEndAccrual:
+    def _pending_sale(self, ops, date="2026-12-20"):
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="ACME AB")
+        return ops.record_income(kid, cat, [{"rate_code": "25", "amount_ore": 1250}], date)
+
+    def test_accrual_books_unpaid_invoice_balanced(self, ops: BookOps):
+        self._pending_sale(ops)
+        out = ops.book_year_end_accruals("2026-12-31")
+        assert out["count"] == 1
+        acc = out["accruals"][0]
+        avid = ops.conn.execute("SELECT id FROM verifikation WHERE ver_number=?",
+                                (acc["accrual_ver"],)).fetchone()[0]
+        rows = {p["bas_konto"]: p["amount_ore"] for p in _postings(ops, avid)}
+        assert _balance(ops, avid) == 0
+        assert rows[1510] == 1250     # kundfordran (debit)
+        assert rows[3001] == -1000    # income (credit)
+        assert rows[2610] == -250     # utgående moms (credit)
+
+    def test_moms_lands_in_closing_year_and_nets_next_year(self, ops: BookOps):
+        from backend.reports import vat
+        res = self._pending_sale(ops)
+        ops.book_year_end_accruals("2026-12-31")
+        # moms reported in the closing year (accrual)
+        y2026 = vat.momsdeklaration(ops.conn, "2026-01-01", "2026-12-31")
+        assert y2026["boxes"]["10"] == 250
+        # in the new year, the reversal nets the eventual cash payment
+        ops.register_payment(res["transaktion_id"], "2027-01-15")
+        q1_2027 = vat.momsdeklaration(ops.conn, "2027-01-01", "2027-03-31")
+        assert q1_2027["boxes"]["10"] == 0   # reversal (−250) + payment (+250)
+
+    def test_only_pending_on_or_before_year_end(self, ops: BookOps):
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="ACME AB")
+        ops.record_income(kid, cat, [{"rate_code": "25", "amount_ore": 1250}], "2027-01-05")
+        out = ops.book_year_end_accruals("2026-12-31")
+        assert out["count"] == 0   # invoice dated next year is not accrued
+
+    def test_paid_invoices_not_accrued(self, ops: BookOps):
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="ACME AB")
+        ops.record_income(kid, cat, [{"rate_code": "25", "amount_ore": 1250}],
+                          "2026-12-20", paid_date="2026-12-20")
+        out = ops.book_year_end_accruals("2026-12-31")
+        assert out["count"] == 0

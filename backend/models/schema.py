@@ -273,8 +273,13 @@ END;
 # the rules change over time, so it lives here as editable config — NOT hardcoded
 # in logic (CLAUDE.md > RUT). VERIFY the current amount against Skatteverket; this
 # is only a starting default the user can change.
+# Combined ROT+RUT cap, shared per customer per year. VERIFIED 2026-06 against
+# Skatteverket: RUT max 75 000 kr/person/year; ROT 50 000 kr but ROT+RUT together
+# capped at 75 000 kr/person/year — so this single shared cap is correct. Still
+# config because the rules change. (ROT's subsidy rate is not modelled here; the
+# RUT/ROT amount is taken as user input.)
 _DEFAULT_CONFIG = {
-    "rut_rot_cap_ore_per_customer_year": "7500000",  # 75 000 kr — VERIFY current value
+    "rut_rot_cap_ore_per_customer_year": "7500000",  # 75 000 kr (verified 2026-06)
     # System BAS-konton used by the booking engine (Layer 4). Editable so a
     # revisor can map them to the entity's chart. Defaults follow standard BAS.
     "account_bank": "1930",                 # Företagskonto / bank
@@ -282,7 +287,9 @@ _DEFAULT_CONFIG = {
     "account_utgaende_moms_25": "2610",     # Utgående moms 25 %
     "account_utgaende_moms_12": "2620",     # Utgående moms 12 %
     "account_utgaende_moms_6": "2630",      # Utgående moms 6 %
-    "account_rut_fordran": "1513",          # Kundfordran husavdrag — VERIFY mapping
+    "account_rut_fordran": "1513",          # Kundfordran husavdrag (verified 2026-06)
+    "account_kundfordran": "1510",          # Kundfordringar (year-end accrual)
+    "account_leverantorsskuld": "2440",     # Leverantörsskulder (year-end accrual)
 }
 
 

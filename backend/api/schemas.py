@@ -144,3 +144,7 @@ class PeriodLockReq(BaseModel):
     period_start: str
     period_end: str
     kind: str = "moms"
+
+
+class YearEndAccrualReq(BaseModel):
+    fiscal_year_end: str          # YYYY-MM-DD (last day of the räkenskapsår)

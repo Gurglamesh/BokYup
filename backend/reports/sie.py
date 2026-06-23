@@ -13,9 +13,9 @@ Encoding: the SIE standard mandates code page 437 (declared as `#FORMAT PC8`). U
 `export_sie_bytes` to get correctly-encoded bytes for a `.se` file; `export_sie`
 returns the text.
 
-Out of scope for now (valid SIE 4 without them): opening/closing balances
-(#IB/#UB/#RES) and dimensions/objects — these can be added once year-end closing
-exists. Amounts are still fully reconstructable from the #VER/#TRANS journal.
+When a fiscal year is given, opening/closing balances are emitted: #IB/#UB for
+balance-sheet accounts (1000–2999) and #RES for result accounts (3000–8999),
+computed from the posted journal. (Dimensions/objects remain out of scope.)
 """
 
 from __future__ import annotations
@@ -67,8 +67,25 @@ def export_sie(conn: sqlite3.Connection, *, company_name: str = "",
         lines.append(f"#RAR 0 {_sie_date(fiscal_year_start)} {_sie_date(fiscal_year_end)}")
 
     # Chart of accounts (#KONTO)
-    for a in conn.execute("SELECT bas_konto, name FROM account ORDER BY bas_konto"):
+    accounts = conn.execute("SELECT bas_konto, name FROM account ORDER BY bas_konto").fetchall()
+    for a in accounts:
         lines.append(f"#KONTO {a['bas_konto']} {_q(a['name'])}")
+
+    # Opening/closing balances for the fiscal year (year index 0).
+    if fiscal_year_start and fiscal_year_end:
+        for a in accounts:
+            konto = a["bas_konto"]
+            if konto < 3000:  # balance-sheet accounts -> #IB / #UB
+                ib = _account_balance(conn, konto, end=fiscal_year_start, end_exclusive=True)
+                ub = _account_balance(conn, konto, end=fiscal_year_end)
+                if ib:
+                    lines.append(f"#IB 0 {konto} {_kr(ib)}")
+                if ub:
+                    lines.append(f"#UB 0 {konto} {_kr(ub)}")
+            else:             # result accounts -> #RES (net change over the year)
+                res = _account_balance(conn, konto, start=fiscal_year_start, end=fiscal_year_end)
+                if res:
+                    lines.append(f"#RES 0 {konto} {_kr(res)}")
 
     # Verifikationer (#VER) with their postings (#TRANS), posted only, in order.
     vers = conn.execute(
@@ -95,6 +112,22 @@ def export_sie(conn: sqlite3.Connection, *, company_name: str = "",
         lines.append("}")
 
     return "\n".join(lines) + "\n"
+
+
+def _account_balance(conn: sqlite3.Connection, konto: int, *, start: str | None = None,
+                     end: str | None = None, end_exclusive: bool = False) -> int:
+    """Signed öre balance (debit positive) of postings to an account over a date range."""
+    q = ("SELECT COALESCE(SUM(p.amount_ore), 0) FROM posting p "
+         "JOIN verifikation v ON v.id = p.verifikation_id "
+         "WHERE p.bas_konto = ? AND v.posted = 1")
+    params: list = [konto]
+    if start:
+        q += " AND v.ver_date >= ?"
+        params.append(start)
+    if end:
+        q += " AND v.ver_date < ?" if end_exclusive else " AND v.ver_date <= ?"
+        params.append(end)
+    return conn.execute(q, params).fetchone()[0]
 
 
 def export_sie_bytes(conn: sqlite3.Connection, **kwargs) -> bytes:

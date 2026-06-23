@@ -152,13 +152,17 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       category↔BAS, rut_claim, period_lock, rättelse via `verifikation.rattelse_of`),
       DB-level immutability triggers, personnummer Luhn + money (öre) helpers.
       DONE, all tests pass. NOTE: money stored as integer ören everywhere; the
-      RUT/ROT cap is editable config (default 75 000 kr — VERIFY vs Skatteverket).
+      RUT/ROT cap is editable config (default 75 000 kr — VERIFIED 2026-06: combined
+      ROT+RUT cap is 75 000 kr/person/year).
 - [x] **Layer 4 — Core operations** (`db/operations.py`) + tests (`tests/test_operations.py`).
       Reference CRUD, kontantmetod pending→paid booking with balanced double-entry +
       unbroken verifikationsnummer, RUT state machine (2 verifikationer), rättelse via
-      mirror postings, snapshot-on-invoice, period-lock enforcement. DONE, all tests pass.
-      NOTE: all system BAS-konton are config (account_bank/ingaende_moms/utgaende_moms_*
-      /rut_fordran) — verify `account_rut_fordran` (default 1513) with a revisor.
+      mirror postings, snapshot-on-invoice, period-lock enforcement. Also: year-end
+      accrual of unpaid invoices (`book_year_end_accruals`, bokslut vändning — accrual
+      on year-end + auto-reversal on Jan 1, so income+moms land in the closing year and
+      the later cash payment isn't double-counted). DONE, all tests pass. NOTE: all
+      system BAS-konton are config; `account_rut_fordran` (1513) VERIFIED 2026-06,
+      kundfordran/leverantörsskuld (1510/2440) added for accruals.
 - [x] **Layer 5 — Export/import** (`db/bundle.py`) + tests (`tests/test_bundle.py`).
       `.buyn` zip bundle (manifest + db snapshot via backup API + wrapped-DEK envelope
       + optional `<db>.photos/`), SHA-256 per-file checksums, schema-version gate,
@@ -167,10 +171,10 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
 - [x] **Layer 6 — Reports** (`reports/vat.py`, `reports/result.py`, `reports/sie.py`)
       + tests (`tests/test_reports.py`). Momsdeklaration (boxes 05/10/11/12/48/49),
       result/NE building block (income/expense/result by category), SIE type-4 export
-      (#KONTO + #VER/#TRANS, cp437/PC8). All filter on verifikation date of posted
-      entries (kontantmetod). DONE, all tests pass. NOTE: rättelse not yet netted in
-      the moms_line aggregation (period locking guards the filed-then-correct flow);
-      SIE omits #IB/#UB/#RES until year-end closing exists.
+      (#KONTO + #VER/#TRANS, cp437/PC8; #IB/#UB/#RES emitted when a fiscal year is
+      given). All filter on verifikation date of posted entries (kontantmetod). DONE,
+      all tests pass. Rättelse and year-end accruals are netted in the moms/result
+      reports via mirrored moms_lines (see Layer 4).
 - [x] **Layer 7 — FastAPI API layer** (`api/app.py`, `api/schemas.py`) + tests
       (`tests/test_api.py`). create_app factory over DatabaseManager; per-DB unlock/
       lock endpoints, auto-lock (on-access check + background sweeper, default 15 min),

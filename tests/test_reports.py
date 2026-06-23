@@ -153,3 +153,13 @@ class TestSieExport:
                           "2026-02-10")  # pending -> no verifikation
         text = sie_mod.export_sie(ops.conn)
         assert "#VER" not in text
+
+    def test_fiscal_year_emits_balances(self, ops):
+        _sale(ops, 1250, "2026-02-10")  # bank +12.50, income -10.00, moms -2.50
+        text = sie_mod.export_sie(ops.conn, company_name="Min Firma",
+                                  fiscal_year_start="2026-01-01", fiscal_year_end="2026-12-31")
+        assert "#RAR 0 20260101 20261231" in text
+        assert "#UB 0 1930 12.50" in text     # closing bank balance (balance sheet)
+        assert "#RES 0 3001 -10.00" in text   # revenue result (credit balance, negative)
+        # nothing booked before the year -> no opening balances
+        assert "#IB 0" not in text

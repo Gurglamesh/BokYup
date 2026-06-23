@@ -301,6 +301,10 @@ def _build_router():
     def lock_period(body: sc.PeriodLockReq, ops: BookOps = Depends(_ops)):
         return {"id": ops.lock_period(body.period_start, body.period_end, body.kind)}
 
+    @r.post("/books/{book_id}/year-end-accruals", status_code=201)
+    def year_end_accruals(body: sc.YearEndAccrualReq, ops: BookOps = Depends(_ops)):
+        return ops.book_year_end_accruals(body.fiscal_year_end)
+
     @r.get("/books/{book_id}/verifikationer")
     def list_verifikationer(ops: BookOps = Depends(_ops)):
         return _rows(ops.conn,
@@ -323,8 +327,13 @@ def _build_router():
         return result_report.result_report(ops.conn, start, end)
 
     @r.get("/books/{book_id}/reports/sie", response_class=PlainTextResponse)
-    def report_sie(ops: BookOps = Depends(_ops), company_name: str = "", org_nr: str = ""):
-        return sie_report.export_sie(ops.conn, company_name=company_name, org_nr=org_nr)
+    def report_sie(ops: BookOps = Depends(_ops), company_name: str = "", org_nr: str = "",
+                   fiscal_year_start: str = "", fiscal_year_end: str = ""):
+        return sie_report.export_sie(
+            ops.conn, company_name=company_name, org_nr=org_nr,
+            fiscal_year_start=fiscal_year_start or None,
+            fiscal_year_end=fiscal_year_end or None,
+        )
 
     return r
 

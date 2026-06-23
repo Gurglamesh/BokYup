@@ -76,6 +76,8 @@ _SYS_ACCOUNT_NAMES = {
     "account_utgaende_moms_12": "Utgående moms 12 %",
     "account_utgaende_moms_6": "Utgående moms 6 %",
     "account_rut_fordran": "Kundfordran husavdrag (RUT/ROT)",
+    "account_kundfordran": "Kundfordringar",
+    "account_leverantorsskuld": "Leverantörsskulder",
 }
 
 _UTG_MOMS_KEY = {
@@ -451,13 +453,84 @@ class BookOps:
         mirror = [(p["bas_konto"], -p["amount_ore"], f"rättelse: {p['text'] or ''}".strip())
                   for p in orig_postings]
 
+        ver_date = reg_date or _now()[:10]
         text = f"Rättelse av ver {original['series']}{original['ver_number']}: {reason}"
         with self.conn:
             vid, number = self._post_verifikation(
-                reg_date or _now()[:10], _now()[:10], text, mirror,
-                rattelse_of=verifikation_id,
+                ver_date, _now()[:10], text, mirror, rattelse_of=verifikation_id,
             )
+            # If the reversed verifikation was a transaktion's booking, also mirror
+            # its moms_lines (negated) so the momsdeklaration and result report net
+            # the correction in the rättelse's period.
+            src = self.conn.execute(
+                "SELECT id FROM transaktion WHERE verifikation_id=?", (verifikation_id,)
+            ).fetchone()
+            if src:
+                self._clone_transaktion_for_report(src["id"], vid, ver_date, -1, "rättelse")
         return {"verifikation_id": vid, "ver_number": number}
+
+    # ==================================================================
+    # Year-end accrual (bokslut) — kontantmetod must book unpaid invoices
+    # ==================================================================
+
+    def book_year_end_accruals(self, fiscal_year_end: str) -> dict:
+        """
+        Book all still-unpaid (pending) invoices dated on/before `fiscal_year_end`
+        into that fiscal year, as required at bokslut even under kontantmetod.
+
+        Uses the standard *vändning* method: an accrual verifikation on the last
+        day of the year (kundfordran/leverantörsskuld + income/expense + moms) and
+        an automatic reversal on the first day of the next year. The original
+        pending invoice is left untouched and books normally (cash) when actually
+        paid, so nothing is double-counted — while the income and the moms still
+        land in the correct (closing) year. Returns a summary of what was booked.
+        """
+        from datetime import date, timedelta
+
+        y, m, d = (int(x) for x in fiscal_year_end.split("-"))
+        next_day = (date(y, m, d) + timedelta(days=1)).isoformat()
+
+        pending = self.conn.execute(
+            "SELECT * FROM transaktion WHERE status='pending' AND verifikation_id IS NULL "
+            "AND trans_date <= ? ORDER BY id",
+            (fiscal_year_end,),
+        ).fetchall()
+
+        booked = []
+        for t in pending:
+            ex, moms_by_rate, inc = self._sum_moms(t["id"])
+            sum_moms = sum(moms_by_rate.values())
+            konto = self._category_konto(t["category_id"])
+
+            if t["direction"] == "out":
+                postings = [(self._sys_account("account_kundfordran"), inc, "kundfordran"),
+                            (konto, -ex, "försäljning")]
+                for rate_code, mm in moms_by_rate.items():
+                    if mm and rate_code in _UTG_MOMS_KEY:
+                        postings.append((self._sys_account(_UTG_MOMS_KEY[rate_code]), -mm,
+                                         f"utgående moms {rate_code}%"))
+            else:
+                postings = [(konto, ex, "utgift")]
+                if sum_moms:
+                    postings.append((self._sys_account("account_ingaende_moms"), sum_moms, "ingående moms"))
+                postings.append((self._sys_account("account_leverantorsskuld"), -inc, "leverantörsskuld"))
+
+            reversal = [(k, -a, f"återföring: {txt}") for (k, a, txt) in postings]
+
+            with self.conn:
+                avid, anum = self._post_verifikation(
+                    fiscal_year_end, fiscal_year_end,
+                    f"Periodisering bokslut (transaktion {t['id']})", postings)
+                self._clone_transaktion_for_report(t["id"], avid, fiscal_year_end, 1, "periodisering")
+
+                rvid, rnum = self._post_verifikation(
+                    next_day, next_day,
+                    f"Återföring periodisering (transaktion {t['id']})", reversal)
+                self._clone_transaktion_for_report(t["id"], rvid, next_day, -1, "återföring")
+
+            booked.append({"transaktion_id": t["id"], "accrual_ver": anum, "reversal_ver": rnum})
+
+        return {"count": len(booked), "fiscal_year_end": fiscal_year_end, "accruals": booked}
 
     # ==================================================================
     # Period locking
@@ -511,6 +584,40 @@ class BookOps:
         if row is None:
             raise KeyError(f"No category {category_id}")
         return row["bas_konto"]
+
+    def _clone_transaktion_for_report(self, src_transaktion_id: int, new_ver_id: int,
+                                      ver_date: str, sign: int, note: str) -> Optional[int]:
+        """
+        Create a synthetic transaktion (linked to new_ver_id) carrying sign-scaled
+        copies of src's moms_lines, so the moms/result reports attribute the
+        correction/accrual to new_ver_id's period. MUST run inside `with self.conn`.
+        """
+        src = self.conn.execute(
+            "SELECT direction, category_id, supplier_id, customer_id FROM transaktion WHERE id=?",
+            (src_transaktion_id,),
+        ).fetchone()
+        lines = self.conn.execute(
+            "SELECT rate_code, ex_moms_ore, moms_ore, inc_moms_ore FROM moms_line "
+            "WHERE transaktion_id=?", (src_transaktion_id,),
+        ).fetchall()
+        if src is None or not lines:
+            return None
+        cur = self.conn.execute(
+            "INSERT INTO transaktion(direction, category_id, supplier_id, customer_id, "
+            "trans_date, status, verifikation_id, note, created_at) "
+            "VALUES (?,?,?,?,?, 'paid', ?, ?, ?)",
+            (src["direction"], src["category_id"], src["supplier_id"], src["customer_id"],
+             ver_date, new_ver_id, note, _now()),
+        )
+        rid = cur.lastrowid
+        for ln in lines:
+            self.conn.execute(
+                "INSERT INTO moms_line(transaktion_id, rate_code, ex_moms_ore, moms_ore, inc_moms_ore) "
+                "VALUES (?,?,?,?,?)",
+                (rid, ln["rate_code"], sign * ln["ex_moms_ore"],
+                 sign * ln["moms_ore"], sign * ln["inc_moms_ore"]),
+            )
+        return rid
 
     def _insert_transaktion(self, *, direction, category_id, supplier_id, customer_id,
                             trans_date, note, receipt_original_format, snapshot_enc) -> int:
