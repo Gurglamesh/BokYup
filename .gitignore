@@ -6,3 +6,6 @@ venv/
 *.db
 data/
 .DS_Store
+
+# local demo/run data
+.run-data/

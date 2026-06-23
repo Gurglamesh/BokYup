@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "bokforing",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-c",
+        "import uvicorn; from backend.api import create_app; uvicorn.run(create_app(app_dir='.run-data'), host='127.0.0.1', port=8799)"
+      ],
+      "port": 8799
+    }
+  ]
+}
