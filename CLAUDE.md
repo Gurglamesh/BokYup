@@ -164,7 +164,13 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       + optional `<db>.photos/`), SHA-256 per-file checksums, schema-version gate,
       full-restore/replace with auto-backup-before-overwrite. Doubles as encrypted
       backup. Wired into DatabaseManager.export_book/import_book. DONE, all tests pass.
-- [ ] Layer 6 — Reports (momsdeklaration → simplified deklaration → SIE).
+- [x] **Layer 6 — Reports** (`reports/vat.py`, `reports/result.py`, `reports/sie.py`)
+      + tests (`tests/test_reports.py`). Momsdeklaration (boxes 05/10/11/12/48/49),
+      result/NE building block (income/expense/result by category), SIE type-4 export
+      (#KONTO + #VER/#TRANS, cp437/PC8). All filter on verifikation date of posted
+      entries (kontantmetod). DONE, all tests pass. NOTE: rättelse not yet netted in
+      the moms_line aggregation (period locking guards the filed-then-correct flow);
+      SIE omits #IB/#UB/#RES until year-end closing exists.
 - [ ] Layer 7 — FastAPI API layer over the above.
 - [ ] Layer 8 — Web frontend (tabbed UI), served via pywebview for desktop.
 - [ ] Later — phone wrappers (Android/iOS) against the same API; camera receipt capture.
