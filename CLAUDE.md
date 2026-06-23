@@ -159,7 +159,11 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       mirror postings, snapshot-on-invoice, period-lock enforcement. DONE, all tests pass.
       NOTE: all system BAS-konton are config (account_bank/ingaende_moms/utgaende_moms_*
       /rut_fordran) — verify `account_rut_fordran` (default 1513) with a revisor.
-- [ ] Layer 5 — Export/import (.buyn bundle, full-restore, checksum, schema version).
+- [x] **Layer 5 — Export/import** (`db/bundle.py`) + tests (`tests/test_bundle.py`).
+      `.buyn` zip bundle (manifest + db snapshot via backup API + wrapped-DEK envelope
+      + optional `<db>.photos/`), SHA-256 per-file checksums, schema-version gate,
+      full-restore/replace with auto-backup-before-overwrite. Doubles as encrypted
+      backup. Wired into DatabaseManager.export_book/import_book. DONE, all tests pass.
 - [ ] Layer 6 — Reports (momsdeklaration → simplified deklaration → SIE).
 - [ ] Layer 7 — FastAPI API layer over the above.
 - [ ] Layer 8 — Web frontend (tabbed UI), served via pywebview for desktop.

@@ -368,6 +368,40 @@ class DatabaseManager:
         self._registry[book_id].display_name = new_name
         self._save_registry()
 
+    # ------------------------------------------------------------------
+    # Export / import (Layer 5 — `.buyn` bundle, doubles as backup)
+    # ------------------------------------------------------------------
+
+    def export_book(self, book_id: str, out_path: str | Path) -> Path:
+        """Export a registered book to a `.buyn` bundle. Works while locked."""
+        from backend.db import bundle  # local import avoids a circular dependency
+
+        record = self._registry[book_id]
+        _assert_files_exist(record)
+        return bundle.export(record.db_path, out_path, display_name=record.display_name)
+
+    def import_book(self, bundle_path: str | Path, dest_db_path: str | Path, *,
+                    display_name: Optional[str] = None, overwrite: bool = False) -> BookRecord:
+        """
+        Restore a `.buyn` bundle to dest_db_path (full replace) and register it.
+
+        Auto-backs-up any existing database at the destination first. If a book at
+        that path is currently open, it is locked before being overwritten.
+        """
+        from backend.db import bundle  # local import avoids a circular dependency
+
+        dest_db_path = str(Path(dest_db_path).resolve())
+        for bid, rec in self._registry.items():
+            if rec.db_path == dest_db_path:
+                self.lock_book(bid)  # release file handles before overwrite
+
+        result = bundle.import_(bundle_path, dest_db_path, overwrite=overwrite)
+        name = display_name or result["manifest"].get("display_name") or Path(dest_db_path).stem
+        record = self.register_existing(name, dest_db_path)
+        if display_name:
+            self.rename_book(record.id, display_name)
+        return record
+
 
 # ---------------------------------------------------------------------------
 # Private helpers
