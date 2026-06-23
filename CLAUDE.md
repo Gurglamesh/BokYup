@@ -171,7 +171,12 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       entries (kontantmetod). DONE, all tests pass. NOTE: rättelse not yet netted in
       the moms_line aggregation (period locking guards the filed-then-correct flow);
       SIE omits #IB/#UB/#RES until year-end closing exists.
-- [ ] Layer 7 — FastAPI API layer over the above.
+- [x] **Layer 7 — FastAPI API layer** (`api/app.py`, `api/schemas.py`) + tests
+      (`tests/test_api.py`). create_app factory over DatabaseManager; per-DB unlock/
+      lock endpoints, auto-lock (on-access check + background sweeper, default 15 min),
+      reference + bookkeeping + reports + export/import routes, domain→HTTP error
+      mapping (401/404/409/423). DONE, all tests pass. NOTE: localhost single-user
+      backend — db/bundle paths in requests are trusted; do not expose on a network.
 - [ ] Layer 8 — Web frontend (tabbed UI), served via pywebview for desktop.
 - [ ] Later — phone wrappers (Android/iOS) against the same API; camera receipt capture.
 
