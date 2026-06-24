@@ -62,7 +62,7 @@ def main() -> None:  # pragma: no cover - requires a display + pywebview
 
     base = f"http://{HOST}:{port}"
     _wait_until_up(base + "/")
-    webview.create_window("Bokföring", base + APP_PATH, width=1100, height=760, min_size=(820, 560))
+    webview.create_window("BokYup", base + APP_PATH, width=1100, height=760, min_size=(820, 560))
     webview.start()
 
 

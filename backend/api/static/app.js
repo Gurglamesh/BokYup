@@ -1,6 +1,6 @@
 "use strict";
 /*
- * app.js — Bokföring web frontend (Layer 8).
+ * app.js — BokYup web frontend (Layer 8).
  *
  * Vanilla JS, no build step (CLAUDE.md: the universal UI layer, pure-pip stack).
  * Talks to the FastAPI backend on the same origin. Multi-book "tabs": the list of

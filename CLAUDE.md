@@ -1,4 +1,4 @@
-# Bokföring — Swedish bookkeeping application
+# BokYup — Swedish bookkeeping application
 
 A legal-grade bookkeeping (bokföring) application for Swedish small businesses.
 Built to support **multiple separate legal entities** (e.g. an enskild firma and an

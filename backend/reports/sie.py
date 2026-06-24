@@ -47,7 +47,7 @@ def _q(text: str | None) -> str:
 def export_sie(conn: sqlite3.Connection, *, company_name: str = "",
                org_nr: str = "", fiscal_year_start: str | None = None,
                fiscal_year_end: str | None = None,
-               program: str = "Bokföring") -> str:
+               program: str = "BokYup") -> str:
     """
     Build a SIE type 4 export string from the chart of accounts and all posted
     verifikationer. Postings are emitted in kronor (debit positive).

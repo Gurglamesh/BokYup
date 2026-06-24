@@ -26,12 +26,12 @@ class TestStaticUI:
     def test_index_served(self, client):
         resp = client.get("/app/")
         assert resp.status_code == 200
-        assert "<title>Bokföring</title>" in resp.text
+        assert "<title>BokYup</title>" in resp.text
 
     def test_app_js_served(self, client):
         resp = client.get("/app/app.js")
         assert resp.status_code == 200
-        assert "Bokföring web frontend" in resp.text
+        assert "BokYup web frontend" in resp.text
 
     def test_styles_served(self, client):
         resp = client.get("/app/styles.css")
@@ -40,7 +40,7 @@ class TestStaticUI:
 
     def test_api_still_at_root(self, client):
         # Mounting the UI at /app must not shadow the API routes.
-        assert client.get("/").json()["name"] == "Bokföring API"
+        assert client.get("/").json()["name"] == "BokYup API"
         assert client.get("/books").status_code == 200
 
     def test_ui_can_be_disabled(self, tmp_path):

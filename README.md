@@ -1,4 +1,4 @@
-# Bokföring
+# BokYup
 
 Legal-grade Swedish bookkeeping for multiple separate entities, each an encrypted
 database you switch between like browser tabs. Pure-Python, OS-agnostic, built so the

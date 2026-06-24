@@ -49,7 +49,7 @@ def book(client, tmp_path):
 
 class TestBooksLifecycle:
     def test_root(self, client):
-        assert client.get("/").json()["name"] == "Bokföring API"
+        assert client.get("/").json()["name"] == "BokYup API"
 
     def test_create_and_list(self, client, book):
         books = client.get("/books").json()

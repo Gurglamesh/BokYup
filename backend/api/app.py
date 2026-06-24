@@ -88,7 +88,7 @@ def create_app(app_dir: str | Path | None = None,
         finally:
             task.cancel()
 
-    app = FastAPI(title="Bokföring API", version=APP_VERSION, lifespan=lifespan)
+    app = FastAPI(title="BokYup API", version=APP_VERSION, lifespan=lifespan)
     app.state.manager = DatabaseManager(Path(app_dir)) if app_dir else DatabaseManager()
     app.state.autolock_seconds = autolock_seconds
     app.state.sweep_interval = sweep_interval
@@ -156,7 +156,7 @@ def _build_router():
     # ---- meta ----
     @r.get("/")
     def root():
-        return {"name": "Bokföring API", "version": APP_VERSION}
+        return {"name": "BokYup API", "version": APP_VERSION}
 
     # ---- books / registry ----
     @r.get("/books")
