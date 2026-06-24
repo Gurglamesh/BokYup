@@ -103,7 +103,7 @@ table { width: 100%; border-collapse: collapse; font-size: .92rem; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
 th { color: var(--muted); font-weight: 600; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-.pill { padding: 2px 9px; border-radius: 999px; font-size: .78rem; }
+.pill { padding: 2px 9px; border-radius: 999px; font-size: .78rem; background: #e7ebf0; color: #4a5562; }
 .pill.pending { background: #fdf0d5; color: #8a6d1a; }
 .pill.paid { background: #d9f2e4; color: #1f6f54; }
 

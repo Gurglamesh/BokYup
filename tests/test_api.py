@@ -189,6 +189,32 @@ class TestBookkeeping:
         assert resp.status_code == 201
         assert resp.json()["count"] == 1
 
+    def test_rut_claims_listing_and_skatteverket_payment(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Städning", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "private", "first_name": "Anna",
+                                "personnummer": "811218-9876"}).json()["kundnummer"]
+        res = client.post(f"/books/{book}/incomes",
+                          json={"customer_id": kid, "category_id": cat,
+                                "lines": [{"rate_code": "25", "amount_ore": 10000}],
+                                "trans_date": "2026-02-10", "paid_date": "2026-02-10",
+                                "rut_amount_ore": 5000}).json()
+        claim_id = res["rut_claim_id"]
+
+        # listed and advanced to 'customer_paid' by the booked customer payment
+        claims = client.get(f"/books/{book}/rut-claims").json()
+        assert len(claims) == 1
+        assert claims[0]["id"] == claim_id
+        assert claims[0]["state"] == "customer_paid"
+
+        pay = client.post(f"/books/{book}/rut/{claim_id}/skatteverket-payment",
+                          json={"payment_date": "2026-04-01"})
+        assert pay.status_code == 200
+        claims = client.get(f"/books/{book}/rut-claims").json()
+        assert claims[0]["state"] == "skatteverket_paid"
+        assert claims[0]["skatteverket_payment_date"] == "2026-04-01"
+
 
 # ---------------------------------------------------------------------------
 # Reports

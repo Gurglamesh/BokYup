@@ -202,7 +202,10 @@ const SECTIONS = [
   ["customers", "Kunder"],
   ["suppliers", "Leverantörer"],
   ["categories", "Kategorier"],
+  ["rut", "RUT"],
+  ["verifikat", "Verifikat"],
   ["reports", "Rapporter"],
+  ["bokslut", "Bokslut"],
 ];
 
 function renderWorkspace() {
@@ -305,20 +308,27 @@ const SECTION_RENDERERS = {
     async function submit() {
       const lines = [{ rate_code: rate.value, amount_ore: toOre(amount.value), inclusive: true }];
       const paid_date = paidNow.value === "yes" ? date.value : null;
+      let warn = null;
       if (kind.value === "income") {
-        await api("POST", `/books/${bid()}/incomes`, {
+        const res = await api("POST", `/books/${bid()}/incomes`, {
           customer_id: parseInt(counter.value, 10), category_id: parseInt(cat.value, 10),
           lines, trans_date: date.value, rut_amount_ore: toOre(rut.value) || 0, paid_date,
         });
+        const cap = res && res.rut_cap;
+        if (cap && cap.over_cap) {
+          warn = `Bokfört — VARNING: RUT-taket överskridet (${toKr(cap.used_ore)} av ${toKr(cap.cap_ore)} kr)`;
+        } else if (cap && cap.near_cap) {
+          warn = `Bokfört — OBS: nära RUT-taket (${toKr(cap.used_ore)} av ${toKr(cap.cap_ore)} kr)`;
+        }
       } else {
         await api("POST", `/books/${bid()}/expenses`, {
           supplier_id: counter.value ? parseInt(counter.value, 10) : null,
           category_id: parseInt(cat.value, 10), lines, trans_date: date.value, paid_date,
         });
       }
-      toast("Bokfört");
       state.section = "transactions";
       renderWorkspace();
+      toast(warn || "Bokfört", Boolean(warn));
     }
   },
 
@@ -364,10 +374,25 @@ const SECTION_RENDERERS = {
       wrap("Från", start), wrap("Till", end),
       el("div", { style: "align-self:flex-end" },
         el("button", { class: "btn", onclick: () => guard(run) }, "Momsdeklaration")),
+    ));
+    panel.appendChild(out);
+
+    // ---- SIE export (with optional company/org and fiscal year for balances) ----
+    panel.appendChild(el("h3", { style: "margin-top:26px" }, "SIE-export"));
+    panel.appendChild(el("p", { class: "muted" },
+      "Företagsnamn och org.nr skrivs i filhuvudet. Anges ett räkenskapsår tas även "
+      + "ingående/utgående balanser och resultat med (#IB/#UB/#RES)."));
+    const company = el("input", { type: "text", value: state.activeBook.display_name || "" });
+    const orgnr = el("input", { type: "text", value: "" });
+    const fyStart = el("input", { type: "date", value: "" });
+    const fyEnd = el("input", { type: "date", value: "" });
+    panel.appendChild(el("div", { class: "row" },
+      wrap("Företagsnamn", company), wrap("Org.nr", orgnr)));
+    panel.appendChild(el("div", { class: "row" },
+      wrap("Räkenskapsår från (valfritt)", fyStart), wrap("Till (valfritt)", fyEnd),
       el("div", { style: "align-self:flex-end" },
         el("button", { class: "btn ghost", onclick: () => guard(sie) }, "Exportera SIE")),
     ));
-    panel.appendChild(out);
 
     async function run() {
       const rep = await api("GET", `/books/${bid()}/reports/momsdeklaration?start=${start.value}&end=${end.value}`);
@@ -381,11 +406,126 @@ const SECTION_RENDERERS = {
           el("div", { class: "v" }, toKr(rep.boxes[k]) + " kr")))));
     }
     async function sie() {
-      const text = await api("GET", `/books/${bid()}/reports/sie`);
+      const q = new URLSearchParams();
+      if (company.value) q.set("company_name", company.value);
+      if (orgnr.value) q.set("org_nr", orgnr.value);
+      if (fyStart.value) q.set("fiscal_year_start", fyStart.value);
+      if (fyEnd.value) q.set("fiscal_year_end", fyEnd.value);
+      const text = await api("GET", `/books/${bid()}/reports/sie?${q.toString()}`);
       const blob = new Blob([text], { type: "text/plain" });
       const a = el("a", { href: URL.createObjectURL(blob), download: "bokforing.se" });
       document.body.appendChild(a); a.click(); a.remove();
       toast("SIE-fil nedladdad");
+    }
+  },
+
+  // ----- RUT (husavdrag) -----
+  async rut(panel) {
+    const [claims, customers] = await Promise.all([
+      api("GET", `/books/${bid()}/rut-claims`),
+      api("GET", `/books/${bid()}/customers`),
+    ]);
+    const custName = Object.fromEntries(customers.map((c) =>
+      [c.kundnummer, c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer)]));
+    const STATE_LABEL = {
+      pending: "Väntar på kund", customer_paid: "Kund betald", skatteverket_paid: "Skatteverket betald",
+    };
+    panel.appendChild(el("h2", {}, "RUT-avdrag (husavdrag)"));
+    panel.appendChild(el("p", { class: "muted" },
+      "Livscykel: väntar → kund betald → Skatteverket betald. Bokför Skatteverkets "
+      + "utbetalning när husavdraget kommit in (egen verifikation)."));
+    if (claims.length === 0) {
+      panel.appendChild(el("p", { class: "muted" }, "Inga RUT-ärenden ännu."));
+      return;
+    }
+    const rows = claims.map((c) => el("tr", {},
+      el("td", {}, String(c.id)),
+      el("td", {}, custName[c.customer_id] || ("Kund " + c.customer_id)),
+      el("td", { class: "num" }, toKr(c.rut_amount_ore) + " kr"),
+      el("td", {}, el("span", { class: "pill " + (c.state === "skatteverket_paid" ? "paid" : c.state === "customer_paid" ? "" : "pending") },
+        STATE_LABEL[c.state] || c.state)),
+      el("td", {}, c.customer_payment_date || "—"),
+      el("td", {}, c.skatteverket_payment_date || "—"),
+      el("td", { class: "num" }, c.state === "customer_paid"
+        ? el("button", { class: "btn small", onclick: () => guard(() => rutSkvPayFlow(c.id)) }, "Bokför SKV-utbetalning")
+        : ""),
+    ));
+    panel.appendChild(el("table", {},
+      el("thead", {}, el("tr", {},
+        el("th", {}, "Nr"), el("th", {}, "Kund"), el("th", { class: "num" }, "Belopp"),
+        el("th", {}, "Status"), el("th", {}, "Kund betald"), el("th", {}, "SKV betald"), el("th", {}, ""))),
+      el("tbody", {}, rows),
+    ));
+  },
+
+  // ----- verifikat (the legal ledger; reverse = rättelse) -----
+  async verifikat(panel) {
+    const vers = await api("GET", `/books/${bid()}/verifikationer`);
+    panel.appendChild(el("h2", {}, "Verifikationer"));
+    panel.appendChild(el("p", { class: "muted" },
+      "Bokförda verifikationer kan inte ändras eller raderas. Fel rättas med en "
+      + "rättelse (en ny verifikation som speglar den ursprungliga)."));
+    if (vers.length === 0) {
+      panel.appendChild(el("p", { class: "muted" }, "Inga verifikationer ännu."));
+      return;
+    }
+    const rows = vers.map((v) => el("tr", {},
+      el("td", { class: "num" }, `${v.series}${v.ver_number}`),
+      el("td", {}, v.ver_date),
+      el("td", {}, v.text || ""),
+      el("td", {}, v.rattelse_of ? el("span", { class: "pill" }, "rättelse av ver " + v.rattelse_of) : ""),
+      el("td", { class: "num" }, (v.posted && !v.rattelse_of)
+        ? el("button", { class: "btn small", onclick: () => guard(() => reverseFlow(v.id, `${v.series}${v.ver_number}`)) }, "Rätta")
+        : ""),
+    ));
+    panel.appendChild(el("table", {},
+      el("thead", {}, el("tr", {},
+        el("th", { class: "num" }, "Ver"), el("th", {}, "Datum"), el("th", {}, "Text"),
+        el("th", {}, ""), el("th", {}, ""))),
+      el("tbody", {}, rows),
+    ));
+  },
+
+  // ----- bokslut (period locking + year-end accruals) -----
+  async bokslut(panel) {
+    panel.appendChild(el("h2", {}, "Bokslut & perioder"));
+
+    // Period locking
+    panel.appendChild(el("h3", {}, "Lås period"));
+    panel.appendChild(el("p", { class: "muted" },
+      "När en momsdeklaration är inlämnad: lås perioden så inget kan bakdateras in i den."));
+    const lockStart = el("input", { type: "date", value: "2026-01-01" });
+    const lockEnd = el("input", { type: "date", value: "2026-03-31" });
+    panel.appendChild(el("div", { class: "row" },
+      wrap("Från", lockStart), wrap("Till", lockEnd),
+      el("div", { style: "align-self:flex-end" },
+        el("button", { class: "btn", onclick: () => guard(lockPeriod) }, "Lås period")),
+    ));
+
+    // Year-end accruals
+    panel.appendChild(el("h3", { style: "margin-top:26px" }, "Årsbokslut — periodisera obetalda fakturor"));
+    panel.appendChild(el("p", { class: "muted" },
+      "Även med kontantmetod måste obetalda fakturor bokföras vid bokslut. Detta "
+      + "periodiserar dem på årets sista dag och återför automatiskt på nyårsdagen "
+      + "(vändning) så inget dubbelräknas när betalningen sedan kommer."));
+    const fyEnd = el("input", { type: "date", value: "2026-12-31" });
+    panel.appendChild(el("div", { class: "row" },
+      wrap("Räkenskapsårets sista dag", fyEnd),
+      el("div", { style: "align-self:flex-end" },
+        el("button", { class: "btn brand", onclick: () => guard(yearEnd) }, "Bokför periodiseringar")),
+    ));
+
+    async function lockPeriod() {
+      await api("POST", `/books/${bid()}/period-locks`, {
+        period_start: lockStart.value, period_end: lockEnd.value, kind: "moms",
+      });
+      toast(`Period ${lockStart.value} – ${lockEnd.value} låst`);
+    }
+    async function yearEnd() {
+      const res = await api("POST", `/books/${bid()}/year-end-accruals`, { fiscal_year_end: fyEnd.value });
+      toast(`${res.count} faktura(or) periodiserade`);
+      state.section = "verifikat";
+      renderWorkspace();
     }
   },
 };
@@ -400,6 +540,28 @@ async function payFlow(txId) {
   if (!f) return;
   await api("POST", `/books/${bid()}/transaktioner/${txId}/pay`, { payment_date: f.payment_date });
   toast("Betalning bokförd");
+  renderWorkspace();
+}
+
+async function rutSkvPayFlow(claimId) {
+  const f = await modal("Bokför Skatteverkets utbetalning", [
+    { name: "payment_date", label: "Utbetalningsdatum", type: "date", value: new Date().toISOString().slice(0, 10) },
+  ], "Bokför");
+  if (!f) return;
+  await api("POST", `/books/${bid()}/rut/${claimId}/skatteverket-payment`, { payment_date: f.payment_date });
+  toast("Husavdrag bokfört");
+  renderWorkspace();
+}
+
+async function reverseFlow(verId, verLabel) {
+  const f = await modal(`Rätta verifikation ${verLabel}`, [
+    { name: "reason", label: "Orsak till rättelse" },
+    { name: "reg_date", label: "Bokföringsdatum", type: "date", value: new Date().toISOString().slice(0, 10) },
+  ], "Skapa rättelse");
+  if (!f || !f.reason) { if (f) toast("Ange en orsak", true); return; }
+  const res = await api("POST", `/books/${bid()}/verifikationer/${verId}/reverse`,
+                        { reason: f.reason, reg_date: f.reg_date });
+  toast(`Rättelse skapad (ver ${res.ver_number})`);
   renderWorkspace();
 }
 

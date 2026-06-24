@@ -187,6 +187,10 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       categories, momsdeklaration + SIE download), served at /app by the same FastAPI
       server; pywebview desktop launcher (`python -m backend.desktop`). DONE; JS
       `node --check`'d, server wiring tested, full stack live-smoke-tested.
+      UI surfacing (2026-06): added RUT section (claim lifecycle + Skatteverket-payment,
+      backed by new `GET /rut-claims`), Verifikat section (rättelse/reverse), Bokslut
+      section (period locking + year-end accruals), SIE export with company/org/fiscal
+      year, and the RUT-cap warning on record-income.
 - [ ] Later — phone wrappers (Android/iOS) against the same API; camera receipt capture.
 
 ## Working agreement

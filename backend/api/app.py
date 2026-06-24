@@ -293,6 +293,13 @@ def _build_router():
     def rut_cap(kundnummer: int, year: int, ops: BookOps = Depends(_ops)):
         return ops.rut_cap_status(kundnummer, year)
 
+    @r.get("/books/{book_id}/rut-claims")
+    def list_rut_claims(ops: BookOps = Depends(_ops)):
+        return _rows(ops.conn,
+                     "SELECT id, transaktion_id, customer_id, rut_amount_ore, state, "
+                     "customer_payment_date, skatteverket_payment_date, claim_year "
+                     "FROM rut_claim ORDER BY id")
+
     @r.post("/books/{book_id}/verifikationer/{verifikation_id}/reverse", status_code=201)
     def reverse_verifikation(verifikation_id: int, body: sc.ReverseReq, ops: BookOps = Depends(_ops)):
         return ops.reverse_verifikation(verifikation_id, body.reason, body.reg_date)

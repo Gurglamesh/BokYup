@@ -88,10 +88,20 @@ divergence. (As of this log: auto-push after each commit is the agreed default.)
 
 ## Suggested next steps (nothing is blocking)
 
-- **Surface backend features in the web UI** that are currently API-only:
-  RUT Skatteverket-payment, rättelse (reverse), period locking, year-end accruals,
-  and SIE export with a fiscal year (for #IB/#UB/#RES balances).
 - **Revisor sign-off** on the config account mappings before real filing.
 - **Phone wrapper** (Capacitor) against the same API + camera receipt capture.
 - Optional: richer transaction views/filtering; hide synthetic accrual/rättelse
   transaktioner from the default list (they carry `note` = periodisering/återföring/rättelse).
+
+### Done since the 8-layer build (UI surfacing, 2026-06)
+
+The previously API-only features now have web-UI front ends:
+
+- **RUT** section: lists claims with their lifecycle state; "Bokför SKV-utbetalning"
+  button on `customer_paid` claims (new `GET /books/{id}/rut-claims` endpoint backs it).
+  The record-income flow also surfaces the RUT/ROT cap `near_cap`/`over_cap` warning.
+- **Verifikat** section: lists the legal ledger; "Rätta" button posts a rättelse
+  (reverse) on posted, non-rättelse verifikationer.
+- **Bokslut** section: lock a period, and book year-end accruals (vändning).
+- **Reports**: SIE export now takes company name, org.nr and an optional fiscal year
+  (so #IB/#UB/#RES balances are emitted).
