@@ -29,6 +29,8 @@ from backend.core.crypto import (
     BadPassphrase,  # noqa: F401 — re-exported for callers
     CryptoError,    # noqa: F401
     KeyEnvelope,
+    add_recovery_key,
+    change_passphrase,
     create_envelope,
     decrypt_blob,
     decrypt_text,
@@ -296,6 +298,44 @@ class DatabaseManager:
         return session
 
     # ------------------------------------------------------------------
+    # Key management (re-wrap the same DEK — no bulk re-encryption)
+    # ------------------------------------------------------------------
+
+    def change_passphrase(self, book_id: str, old_passphrase: str,
+                          new_passphrase: str) -> None:
+        """
+        Re-wrap the DEK under a new passphrase. The recovery slot (if any) is kept.
+        Verifies the old passphrase (raises BadPassphrase on mismatch). Does not
+        touch any data — only the <db>.key envelope is rewritten.
+        """
+        record = self._registry[book_id]
+        _assert_files_exist(record)
+        envelope = _load_envelope(record)
+        new_envelope = change_passphrase(envelope, old_passphrase, new_passphrase)
+        _write_envelope(record, new_envelope)
+
+    def add_recovery_key(self, book_id: str, passphrase: str,
+                         recovery_key: Optional[str] = None) -> str:
+        """
+        Add (or replace) a recovery-key slot wrapping the same DEK and return the
+        recovery key. If `recovery_key` is None a strong random one is generated.
+        The user must store it OFFLINE — it can unlock the book if the passphrase
+        is forgotten (protecting a 7-year legal archive).
+        """
+        record = self._registry[book_id]
+        _assert_files_exist(record)
+        envelope = _load_envelope(record)
+        new_envelope, key = add_recovery_key(envelope, passphrase, recovery_key)
+        _write_envelope(record, new_envelope)
+        return key
+
+    def has_recovery_key(self, book_id: str) -> bool:
+        """Whether the book's envelope already carries a recovery slot."""
+        record = self._registry[book_id]
+        _assert_files_exist(record)
+        return any(slot.kind == "recovery" for slot in _load_envelope(record).slots)
+
+    # ------------------------------------------------------------------
     # Session access
     # ------------------------------------------------------------------
 
@@ -428,3 +468,11 @@ def _assert_files_exist(record: BookRecord) -> None:
 
 def _load_envelope(record: BookRecord) -> KeyEnvelope:
     return KeyEnvelope.from_json(Path(record.key_path).read_text(encoding="utf-8"))
+
+
+def _write_envelope(record: BookRecord, envelope: KeyEnvelope) -> None:
+    """Atomically replace the <db>.key envelope (write temp, then rename)."""
+    key_path = Path(record.key_path)
+    tmp = key_path.with_suffix(key_path.suffix + ".tmp")
+    tmp.write_text(envelope.to_json(), encoding="utf-8")
+    tmp.replace(key_path)

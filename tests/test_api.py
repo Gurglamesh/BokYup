@@ -280,6 +280,52 @@ class TestReceipts:
 
 
 # ---------------------------------------------------------------------------
+# Key management — change passphrase + recovery key
+# ---------------------------------------------------------------------------
+
+class TestKeyManagement:
+    def test_change_passphrase(self, client, book):
+        assert client.post(f"/books/{book}/change-passphrase",
+                           json={"old_passphrase": "correct-horse",
+                                 "new_passphrase": "brand-new-pass"}).status_code == 200
+        client.post(f"/books/{book}/lock")
+        # old passphrase no longer works, new one does
+        assert client.post(f"/books/{book}/unlock",
+                           json={"passphrase": "correct-horse"}).status_code == 401
+        assert client.post(f"/books/{book}/unlock",
+                           json={"passphrase": "brand-new-pass"}).status_code == 200
+
+    def test_wrong_old_passphrase_rejected_401(self, client, book):
+        resp = client.post(f"/books/{book}/change-passphrase",
+                           json={"old_passphrase": "nope", "new_passphrase": "x"})
+        assert resp.status_code == 401
+
+    def test_add_recovery_key_then_unlock_with_it(self, client, book):
+        assert client.get(f"/books/{book}/recovery-key").json()["has_recovery_key"] is False
+        rk = client.post(f"/books/{book}/recovery-key",
+                         json={"passphrase": "correct-horse"})
+        assert rk.status_code == 201
+        key = rk.json()["recovery_key"]
+        assert key and "-" in key
+        assert client.get(f"/books/{book}/recovery-key").json()["has_recovery_key"] is True
+
+        client.post(f"/books/{book}/lock")
+        # recovery key unlocks even if the passphrase is forgotten
+        assert client.post(f"/books/{book}/unlock-recovery",
+                           json={"recovery_key": key}).status_code == 200
+
+    def test_change_passphrase_keeps_recovery_key(self, client, book):
+        key = client.post(f"/books/{book}/recovery-key",
+                          json={"passphrase": "correct-horse"}).json()["recovery_key"]
+        client.post(f"/books/{book}/change-passphrase",
+                    json={"old_passphrase": "correct-horse", "new_passphrase": "p2"})
+        client.post(f"/books/{book}/lock")
+        # recovery slot survives a passphrase change
+        assert client.post(f"/books/{book}/unlock-recovery",
+                           json={"recovery_key": key}).status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # Reports
 # ---------------------------------------------------------------------------
 

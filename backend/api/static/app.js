@@ -236,6 +236,7 @@ const SECTIONS = [
   ["verifikat", "Verifikat"],
   ["reports", "Rapporter"],
   ["bokslut", "Bokslut"],
+  ["settings", "Inställningar"],
 ];
 
 function renderWorkspace() {
@@ -386,10 +387,11 @@ const SECTION_RENDERERS = {
     const list = await api("GET", `/books/${bid()}/customers`);
     panel.appendChild(headerWithAdd("Kunder", "+ Ny kund", () => guard(addCustomerFlow)));
     panel.appendChild(simpleTable(
-      ["Nr", "Typ", "Namn", "Org/Pers", "E-post"],
+      ["Nr", "Typ", "Namn", "Org/Pers", "E-post", ""],
       list.map((c) => [c.kundnummer, c.type,
         c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim(),
-        c.org_nr || "", c.email || ""]),
+        c.org_nr || "", c.email || "",
+        editBtn(() => guard(() => editCustomerFlow(c.kundnummer)))]),
     ));
   },
 
@@ -398,8 +400,9 @@ const SECTION_RENDERERS = {
     const list = await api("GET", `/books/${bid()}/suppliers`);
     panel.appendChild(headerWithAdd("Leverantörer", "+ Ny leverantör", () => guard(addSupplierFlow)));
     panel.appendChild(simpleTable(
-      ["Namn", "Moms", "Org.nr"],
-      list.map((s) => [s.name, s.default_moms_rate, s.org_nr || ""]),
+      ["Namn", "Moms", "Org.nr", ""],
+      list.map((s) => [s.name, s.default_moms_rate, s.org_nr || "",
+        editBtn(() => guard(() => editSupplierFlow(s)))]),
     ));
   },
 
@@ -408,8 +411,9 @@ const SECTION_RENDERERS = {
     const list = await api("GET", `/books/${bid()}/categories`);
     panel.appendChild(headerWithAdd("Kategorier", "+ Ny kategori", () => guard(addCategoryFlow)));
     panel.appendChild(simpleTable(
-      ["Namn", "Typ", "BAS-konto"],
-      list.map((c) => [c.name, c.kind === "income" ? "Inkomst" : "Utgift", c.bas_konto]),
+      ["Namn", "Typ", "BAS-konto", ""],
+      list.map((c) => [c.name, c.kind === "income" ? "Inkomst" : "Utgift", c.bas_konto,
+        editBtn(() => guard(() => editCategoryFlow(c)))]),
     ));
   },
 
@@ -575,6 +579,79 @@ const SECTION_RENDERERS = {
       toast(`${res.count} faktura(or) periodiserade`);
       state.section = "verifikat";
       renderWorkspace();
+    }
+  },
+
+  // ----- settings: security (passphrase / recovery key) + backup -----
+  async settings(panel) {
+    panel.appendChild(el("h2", {}, "Inställningar"));
+
+    // --- Change passphrase ---
+    panel.appendChild(el("h3", {}, "Byt lösenord"));
+    panel.appendChild(el("p", { class: "muted" },
+      "Byter lösenord utan att kryptera om data (samma nyckel pakas om). En "
+      + "återställningsnyckel påverkas inte."));
+    const oldP = el("input", { type: "password" });
+    const newP = el("input", { type: "password" });
+    const newP2 = el("input", { type: "password" });
+    panel.appendChild(el("div", { class: "row" },
+      wrap("Nuvarande lösenord", oldP), wrap("Nytt lösenord", newP), wrap("Bekräfta nytt", newP2)));
+    panel.appendChild(el("div", { style: "margin:6px 0 22px" },
+      el("button", { class: "btn", onclick: () => guard(changePass) }, "Byt lösenord")));
+
+    // --- Recovery key ---
+    panel.appendChild(el("h3", {}, "Återställningsnyckel"));
+    panel.appendChild(el("p", { class: "muted" },
+      "En offline-nyckel som kan låsa upp boken om lösenordet glöms bort — viktigt "
+      + "för ett 7-årigt arkiv. Skriv ut den och förvara säkert. Den visas bara nu."));
+    const rkStatus = el("div", { class: "muted" }, "Kontrollerar…");
+    const rkBox = el("div", {});
+    panel.appendChild(rkStatus);
+    panel.appendChild(el("div", { style: "margin:6px 0 22px" },
+      el("button", { class: "btn", onclick: () => guard(genRecovery) }, "Skapa/ersätt återställningsnyckel")));
+    panel.appendChild(rkBox);
+    api("GET", `/books/${bid()}/recovery-key`).then((s) => {
+      rkStatus.textContent = s.has_recovery_key
+        ? "✓ En återställningsnyckel finns redan."
+        : "Ingen återställningsnyckel ännu.";
+    });
+
+    // --- Backup / restore (.buyn) ---
+    panel.appendChild(el("h3", {}, "Säkerhetskopia (.buyn)"));
+    panel.appendChild(el("p", { class: "muted" },
+      "Exporterar hela boken (krypterad DB + kvitton) till en .buyn-fil. Samma fil "
+      + "importeras på en annan enhet med samma lösenord."));
+    const outPath = el("input", { type: "text", value: "" });
+    panel.appendChild(el("div", { class: "row" },
+      wrap("Sökväg att spara till (t.ex. C:\\backup\\firma.buyn)", outPath),
+      el("div", { style: "align-self:flex-end" },
+        el("button", { class: "btn", onclick: () => guard(doExport) }, "Exportera säkerhetskopia"))));
+
+    async function changePass() {
+      if (!oldP.value || !newP.value) { toast("Fyll i lösenorden", true); return; }
+      if (newP.value !== newP2.value) { toast("Nya lösenorden matchar inte", true); return; }
+      await api("POST", `/books/${bid()}/change-passphrase`,
+                { old_passphrase: oldP.value, new_passphrase: newP.value });
+      oldP.value = newP.value = newP2.value = "";
+      toast("Lösenord bytt");
+    }
+    async function genRecovery() {
+      const f = await modal("Bekräfta lösenord", [
+        { name: "passphrase", label: "Nuvarande lösenord", type: "password" },
+      ], "Skapa nyckel");
+      if (!f || !f.passphrase) return;
+      const res = await api("POST", `/books/${bid()}/recovery-key`, { passphrase: f.passphrase });
+      rkBox.innerHTML = "";
+      rkBox.appendChild(el("div", { class: "box" },
+        el("div", { class: "k" }, "Återställningsnyckel — spara nu, visas inte igen"),
+        el("div", { class: "v", style: "font-family:monospace;user-select:all" }, res.recovery_key)));
+      rkStatus.textContent = "✓ En återställningsnyckel finns redan.";
+      toast("Återställningsnyckel skapad — spara den säkert");
+    }
+    async function doExport() {
+      if (!outPath.value) { toast("Ange en sökväg", true); return; }
+      const res = await api("POST", `/books/${bid()}/export`, { out_path: outPath.value });
+      toast("Säkerhetskopia sparad: " + res.out_path);
     }
   },
 };
@@ -822,9 +899,64 @@ async function addCategoryFlow() {
   renderWorkspace();
 }
 
+// ----- edit flows (reference data is freely editable; issued invoices keep their
+// snapshot, so editing the live row never rewrites history) -----
+async function editCustomerFlow(kundnummer) {
+  const c = await api("GET", `/books/${bid()}/customers/${kundnummer}`);
+  const isPrivate = c.type === "private";
+  const fields = isPrivate
+    ? [{ name: "first_name", label: "Förnamn", value: c.first_name || "" },
+       { name: "last_name", label: "Efternamn", value: c.last_name || "" },
+       { name: "personnummer", label: "Personnummer", value: c.personnummer || "" }]
+    : [{ name: "company_name", label: "Företagsnamn", value: c.company_name || "" },
+       { name: "org_nr", label: "Org.nr", value: c.org_nr || "" }];
+  fields.push({ name: "email", label: "E-post", value: c.email || "" });
+  fields.push({ name: "phone", label: "Telefon", value: c.phone || "" });
+  const f = await modal(`Ändra kund ${kundnummer}`, fields, "Spara");
+  if (!f) return;
+  await api("PATCH", `/books/${bid()}/customers/${kundnummer}`, _nonEmpty(f));
+  toast("Kund uppdaterad");
+  renderWorkspace();
+}
+
+async function editSupplierFlow(s) {
+  const f = await modal(`Ändra leverantör`, [
+    { name: "name", label: "Namn", value: s.name },
+    { name: "default_moms_rate", label: "Standardmoms", type: "select", value: String(s.default_moms_rate),
+      options: ["25", "12", "6", "0", "momsfri", "ej_avdragsgill"].map((r) => ({ value: r, label: r })) },
+    { name: "org_nr", label: "Org.nr", value: s.org_nr || "" },
+  ], "Spara");
+  if (!f) return;
+  await api("PATCH", `/books/${bid()}/suppliers/${s.id}`, _nonEmpty(f));
+  toast("Leverantör uppdaterad");
+  renderWorkspace();
+}
+
+async function editCategoryFlow(c) {
+  const f = await modal(`Ändra kategori`, [
+    { name: "name", label: "Namn", value: c.name },
+    { name: "bas_konto", label: "BAS-konto", value: c.bas_konto },
+  ], "Spara");
+  if (!f || !f.name) return;
+  await api("PATCH", `/books/${bid()}/categories/${c.id}`,
+            { name: f.name, bas_konto: parseInt(f.bas_konto, 10) });
+  toast("Kategori uppdaterad");
+  renderWorkspace();
+}
+
+// Drop empty strings so a blank field doesn't overwrite with "" (PATCH = partial).
+function _nonEmpty(obj) {
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) if (v !== "" && v != null) out[k] = v;
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Small render helpers
 // ---------------------------------------------------------------------------
+function editBtn(onClick) {
+  return el("button", { class: "btn small ghost", onclick: onClick }, "Ändra");
+}
 function wrap(label, input) { return el("div", {}, el("label", {}, label), input); }
 function headerWithAdd(title, btn, onClick) {
   return el("div", { style: "display:flex;align-items:center;justify-content:space-between" },

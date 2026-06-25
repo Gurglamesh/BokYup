@@ -33,6 +33,16 @@ class RenameReq(BaseModel):
     display_name: str
 
 
+class ChangePassphraseReq(BaseModel):
+    old_passphrase: str
+    new_passphrase: str
+
+
+class RecoveryKeyReq(BaseModel):
+    passphrase: str
+    recovery_key: Optional[str] = None    # None => generate a strong random one
+
+
 class ExportReq(BaseModel):
     out_path: str
 

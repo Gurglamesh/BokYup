@@ -168,6 +168,17 @@ class AppFacade:
         )
         return rec.to_dict()
 
+    def h_change_passphrase(self, p, b, q):
+        self.manager.change_passphrase(p["book_id"], b["old_passphrase"], b["new_passphrase"])
+        return {"book_id": p["book_id"], "changed": True}
+
+    def h_add_recovery_key(self, p, b, q):
+        key = self.manager.add_recovery_key(p["book_id"], b["passphrase"], b.get("recovery_key"))
+        return {"recovery_key": key}
+
+    def h_recovery_key_status(self, p, b, q):
+        return {"has_recovery_key": self.manager.has_recovery_key(p["book_id"])}
+
     # ---- reference: categories ----
     def h_list_categories(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -355,6 +366,9 @@ _route("POST", "/books/{book_id}/lock", "h_lock")
 _route("PATCH", "/books/{book_id}", "h_rename")
 _route("DELETE", "/books/{book_id}", "h_remove")
 _route("POST", "/books/{book_id}/export", "h_export_book")
+_route("POST", "/books/{book_id}/change-passphrase", "h_change_passphrase")
+_route("GET", "/books/{book_id}/recovery-key", "h_recovery_key_status")
+_route("POST", "/books/{book_id}/recovery-key", "h_add_recovery_key", 201)
 
 _route("GET", "/books/{book_id}/categories", "h_list_categories")
 _route("POST", "/books/{book_id}/categories", "h_create_category", 201)

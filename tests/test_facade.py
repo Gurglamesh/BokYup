@@ -69,3 +69,18 @@ def test_locked_book_raises(facade, book):
 def test_unknown_route_raises_keyerror(facade):
     with pytest.raises(KeyError):
         facade.dispatch("GET", "/nope")
+
+
+def test_key_management_through_dispatch(facade, book):
+    # GET and POST share /recovery-key — confirm the matcher distinguishes them.
+    assert facade.dispatch("GET", f"/books/{book}/recovery-key")[1]["has_recovery_key"] is False
+    status, res = facade.dispatch("POST", f"/books/{book}/recovery-key",
+                                  {"passphrase": "correct-horse"})
+    assert status == 201 and "-" in res["recovery_key"]
+    assert facade.dispatch("GET", f"/books/{book}/recovery-key")[1]["has_recovery_key"] is True
+
+    facade.dispatch("POST", f"/books/{book}/change-passphrase",
+                    {"old_passphrase": "correct-horse", "new_passphrase": "p2"})
+    facade.dispatch("POST", f"/books/{book}/lock", {})
+    # recovery key still unlocks after the passphrase change
+    facade.manager.open_book_with_recovery(book, res["recovery_key"])

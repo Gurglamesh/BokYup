@@ -154,6 +154,18 @@ def _build_router():
     def export_book(book_id: str, body: sc.ExportReq, request: Request):
         return fac(request).h_export_book({"book_id": book_id}, body.model_dump(), {})
 
+    @r.post("/books/{book_id}/change-passphrase")
+    def change_passphrase(book_id: str, body: sc.ChangePassphraseReq, request: Request):
+        return fac(request).h_change_passphrase({"book_id": book_id}, body.model_dump(), {})
+
+    @r.get("/books/{book_id}/recovery-key")
+    def recovery_key_status(book_id: str, request: Request):
+        return fac(request).h_recovery_key_status({"book_id": book_id}, {}, {})
+
+    @r.post("/books/{book_id}/recovery-key", status_code=201)
+    def add_recovery_key(book_id: str, body: sc.RecoveryKeyReq, request: Request):
+        return fac(request).h_add_recovery_key({"book_id": book_id}, body.model_dump(), {})
+
     # ---- reference: categories ----
     @r.get("/books/{book_id}/categories")
     def list_categories(book_id: str, request: Request):
