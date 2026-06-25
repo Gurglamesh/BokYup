@@ -189,6 +189,24 @@ class TestBookkeeping:
         assert resp.status_code == 201
         assert resp.json()["count"] == 1
 
+    def test_synthetic_rows_hidden_from_default_list(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Försäljning", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "ACME AB"}).json()["kundnummer"]
+        client.post(f"/books/{book}/incomes",
+                    json={"customer_id": kid, "category_id": cat,
+                          "lines": [{"rate_code": "25", "amount_ore": 1250}],
+                          "trans_date": "2026-12-20"})  # unpaid
+        client.post(f"/books/{book}/year-end-accruals", json={"fiscal_year_end": "2026-12-31"})
+        # accrual created 2 synthetic rows (periodisering + återföring)
+        default = client.get(f"/books/{book}/transaktioner").json()
+        full = client.get(f"/books/{book}/transaktioner",
+                          params={"include_synthetic": True}).json()
+        assert len(default) == 1                      # only the real pending invoice
+        assert len(full) == 3
+        assert all(t["note"] not in ("periodisering", "återföring", "rättelse") for t in default)
+
     def test_rut_claims_listing_and_skatteverket_payment(self, client, book):
         cat = client.post(f"/books/{book}/categories",
                           json={"name": "Städning", "kind": "income", "bas_konto": 3001}).json()["id"]

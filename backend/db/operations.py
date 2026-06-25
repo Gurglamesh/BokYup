@@ -89,6 +89,12 @@ _UTG_MOMS_KEY = {
     "6": "account_utgaende_moms_6",
 }
 
+# Notes stamped on the SYNTHETIC transaktion rows that `_clone_transaktion_for_report`
+# creates to attribute a rättelse/accrual to the right period in the moms/result
+# reports. They are bookkeeping artefacts, not user transactions, so the default
+# Transaktioner list hides them (the legal record lives in the verifikationer).
+SYNTHETIC_TRANSAKTION_NOTES = ("rättelse", "periodisering", "återföring")
+
 
 # ---------------------------------------------------------------------------
 # Moms calculation (pure)

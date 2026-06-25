@@ -258,8 +258,9 @@ def _build_router():
         return fac(request).h_list_verifikationer({"book_id": book_id}, {}, {})
 
     @r.get("/books/{book_id}/transaktioner")
-    def list_transaktioner(book_id: str, request: Request):
-        return fac(request).h_list_transaktioner({"book_id": book_id}, {}, {})
+    def list_transaktioner(book_id: str, request: Request, include_synthetic: bool = False):
+        return fac(request).h_list_transaktioner(
+            {"book_id": book_id}, {}, {"include_synthetic": "1" if include_synthetic else "0"})
 
     # ---- receipts (encrypted photos) ----
     @r.post("/books/{book_id}/transaktioner/{transaktion_id}/receipts", status_code=201)

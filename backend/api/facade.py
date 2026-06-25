@@ -288,9 +288,14 @@ class AppFacade:
 
     def h_list_transaktioner(self, p, b, q):
         ops = self._ops(p["book_id"])
-        return _rows(ops,
-                     "SELECT id, direction, status, trans_date, payment_date, category_id, "
-                     "customer_id, supplier_id, verifikation_id FROM transaktion ORDER BY id")
+        cols = ("SELECT id, direction, status, trans_date, payment_date, category_id, "
+                "customer_id, supplier_id, verifikation_id, note FROM transaktion")
+        if q.get("include_synthetic") in ("1", "true", True):
+            return _rows(ops, cols + " ORDER BY id")
+        from backend.db.operations import SYNTHETIC_TRANSAKTION_NOTES as _SYN
+        placeholders = ",".join("?" for _ in _SYN)
+        return _rows(ops, f"{cols} WHERE note IS NULL OR note NOT IN ({placeholders}) "
+                          "ORDER BY id", tuple(_SYN))
 
     # ---- receipts (encrypted photos) ----
     def h_upload_receipt(self, p, b, q):
