@@ -28,7 +28,8 @@ ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "backend/api/static"
 WWW = ROOT / "phone/www"
 INJECT = ('  <script src="vendor/pyodide.js"></script>\n'
-          '  <script src="pyodide-boot.js"></script>\n')
+          '  <script src="pyodide-boot.js"></script>\n'
+          '  <script src="native-bridge.js"></script>\n')
 
 
 def main() -> None:

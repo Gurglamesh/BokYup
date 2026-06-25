@@ -51,8 +51,18 @@ sys.path.insert(0, ${JSON.stringify(SRC_DIR)})
 from backend.api.phone import PhoneApp
 PhoneApp(${JSON.stringify(DATA_DIR)})`);
 
-    window.__BOKYUP_NATIVE__ = { call };
+    window.__BOKYUP_NATIVE__ = { call, readFile, writeFile, persist: () => syncfs(false) };
     return true;
+  }
+
+  // Move bytes between the IndexedDB-backed app FS and the OS (used by the .buyn
+  // file-bridge for backup/restore — see phone/native-bridge.js).
+  function readFile(fsPath) {
+    return pyodide.FS.readFile(fsPath);            // Uint8Array
+  }
+  async function writeFile(fsPath, bytes) {
+    pyodide.FS.writeFile(fsPath, bytes);
+    await syncfs(false);
   }
 
   // The transport app.js calls. Same (method, path, body, query) contract as the

@@ -211,9 +211,13 @@ function renderHome() {
   const v = $("#view");
   v.innerHTML = "";
   v.appendChild(el("div", { class: "panel" },
-    el("h2", {}, "Dina böcker"),
+    el("div", { style: "display:flex;align-items:center;justify-content:space-between" },
+      el("h2", { style: "margin:0" }, "Dina böcker"),
+      el("div", {},
+        el("button", { class: "btn small ghost", onclick: () => guard(importBackupFlow) }, "Återställ säkerhetskopia"),
+        el("button", { class: "btn small", style: "margin-left:8px", onclick: () => guard(newBookFlow) }, "+ Ny bok"))),
     state.books.length === 0
-      ? el("p", { class: "muted" }, "Inga böcker ännu. Skapa en med “+ Ny bok”.")
+      ? el("p", { class: "muted" }, "Inga böcker ännu. Skapa en med “+ Ny bok” eller återställ en .buyn-säkerhetskopia.")
       : el("div", { class: "cards" }, state.books.map((b) =>
           el("div", { class: "card" },
             el("h4", {}, b.display_name),
@@ -620,12 +624,11 @@ const SECTION_RENDERERS = {
     panel.appendChild(el("h3", {}, "Säkerhetskopia (.buyn)"));
     panel.appendChild(el("p", { class: "muted" },
       "Exporterar hela boken (krypterad DB + kvitton) till en .buyn-fil. Samma fil "
-      + "importeras på en annan enhet med samma lösenord."));
-    const outPath = el("input", { type: "text", value: "" });
-    panel.appendChild(el("div", { class: "row" },
-      wrap("Sökväg att spara till (t.ex. C:\\backup\\firma.buyn)", outPath),
-      el("div", { style: "align-self:flex-end" },
-        el("button", { class: "btn", onclick: () => guard(doExport) }, "Exportera säkerhetskopia"))));
+      + "importeras på en annan enhet (PC eller telefon) med samma lösenord — välj "
+      + "“Återställ säkerhetskopia” på startsidan."));
+    panel.appendChild(el("div", { style: "margin:6px 0" },
+      el("button", { class: "btn", onclick: () => guard(() =>
+        exportBackupFlow(bid(), state.activeBook.display_name)) }, "Exportera säkerhetskopia")));
 
     async function changePass() {
       if (!oldP.value || !newP.value) { toast("Fyll i lösenorden", true); return; }
@@ -647,11 +650,6 @@ const SECTION_RENDERERS = {
         el("div", { class: "v", style: "font-family:monospace;user-select:all" }, res.recovery_key)));
       rkStatus.textContent = "✓ En återställningsnyckel finns redan.";
       toast("Återställningsnyckel skapad — spara den säkert");
-    }
-    async function doExport() {
-      if (!outPath.value) { toast("Ange en sökväg", true); return; }
-      const res = await api("POST", `/books/${bid()}/export`, { out_path: outPath.value });
-      toast("Säkerhetskopia sparad: " + res.out_path);
     }
   },
 };
@@ -949,6 +947,62 @@ function _nonEmpty(obj) {
   const out = {};
   for (const [k, v] of Object.entries(obj)) if (v !== "" && v != null) out[k] = v;
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Backup / restore (.buyn) — one seam, two transports:
+//   desktop  -> filesystem paths typed by the user (the FastAPI server reads/writes them)
+//   phone    -> window.__BOKYUP_FILES__ (Capacitor Filesystem/Share); see phone/native-bridge.js
+// ---------------------------------------------------------------------------
+async function exportBackupFlow(bookId, displayName) {
+  const safe = (displayName || "bok").replace(/\W+/g, "_");
+  if (window.__BOKYUP_FILES__) {
+    // Phone: write the bundle into the app FS, then hand bytes to the OS share sheet.
+    const fsPath = `/bokyup-data/${safe}.buyn`;
+    await api("POST", `/books/${bookId}/export`, { out_path: fsPath });
+    await window.__BOKYUP_FILES__.shareFile(fsPath);
+    toast("Säkerhetskopia delad");
+    return;
+  }
+  const f = await modal("Exportera säkerhetskopia", [
+    { name: "out_path", label: "Sökväg (t.ex. C:\\backup\\" + safe + ".buyn)" },
+  ], "Exportera");
+  if (!f || !f.out_path) return;
+  const res = await api("POST", `/books/${bookId}/export`, { out_path: f.out_path });
+  toast("Säkerhetskopia sparad: " + res.out_path);
+}
+
+async function importBackupFlow() {
+  if (window.__BOKYUP_FILES__) {
+    // Phone: pick a .buyn (copied into the app FS), then import it into IndexedDB.
+    const picked = await window.__BOKYUP_FILES__.pickBuynIntoFs();
+    if (!picked) return;
+    const f = await modal("Återställ säkerhetskopia", [
+      { name: "display_name", label: "Namn på boken", value: picked.name || "Återställd bok" },
+    ], "Återställ");
+    if (!f) return;
+    const name = f.display_name || "Återställd bok";
+    const dest = `/bokyup-data/${name.replace(/\W+/g, "_")}_${Date.now()}.db`;
+    const rec = await api("POST", "/books/import",
+                          { bundle_path: picked.fsPath, dest_db_path: dest, display_name: name });
+    await loadBooks();
+    renderHome();
+    toast(`Återställd: ${rec.display_name} — lås upp med dess lösenord`);
+    return;
+  }
+  const f = await modal("Återställ från säkerhetskopia", [
+    { name: "bundle_path", label: "Sökväg till .buyn-fil" },
+    { name: "dest_db_path", label: "Spara databasen som (t.ex. C:\\bokforing\\restored.db)" },
+    { name: "display_name", label: "Namn på boken (valfritt)" },
+  ], "Återställ");
+  if (!f || !f.bundle_path || !f.dest_db_path) return;
+  const rec = await api("POST", "/books/import", {
+    bundle_path: f.bundle_path, dest_db_path: f.dest_db_path,
+    display_name: f.display_name || null,
+  });
+  await loadBooks();
+  renderHome();
+  toast(`Återställd: ${rec.display_name} — lås upp med dess lösenord`);
 }
 
 // ---------------------------------------------------------------------------
