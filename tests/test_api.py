@@ -90,8 +90,8 @@ class TestAutoLock:
                 "passphrase": "pw",
             }).json()["id"]
             # Simulate inactivity beyond the timeout.
-            app.state.autolock_seconds = 1
-            app.state.last_activity[bid] = time.monotonic() - 10
+            app.state.facade.autolock_seconds = 1
+            app.state.facade.last_activity[bid] = time.monotonic() - 10
             resp = client.get(f"/books/{bid}/categories")
             assert resp.status_code == 423
             assert "auto-locked" in resp.json()["detail"].lower()
