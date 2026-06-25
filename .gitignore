@@ -9,3 +9,7 @@ data/
 
 # local demo/run data
 .run-data/
+
+# phone build: large prebuilt Pyodide runtime + wheels + generated backend zip
+# (assembled by tools/build_phone_assets.py at build time, not committed)
+backend/api/static/vendor/

@@ -15,6 +15,9 @@ const state = { books: [], activeBook: null, section: "transactions" };
 // HTTP helper
 // ---------------------------------------------------------------------------
 async function api(method, path, body) {
+  // Phone build: the Python backend runs in-process under Pyodide (no HTTP).
+  if (window.__BOKYUP_NATIVE__) return nativeApi(method, path, body);
+
   const opts = { method, headers: {} };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
@@ -28,6 +31,33 @@ async function api(method, path, body) {
     throw new ApiError(detail, resp.status);
   }
   return data;
+}
+
+// In-process transport (phone). Mirrors the fetch path's return/throw contract:
+// JSON results pass through; the SIE "raw text" result unwraps to its string so
+// callers that expect text keep working. Raw binary (a receipt image) is returned
+// as the {raw,base64,media_type} object — receiptSrc() turns it into a data URL.
+async function nativeApi(method, path, body) {
+  let query = null;
+  const qi = path.indexOf("?");
+  if (qi >= 0) {
+    query = Object.fromEntries(new URLSearchParams(path.slice(qi + 1)));
+    path = path.slice(0, qi);
+  }
+  const out = await window.__BOKYUP_NATIVE__.call(method, path, body ?? null, query);
+  if (!out.ok) throw new ApiError(out.detail || ("HTTP " + out.status), out.status);
+  const r = out.result;
+  if (r && r.raw && "text" in r) return r.text;   // e.g. SIE export
+  return r;
+}
+
+// Source for a receipt <img>: an HTTP URL on desktop, a data: URL on the phone.
+async function receiptSrc(receiptId) {
+  if (window.__BOKYUP_NATIVE__) {
+    const r = await api("GET", `/books/${bid()}/receipts/${receiptId}`);
+    return `data:${r.media_type};base64,${r.base64}`;
+  }
+  return `/books/${bid()}/receipts/${receiptId}`;
 }
 class ApiError extends Error {
   constructor(msg, status) { super(msg); this.status = status; }
@@ -688,7 +718,8 @@ async function receiptsFlow(txId, isPending) {
     body.appendChild(el("p", { class: "muted" }, "Inga kvitton för denna transaktion."));
   } else {
     for (const rc of list) {
-      const img = el("img", { src: `/books/${bid()}/receipts/${rc.id}`, class: "receipt-view" });
+      const img = el("img", { class: "receipt-view" });
+      receiptSrc(rc.id).then((src) => { img.src = src; });
       const meta = el("div", { class: "muted" },
         `${rc.mime} · ${Math.round(rc.byte_size / 1024)} kB`
         + (rc.original_format ? " · " + rc.original_format : ""));
@@ -813,6 +844,13 @@ function simpleTable(headers, rows) {
 // ---------------------------------------------------------------------------
 (async function boot() {
   try {
+    // Phone build: wait for the in-process Python backend (Pyodide) to finish
+    // loading before the first call. Desktop has no BokYupReady and skips this.
+    if (window.BokYupReady) {
+      const v = $("#view");
+      if (v) v.appendChild(el("p", { class: "muted" }, "Startar bokföringsmotorn…"));
+      await window.BokYupReady;
+    }
     await loadBooks();
     renderHome();
   } catch (e) {
