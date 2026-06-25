@@ -275,6 +275,7 @@ class DatabaseManager:
 
         session = BookSession(record, dek)
         self._sessions[book_id] = session
+        _migrate_schema(session)
         return session
 
     def open_book_with_recovery(
@@ -291,6 +292,7 @@ class DatabaseManager:
 
         session = BookSession(record, dek)
         self._sessions[book_id] = session
+        _migrate_schema(session)
         return session
 
     # ------------------------------------------------------------------
@@ -409,6 +411,12 @@ class DatabaseManager:
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _migrate_schema(session: "BookSession") -> None:
+    """Bring an opened book's schema up to date (no-op if already current)."""
+    from backend.models import schema  # local import avoids a circular dependency
+    schema.migrate(session.connection())
 
 
 def _assert_files_exist(record: BookRecord) -> None:

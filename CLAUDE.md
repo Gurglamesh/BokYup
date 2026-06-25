@@ -191,6 +191,20 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       backed by new `GET /rut-claims`), Verifikat section (rättelse/reverse), Bokslut
       section (period locking + year-end accruals), SIE export with company/org/fiscal
       year, and the RUT-cap warning on record-income.
+- [x] **Receipt capture + encrypted storage** (2026-06). New `receipt` table
+      (SCHEMA_VERSION→2, `schema.migrate()` upgrades existing books on open). Photos are
+      AES-256-GCM-encrypted with the book DEK and stored as files in `<db>.photos/`
+      (already carried by the `.buyn` bundle); `BookOps.attach_receipt/list_receipts/
+      get_receipt/delete_receipt` (delete only while the transaktion is still pending —
+      once booked the receipt is part of the immutable record). API: base64 upload +
+      list + raw-image GET + delete (no new server deps). Web UI: expense form now takes
+      **multiple moms lines** (a receipt can mix 6/12/25 %) and a receipt picker (file
+      import + `capture` for phone camera + live `getUserMedia` "Ta foto" on desktop);
+      Transaktioner has a 📎 viewer. DONE, all tests pass, live-smoke-tested.
+- [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
+      (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
+      provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
+      `{lines,total}` shape the form already edits. Engine choice still open.
 - [ ] Later — phone wrappers (Android/iOS) against the same API; camera receipt capture.
 
 ## Working agreement

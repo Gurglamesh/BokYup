@@ -16,12 +16,14 @@ trusted local filesystem paths. Do not expose this server on a network as-is.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import sqlite3
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
 
 from backend import __version__ as APP_VERSION
@@ -323,6 +325,32 @@ def _build_router():
         return _rows(ops.conn,
                      "SELECT id, direction, status, trans_date, payment_date, category_id, "
                      "customer_id, supplier_id, verifikation_id FROM transaktion ORDER BY id")
+
+    # ---- receipts (encrypted photos) ----
+    @r.post("/books/{book_id}/transaktioner/{transaktion_id}/receipts", status_code=201)
+    def upload_receipt(transaktion_id: int, body: sc.ReceiptUploadReq,
+                       ops: BookOps = Depends(_ops)):
+        try:
+            data = base64.b64decode(body.image_base64, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=400, detail="image_base64 is not valid base64")
+        if not data:
+            raise HTTPException(status_code=400, detail="empty image")
+        return ops.attach_receipt(transaktion_id, data, body.mime, body.original_format)
+
+    @r.get("/books/{book_id}/transaktioner/{transaktion_id}/receipts")
+    def list_receipts(transaktion_id: int, ops: BookOps = Depends(_ops)):
+        return ops.list_receipts(transaktion_id)
+
+    @r.get("/books/{book_id}/receipts/{receipt_id}")
+    def get_receipt(receipt_id: int, ops: BookOps = Depends(_ops)):
+        data, mime = ops.get_receipt(receipt_id)
+        return Response(content=data, media_type=mime)
+
+    @r.delete("/books/{book_id}/receipts/{receipt_id}")
+    def delete_receipt(receipt_id: int, ops: BookOps = Depends(_ops)):
+        ops.delete_receipt(receipt_id)
+        return {"id": receipt_id, "deleted": True}
 
     # ---- reports ----
     @r.get("/books/{book_id}/reports/momsdeklaration")

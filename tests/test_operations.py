@@ -385,3 +385,64 @@ class TestYearEndAccrual:
                           "2026-12-20", paid_date="2026-12-20")
         out = ops.book_year_end_accruals("2026-12-31")
         assert out["count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Receipts (encrypted photos)
+# ---------------------------------------------------------------------------
+
+class TestReceipts:
+    def _pending_expense(self, ops: BookOps) -> int:
+        cat = ops.create_category("Kontorsmaterial", "expense", 5460)
+        res = ops.record_expense(None, cat, [{"rate_code": "25", "amount_ore": 1250}],
+                                 "2026-02-01")
+        return res["transaktion_id"]
+
+    def test_attach_then_get_roundtrips(self, ops: BookOps):
+        tid = self._pending_expense(ops)
+        data = b"\x89PNG\r\n\x1a\n fake image bytes \xff\x00"
+        rc = ops.attach_receipt(tid, data, "image/png", "paper")
+        got, mime = ops.get_receipt(rc["id"])
+        assert got == data and mime == "image/png"
+
+    def test_stored_file_is_ciphertext(self, ops: BookOps, tmp_path: Path):
+        tid = self._pending_expense(ops)
+        data = b"secret receipt total 1250"
+        rc = ops.attach_receipt(tid, data, "image/jpeg")
+        photos = Path(str(ops.session.record.db_path) + ".photos")
+        blob = (photos / rc["filename"]).read_bytes()
+        assert data not in blob          # encrypted at rest
+        assert len(blob) > len(data)     # nonce + GCM tag overhead
+
+    def test_list_receipts(self, ops: BookOps):
+        tid = self._pending_expense(ops)
+        ops.attach_receipt(tid, b"a", "image/png")
+        ops.attach_receipt(tid, b"bb", "image/png")
+        lst = ops.list_receipts(tid)
+        assert len(lst) == 2
+        assert {r["byte_size"] for r in lst} == {1, 2}
+
+    def test_integrity_check_detects_tampering(self, ops: BookOps):
+        tid = self._pending_expense(ops)
+        rc = ops.attach_receipt(tid, b"hello", "image/png")
+        photos = Path(str(ops.session.record.db_path) + ".photos")
+        (photos / rc["filename"]).write_bytes(b"tampered")
+        with pytest.raises(Exception):
+            ops.get_receipt(rc["id"])
+
+    def test_delete_allowed_while_pending(self, ops: BookOps):
+        tid = self._pending_expense(ops)
+        rc = ops.attach_receipt(tid, b"x", "image/png")
+        ops.delete_receipt(rc["id"])
+        assert ops.list_receipts(tid) == []
+
+    def test_delete_blocked_after_booking(self, ops: BookOps):
+        tid = self._pending_expense(ops)
+        rc = ops.attach_receipt(tid, b"x", "image/png")
+        ops.register_payment(tid, "2026-02-05")     # books it -> immutable
+        with pytest.raises(InvalidState):
+            ops.delete_receipt(rc["id"])
+
+    def test_attach_rejects_unknown_transaktion(self, ops: BookOps):
+        with pytest.raises(KeyError):
+            ops.attach_receipt(9999, b"x", "image/png")

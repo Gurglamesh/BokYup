@@ -247,6 +247,9 @@ const SECTION_RENDERERS = {
       el("td", {}, catName[t.category_id] || "—"),
       el("td", {}, el("span", { class: "pill " + t.status }, t.status === "paid" ? "Betald" : "Väntar")),
       el("td", { class: "num" }, t.verifikation_id ? ("ver " + t.verifikation_id) : ""),
+      el("td", { class: "num" }, t.direction === "in"
+        ? el("button", { class: "btn small ghost", onclick: () => guard(() => receiptsFlow(t.id, t.status === "pending")) }, "📎 Kvitto")
+        : ""),
       el("td", { class: "num" }, t.status === "pending"
         ? el("button", { class: "btn small", onclick: () => guard(() => payFlow(t.id)) }, "Bokför betalning")
         : ""),
@@ -254,7 +257,8 @@ const SECTION_RENDERERS = {
     panel.appendChild(el("table", {},
       el("thead", {}, el("tr", {},
         el("th", {}, "Datum"), el("th", {}, "Typ"), el("th", {}, "Kategori"),
-        el("th", {}, "Status"), el("th", { class: "num" }, "Verifikat"), el("th", {}, ""))),
+        el("th", {}, "Status"), el("th", { class: "num" }, "Verifikat"),
+        el("th", { class: "num" }, "Kvitto"), el("th", {}, ""))),
       el("tbody", {}, rows),
     ));
   },
@@ -273,13 +277,18 @@ const SECTION_RENDERERS = {
       el("option", { value: "expense" }, "Utgift (inköp)"));
     const counter = el("select", {});
     const cat = el("select", {});
-    const amount = el("input", { type: "text", value: "0,00" });
-    const rate = el("select", {},
-      ...["25", "12", "6", "0", "momsfri", "ej_avdragsgill"].map((r) =>
-        el("option", { value: r }, r === "momsfri" || r === "ej_avdragsgill" ? r : r + "%")));
     const date = el("input", { type: "date", value: new Date().toISOString().slice(0, 10) });
     const paidNow = el("select", {}, el("option", { value: "yes" }, "Ja, betald nu"), el("option", { value: "no" }, "Nej, väntar"));
     const rut = el("input", { type: "text", value: "0,00" });
+
+    // Multiple moms lines: a receipt can mix 6/12/25 %. Each row is rate + belopp.
+    const linesEd = momsLinesEditor();
+    // Receipt capture (expenses): import a file or take a photo.
+    const receipt = receiptPicker();
+
+    const rutRow = wrap("RUT-belopp (kr, endast inkomst)", rut);
+    const receiptBlock = el("div", { style: "margin-top:6px" },
+      el("label", {}, "Kvitto (utgift)"), receipt.element);
 
     const refreshFor = (k) => {
       counter.innerHTML = "";
@@ -293,20 +302,24 @@ const SECTION_RENDERERS = {
         for (const s of suppliers) counter.appendChild(el("option", { value: s.id }, s.name));
         for (const c of cats.filter((x) => x.kind === "expense")) cat.appendChild(el("option", { value: c.id }, c.name));
       }
+      rutRow.style.display = k === "income" ? "" : "none";
+      receiptBlock.style.display = k === "expense" ? "" : "none";
     };
     kind.addEventListener("change", () => refreshFor(kind.value));
     refreshFor("income");
 
     const form = el("div", {},
       el("div", { class: "row" }, wrap("Typ", kind), wrap("Motpart", counter), wrap("Kategori", cat)),
-      el("div", { class: "row" }, wrap("Belopp (kr, inkl. moms)", amount), wrap("Moms", rate), wrap("Datum", date)),
-      el("div", { class: "row" }, wrap("Betald?", paidNow), wrap("RUT-belopp (kr, endast inkomst)", rut)),
+      el("div", { class: "row" }, wrap("Datum", date), wrap("Betald?", paidNow), rutRow),
+      el("div", { style: "margin-top:6px" }, el("label", {}, "Belopp & moms (en rad per momssats)"), linesEd.element),
+      receiptBlock,
       el("div", { style: "margin-top:14px" }, el("button", { class: "btn brand", onclick: () => guard(submit) }, "Bokför")),
     );
     panel.appendChild(form);
 
     async function submit() {
-      const lines = [{ rate_code: rate.value, amount_ore: toOre(amount.value), inclusive: true }];
+      const lines = linesEd.getLines();
+      if (lines.length === 0) { toast("Lägg till minst en belopps­rad", true); return; }
       const paid_date = paidNow.value === "yes" ? date.value : null;
       let warn = null;
       if (kind.value === "income") {
@@ -321,10 +334,16 @@ const SECTION_RENDERERS = {
           warn = `Bokfört — OBS: nära RUT-taket (${toKr(cap.used_ore)} av ${toKr(cap.cap_ore)} kr)`;
         }
       } else {
-        await api("POST", `/books/${bid()}/expenses`, {
+        const res = await api("POST", `/books/${bid()}/expenses`, {
           supplier_id: counter.value ? parseInt(counter.value, 10) : null,
           category_id: parseInt(cat.value, 10), lines, trans_date: date.value, paid_date,
         });
+        const staged = receipt.getStaged();
+        if (staged) {
+          await api("POST", `/books/${bid()}/transaktioner/${res.transaktion_id}/receipts`, {
+            image_base64: staged.image_base64, mime: staged.mime, original_format: staged.original_format,
+          });
+        }
       }
       state.section = "transactions";
       renderWorkspace();
@@ -531,8 +550,164 @@ const SECTION_RENDERERS = {
 };
 
 // ---------------------------------------------------------------------------
+// Moms-lines editor — one row per momssats (a receipt can mix 6/12/25 %)
+// ---------------------------------------------------------------------------
+const RATE_OPTIONS = ["25", "12", "6", "0", "momsfri", "ej_avdragsgill"];
+function momsLinesEditor() {
+  const rowsBox = el("div", {});
+  const element = el("div", {});
+
+  function addRow(value = "0,00", rate = "25") {
+    const amount = el("input", { type: "text", value });
+    const rateSel = el("select", {},
+      ...RATE_OPTIONS.map((r) => el("option", { value: r },
+        r === "momsfri" || r === "ej_avdragsgill" ? r : r + "%")));
+    rateSel.value = rate;
+    const remove = el("button", { class: "btn small ghost", type: "button",
+      onclick: () => { if (rowsBox.children.length > 1) row.remove(); } }, "✕");
+    const row = el("div", { class: "row line-row" },
+      wrap("Belopp (kr, inkl. moms)", amount), wrap("Moms", rateSel),
+      el("div", { style: "flex:0 0 auto;align-self:flex-end" }, remove));
+    row._read = () => ({ rate_code: rateSel.value, amount_ore: toOre(amount.value), inclusive: true });
+    rowsBox.appendChild(row);
+  }
+  addRow();
+
+  element.appendChild(rowsBox);
+  element.appendChild(el("button", { class: "btn small ghost", type: "button",
+    onclick: () => addRow() }, "+ Lägg till rad"));
+
+  return {
+    element,
+    getLines() {
+      return Array.from(rowsBox.children)
+        .map((r) => r._read())
+        .filter((l) => l.amount_ore > 0);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Receipt picker — import a file or take a photo; stages one image for upload
+// ---------------------------------------------------------------------------
+function receiptPicker() {
+  let staged = null;           // { image_base64, mime }
+  const preview = el("div", { class: "receipt-preview" });
+  const fmt = el("select", {},
+    el("option", { value: "paper" }, "Papperskvitto (foto = originalet)"),
+    el("option", { value: "digital" }, "Digitalt kvitto (foto ersätter EJ originalet)"));
+
+  function showPreview() {
+    preview.innerHTML = "";
+    if (!staged) return;
+    preview.appendChild(el("img", { src: `data:${staged.mime};base64,${staged.image_base64}`, class: "receipt-thumb" }));
+    preview.appendChild(el("button", { class: "btn small ghost", type: "button",
+      onclick: () => { staged = null; showPreview(); } }, "Ta bort"));
+  }
+
+  const file = el("input", { type: "file", accept: "image/*", capture: "environment" });
+  file.addEventListener("change", () => guard(async () => {
+    const f = file.files && file.files[0];
+    if (!f) return;
+    staged = { image_base64: await blobToBase64(f), mime: f.type || "image/jpeg" };
+    file.value = "";
+    showPreview();
+  }));
+
+  const controls = el("div", { class: "row" },
+    el("div", { style: "flex:0 0 auto" }, file));
+  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+    controls.appendChild(el("div", { style: "flex:0 0 auto;align-self:flex-end" },
+      el("button", { class: "btn small", type: "button", onclick: () => guard(takePhoto) }, "📷 Ta foto")));
+  }
+
+  async function takePhoto() {
+    const blob = await cameraCaptureModal();
+    if (!blob) return;
+    staged = { image_base64: await blobToBase64(blob), mime: blob.type || "image/jpeg" };
+    showPreview();
+  }
+
+  const element = el("div", {}, controls, wrap("Kvittots originalformat", fmt), preview);
+  return {
+    element,
+    getStaged() { return staged ? { ...staged, original_format: fmt.value } : null; },
+  };
+}
+
+// Read a Blob/File into base64 (without the data: prefix).
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+// A full-screen overlay (used by the camera and the receipt viewer).
+function overlay(...children) {
+  const box = el("div", { class: "overlay-box" }, ...children);
+  const back = el("div", { class: "overlay" }, box);
+  document.body.appendChild(back);
+  const close = () => back.remove();
+  back.addEventListener("click", (e) => { if (e.target === back) close(); });
+  return { close, box };
+}
+
+// Live-camera capture: returns a Promise<Blob|null>.
+function cameraCaptureModal() {
+  return new Promise((resolve) => {
+    const video = el("video", { autoplay: "", playsinline: "", class: "cam-video" });
+    let stream = null;
+    let done = false;
+    const finish = (blob) => { if (done) return; done = true; if (stream) stream.getTracks().forEach((t) => t.stop()); ui.close(); resolve(blob); };
+
+    const snap = el("button", { class: "btn brand", onclick: () => {
+      const c = el("canvas", {});
+      c.width = video.videoWidth; c.height = video.videoHeight;
+      c.getContext("2d").drawImage(video, 0, 0);
+      c.toBlob((b) => finish(b), "image/jpeg", 0.92);
+    } }, "Fånga");
+    const cancel = el("button", { class: "btn ghost", onclick: () => finish(null) }, "Avbryt");
+
+    const ui = overlay(video, el("div", { class: "modal-actions" }, cancel, snap));
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+      .then((s) => { stream = s; video.srcObject = s; })
+      .catch((e) => { toast("Kunde inte öppna kameran: " + e.message, true); finish(null); });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Flows used by sections
 // ---------------------------------------------------------------------------
+async function receiptsFlow(txId, isPending) {
+  const list = await api("GET", `/books/${bid()}/transaktioner/${txId}/receipts`);
+  const body = el("div", {});
+  if (list.length === 0) {
+    body.appendChild(el("p", { class: "muted" }, "Inga kvitton för denna transaktion."));
+  } else {
+    for (const rc of list) {
+      const img = el("img", { src: `/books/${bid()}/receipts/${rc.id}`, class: "receipt-view" });
+      const meta = el("div", { class: "muted" },
+        `${rc.mime} · ${Math.round(rc.byte_size / 1024)} kB`
+        + (rc.original_format ? " · " + rc.original_format : ""));
+      const actions = el("div", { class: "modal-actions" });
+      if (isPending) {
+        actions.appendChild(el("button", { class: "btn small danger", onclick: () => guard(async () => {
+          await api("DELETE", `/books/${bid()}/receipts/${rc.id}`);
+          toast("Kvitto borttaget");
+          ui.close();
+          renderWorkspace();
+        }) }, "Ta bort"));
+      }
+      body.appendChild(el("div", { class: "receipt-card" }, img, meta, actions));
+    }
+  }
+  const ui = overlay(el("h3", {}, "Kvitton"), body,
+    el("div", { class: "modal-actions" }, el("button", { class: "btn", onclick: () => ui.close() }, "Stäng")));
+}
+
 async function payFlow(txId) {
   const f = await modal("Bokför betalning", [
     { name: "payment_date", label: "Betaldatum", type: "date", value: new Date().toISOString().slice(0, 10) },

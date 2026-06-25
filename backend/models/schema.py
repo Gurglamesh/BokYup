@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -220,6 +220,20 @@ CREATE TABLE period_lock (
     locked_at    TEXT NOT NULL
 );
 
+-- ----- receipt photos (encrypted; stored as files in <db>.photos/) ---------
+-- The file content is AES-256-GCM ciphertext (book DEK); this row is the index.
+-- A transaktion may carry several (e.g. multi-page) receipts.
+CREATE TABLE receipt (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaktion_id  INTEGER NOT NULL REFERENCES transaktion(id),
+    filename        TEXT NOT NULL,      -- name inside <db>.photos/ (ciphertext file)
+    mime            TEXT NOT NULL,
+    original_format TEXT CHECK (original_format IN ('paper','digital')),
+    byte_size       INTEGER NOT NULL,   -- plaintext size, for display
+    sha256          TEXT NOT NULL,      -- of the ciphertext file (integrity)
+    created_at      TEXT NOT NULL
+);
+
 -- ----- indexes ------------------------------------------------------------
 CREATE INDEX idx_verifikation_date   ON verifikation(ver_date);
 CREATE INDEX idx_posting_ver         ON posting(verifikation_id);
@@ -228,6 +242,7 @@ CREATE INDEX idx_transaktion_status  ON transaktion(status);
 CREATE INDEX idx_moms_line_trans     ON moms_line(transaktion_id);
 CREATE INDEX idx_rut_state           ON rut_claim(state);
 CREATE INDEX idx_customer_type       ON customer(type);
+CREATE INDEX idx_receipt_trans       ON receipt(transaktion_id);
 """
 
 # ---------------------------------------------------------------------------
@@ -322,6 +337,41 @@ def get_schema_version(conn: sqlite3.Connection) -> int:
     """Return the schema version stored in PRAGMA user_version (0 if unset)."""
     row = conn.execute("PRAGMA user_version").fetchone()
     return int(row[0]) if row is not None else 0
+
+
+# Forward migrations for already-created books, keyed by the version they bring the
+# database UP TO. Each step is frozen (carries its own DDL) and idempotent.
+_MIGRATIONS: dict[int, str] = {
+    2: """
+        CREATE TABLE IF NOT EXISTS receipt (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaktion_id  INTEGER NOT NULL REFERENCES transaktion(id),
+            filename        TEXT NOT NULL,
+            mime            TEXT NOT NULL,
+            original_format TEXT CHECK (original_format IN ('paper','digital')),
+            byte_size       INTEGER NOT NULL,
+            sha256          TEXT NOT NULL,
+            created_at      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_receipt_trans ON receipt(transaktion_id);
+    """,
+}
+
+
+def migrate(conn: sqlite3.Connection) -> int:
+    """
+    Bring an existing book's schema up to SCHEMA_VERSION, running any missing
+    forward migrations in order. No-op on a fresh/current database. Returns the
+    resulting schema version.
+    """
+    current = get_schema_version(conn)
+    for target in sorted(_MIGRATIONS):
+        if current < target:
+            conn.executescript(_MIGRATIONS[target])
+            conn.execute(f"PRAGMA user_version = {target}")
+            current = target
+    conn.commit()
+    return current
 
 
 def is_initialized(conn: sqlite3.Connection) -> bool:

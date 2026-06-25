@@ -215,6 +215,69 @@ class TestBookkeeping:
         assert claims[0]["state"] == "skatteverket_paid"
         assert claims[0]["skatteverket_payment_date"] == "2026-04-01"
 
+    def test_multi_rate_expense_books_each_rate(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Blandat", "kind": "expense", "bas_konto": 5460}).json()["id"]
+        # One receipt with two moms rates (25 % + 12 %)
+        res = client.post(f"/books/{book}/expenses",
+                          json={"category_id": cat,
+                                "lines": [{"rate_code": "25", "amount_ore": 1250},
+                                          {"rate_code": "12", "amount_ore": 1120}],
+                                "trans_date": "2026-02-01", "paid_date": "2026-02-01"})
+        assert res.status_code == 201
+        rep = client.get(f"/books/{book}/reports/momsdeklaration",
+                         params={"start": "2026-01-01", "end": "2026-03-31"}).json()
+        assert rep["boxes"]["48"] == 250 + 120     # ingående moms 25% + 12%
+
+
+# ---------------------------------------------------------------------------
+# Receipts (encrypted photo upload / fetch)
+# ---------------------------------------------------------------------------
+
+class TestReceipts:
+    def _pending_expense(self, client, book) -> int:
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Material", "kind": "expense", "bas_konto": 5460}).json()["id"]
+        return client.post(f"/books/{book}/expenses",
+                           json={"category_id": cat,
+                                 "lines": [{"rate_code": "25", "amount_ore": 1250}],
+                                 "trans_date": "2026-02-01"}).json()["transaktion_id"]
+
+    def test_upload_list_and_fetch_image(self, client, book):
+        import base64
+        tid = self._pending_expense(client, book)
+        raw = b"\x89PNG\r\n fake receipt \xff\x00\x10"
+        up = client.post(f"/books/{book}/transaktioner/{tid}/receipts",
+                         json={"image_base64": base64.b64encode(raw).decode(),
+                               "mime": "image/png", "original_format": "paper"})
+        assert up.status_code == 201
+        rid = up.json()["id"]
+
+        lst = client.get(f"/books/{book}/transaktioner/{tid}/receipts").json()
+        assert len(lst) == 1 and lst[0]["mime"] == "image/png"
+
+        img = client.get(f"/books/{book}/receipts/{rid}")
+        assert img.status_code == 200
+        assert img.headers["content-type"].startswith("image/png")
+        assert img.content == raw          # decrypts back to the original bytes
+
+    def test_upload_rejects_bad_base64(self, client, book):
+        tid = self._pending_expense(client, book)
+        resp = client.post(f"/books/{book}/transaktioner/{tid}/receipts",
+                           json={"image_base64": "not base64!!!", "mime": "image/png"})
+        assert resp.status_code == 400
+
+    def test_delete_blocked_after_booking_409(self, client, book):
+        import base64
+        tid = self._pending_expense(client, book)
+        rid = client.post(f"/books/{book}/transaktioner/{tid}/receipts",
+                          json={"image_base64": base64.b64encode(b"x").decode(),
+                                "mime": "image/png"}).json()["id"]
+        client.post(f"/books/{book}/transaktioner/{tid}/pay",
+                    json={"payment_date": "2026-02-05"})
+        resp = client.delete(f"/books/{book}/receipts/{rid}")
+        assert resp.status_code == 409
+
 
 # ---------------------------------------------------------------------------
 # Reports

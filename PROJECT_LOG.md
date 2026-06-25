@@ -36,7 +36,7 @@ See `CLAUDE.md` for the full architecture and the deliberate decisions behind it
 | 7 API | `backend/api/{app,schemas}.py` | FastAPI over the backend, auto-lock, error mapping |
 | 8 Web UI | `backend/api/static/*`, `backend/desktop.py` | tabbed SPA + pywebview launcher |
 
-**Tests:** `python -m pytest` → 146 passing (plus `python tests/test_crypto.py` runs
+**Tests:** `python -m pytest` → 163 passing (plus `python tests/test_crypto.py` runs
 standalone). The full stack has also been live-smoke-tested through the browser UI.
 
 Not started: phone wrappers (Android/iOS) against the same API; camera receipt capture.
@@ -105,3 +105,19 @@ The previously API-only features now have web-UI front ends:
 - **Bokslut** section: lock a period, and book year-end accruals (vändning).
 - **Reports**: SIE export now takes company name, org.nr and an optional fiscal year
   (so #IB/#UB/#RES balances are emitted).
+
+### Receipt capture + encrypted storage (2026-06)
+
+- **Multi-rate expense entry**: the Bokför form now has a lines editor (add/remove rows),
+  so one receipt can carry 6 % + 12 % + 25 % moms. Backend `record_expense` already took
+  a `lines` list — this is the manual counterpart to what OCR will later prefill.
+- **Receipt photos**: import a file or take a photo (file `capture` opens the phone
+  camera; a live `getUserMedia` "Ta foto" button covers desktop webcams). Stored
+  AES-256-GCM-encrypted (book DEK) as files in `<db>.photos/`, indexed by a new `receipt`
+  table; deletable only while the purchase is still pending. View via 📎 in Transaktioner.
+- **Schema migration**: `SCHEMA_VERSION` 1→2; `schema.migrate()` runs on book open so
+  existing books gain the `receipt` table automatically.
+- **OCR is deferred** (decision: clashes with pure-pip/offline/privacy). A clean seam is
+  planned — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
+  `{lines,total}` the lines editor already edits. Engine choice (Claude vision vs.
+  Tesseract vs. both) still open; revisit when ready.

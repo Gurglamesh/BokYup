@@ -35,10 +35,13 @@ Money is integer ören throughout (see schema money helpers).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
 from typing import Optional
 
 from backend.db.manager import BookSession
@@ -551,6 +554,84 @@ class BookOps:
             (date,),
         ).fetchone()
         return row is not None
+
+    # ==================================================================
+    # Receipts (encrypted photos, stored as files beside the db)
+    # ==================================================================
+
+    def _photos_dir(self) -> Path:
+        from backend.db import bundle  # local import avoids a circular dependency
+        return bundle._photos_dir(Path(self.session.record.db_path))
+
+    def attach_receipt(self, transaktion_id: int, data: bytes, mime: str,
+                       original_format: Optional[str] = None) -> dict:
+        """
+        Store a receipt photo for a transaktion: the bytes are encrypted with the
+        book DEK and written as a file in `<db>.photos/`; a `receipt` row indexes it.
+        The plaintext never touches disk. Returns the new receipt's metadata.
+        """
+        if self.conn.execute(
+            "SELECT 1 FROM transaktion WHERE id=?", (transaktion_id,)
+        ).fetchone() is None:
+            raise KeyError(f"No transaktion {transaktion_id}")
+        if original_format is not None and original_format not in S.RECEIPT_FORMATS:
+            raise ValueError(f"Invalid receipt format: {original_format}")
+
+        enc = self.session.encrypt_blob(data)
+        filename = f"{uuid.uuid4().hex}.bin"
+        photos = self._photos_dir()
+        photos.mkdir(parents=True, exist_ok=True)
+        (photos / filename).write_bytes(enc)
+
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO receipt(transaktion_id, filename, mime, original_format, "
+                "byte_size, sha256, created_at) VALUES (?,?,?,?,?,?,?)",
+                (transaktion_id, filename, mime, original_format,
+                 len(data), hashlib.sha256(enc).hexdigest(), _now()),
+            )
+        return {"id": cur.lastrowid, "transaktion_id": transaktion_id,
+                "filename": filename, "mime": mime, "byte_size": len(data)}
+
+    def list_receipts(self, transaktion_id: int) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT id, transaktion_id, mime, original_format, byte_size, created_at "
+            "FROM receipt WHERE transaktion_id=? ORDER BY id",
+            (transaktion_id,),
+        ).fetchall()]
+
+    def get_receipt(self, receipt_id: int) -> tuple[bytes, str]:
+        """Return (plaintext_bytes, mime) for a stored receipt, verifying integrity."""
+        row = self.conn.execute(
+            "SELECT filename, mime, sha256 FROM receipt WHERE id=?", (receipt_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"No receipt {receipt_id}")
+        enc = (self._photos_dir() / row["filename"]).read_bytes()
+        if hashlib.sha256(enc).hexdigest() != row["sha256"]:
+            raise OperationError(f"Receipt {receipt_id} failed integrity check")
+        return self.session.decrypt_blob(enc), row["mime"]
+
+    def delete_receipt(self, receipt_id: int) -> None:
+        """
+        Remove a receipt — allowed ONLY while its transaktion is still pending
+        (not yet booked into a verifikation). Once posted the receipt is part of the
+        immutable legal record.
+        """
+        row = self.conn.execute(
+            "SELECT r.filename, t.verifikation_id FROM receipt r "
+            "JOIN transaktion t ON t.id = r.transaktion_id WHERE r.id=?",
+            (receipt_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"No receipt {receipt_id}")
+        if row["verifikation_id"] is not None:
+            raise InvalidState("Cannot delete a receipt once its transaktion is booked")
+        with self.conn:
+            self.conn.execute("DELETE FROM receipt WHERE id=?", (receipt_id,))
+        f = self._photos_dir() / row["filename"]
+        if f.exists():
+            f.unlink()
 
     # ==================================================================
     # Internal helpers

@@ -269,3 +269,36 @@ class TestMomsRate:
     def test_unknown_rate_raises(self):
         with pytest.raises(ValueError):
             S.moms_rate("18")
+
+
+# ---------------------------------------------------------------------------
+# Forward migration (existing books gain new tables)
+# ---------------------------------------------------------------------------
+
+class TestMigration:
+    def test_fresh_schema_is_current(self, conn):
+        assert S.get_schema_version(conn) == S.SCHEMA_VERSION
+        assert S.SCHEMA_VERSION >= 2
+
+    def test_migrate_adds_receipt_table_to_v1_db(self, tmp_path: Path):
+        # Simulate a pre-receipt (v1) book: full schema minus the receipt table.
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        S.initialize_schema(db)
+        db.execute("DROP TABLE receipt")
+        db.execute("PRAGMA user_version = 1")
+        db.commit()
+        assert S.get_schema_version(db) == 1
+
+        result = S.migrate(db)
+        assert result == S.SCHEMA_VERSION
+        assert S.get_schema_version(db) == S.SCHEMA_VERSION
+        # receipt table now exists and is usable
+        names = {r["name"] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "receipt" in names
+
+    def test_migrate_is_idempotent(self, conn):
+        before = S.get_schema_version(conn)
+        assert S.migrate(conn) == before     # already current -> no-op
+        assert S.migrate(conn) == before

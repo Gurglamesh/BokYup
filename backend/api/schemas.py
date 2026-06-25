@@ -148,3 +148,9 @@ class PeriodLockReq(BaseModel):
 
 class YearEndAccrualReq(BaseModel):
     fiscal_year_end: str          # YYYY-MM-DD (last day of the räkenskapsår)
+
+
+class ReceiptUploadReq(BaseModel):
+    image_base64: str             # the raw image bytes, base64-encoded
+    mime: str                     # e.g. 'image/jpeg', 'image/png'
+    original_format: Optional[str] = None   # 'paper' | 'digital'
