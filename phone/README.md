@@ -50,11 +50,13 @@ npx cap open android     # build/run in Android Studio (or `cap open ios` in Xco
 - **Camera receipt capture** — already works: the receipt picker uses `getUserMedia`
   and `<input type=file capture>`, which a WebView supports. `@capacitor/camera` is
   listed if you prefer the native picker.
-- **Backup/restore file in/out** — the one remaining native bridge. On desktop the
-  `.buyn` export/import use filesystem paths; on the phone, wire `@capacitor/filesystem`
-  + `@capacitor/share` so "Exportera säkerhetskopia" shares the bytes Pyodide wrote and
-  "Importera" reads a picked file into the Pyodide FS before calling `/books/import`.
-  The backend/API are identical across platforms — only this byte-bridge is phone-specific.
+- **Backup/restore file in/out** — implemented in `native-bridge.js` (included only in
+  the phone build, injected by `build_www.py`). It provides `window.__BOKYUP_FILES__`:
+  export shares the `.buyn` bytes Pyodide wrote via `@capacitor/filesystem` +
+  `@capacitor/share`; restore reads a picked file into the Pyodide FS, then the shared
+  UI calls `/books/import`. The backend/API are identical across platforms — only this
+  byte-bridge is phone-specific. **Exercise on a device** to confirm the plugin calls
+  (the desktop filesystem-path path is already tested).
 
 ## Persistence
 
