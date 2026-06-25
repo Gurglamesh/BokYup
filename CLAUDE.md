@@ -51,6 +51,13 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
 - AES-256-GCM everywhere (authenticated; detects tampering).
 - We deliberately do **application-level field/blob encryption** instead of SQLCipher
   to keep the stack pip-installable on every OS including phone wrappers.
+- **Argon2id `parallelism` is fixed at 1 (decided 2026-06, do NOT raise it).** The same
+  Python crypto core runs on the phone as WebAssembly (Pyodide), which has no pthreads:
+  any parallelism > 1 raises "Threading failure" there, and a single lane makes the KEK
+  derivation bit-for-bit deterministic across PC and phone. This is what lets a book
+  exported on a PC unlock unchanged on the phone (verified: native CPython and Pyodide
+  314 produce identical KEKs — frozen as a contract in `tests/test_crypto_vectors.py`).
+  Strengthen the KEK via `time_cost`/`memory_cost`, never `parallelism`.
 
 ## Auto-lock (decided)
 
