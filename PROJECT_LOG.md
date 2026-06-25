@@ -93,6 +93,30 @@ divergence. (As of this log: auto-push after each commit is the agreed default.)
 - Optional: richer transaction views/filtering; hide synthetic accrual/rättelse
   transaktioner from the default list (they carry `note` = periodisering/återföring/rättelse).
 
+### Phone + PC parity, fully local, cross-device .buyn (2026-06)
+
+Goal: the **full app on both phone and PC**, fully local (no server), and a book
+exported on PC imports on phone and vice-versa. The phone runs the **same Python
+backend** as the PC, compiled to **WebAssembly via Pyodide**, inside the WebView —
+legal logic stays written-once in Python. Status: **proven end-to-end**, device
+builds remain (need Android Studio/Xcode + a desktop OS, not doable in headless CI).
+
+- **Feasibility proven under real Pyodide** (`tools/wasm-smoke/`): the actual
+  `crypto.py` + sqlite3 run in WASM; both directions of `.buyn` export/import
+  decrypt every field + receipt photo across native CPython ↔ WASM.
+- **Crypto contract**: Argon2 `parallelism=1` (pinned in `crypto.py`, frozen vector
+  in `tests/test_crypto_vectors.py`) — `>1` throws "Threading failure" in WASM, and
+  `=1` makes PC and phone derive identical keys (what enables PC→phone unlock).
+- **Phase 1** `backend/api/facade.py` — one transport-independent dispatcher; FastAPI
+  (PC) and the in-process phone shim drive the same handlers.
+- **Phase 2** `backend/api/phone.py` (JSON boundary) + `static/pyodide-boot.js`
+  (boots Pyodide, IndexedDB persistence) + `api()` native branch in `app.js`.
+- **Phase 4** key management (change passphrase, recovery key), backup, and reference
+  editing surfaced in the shared UI (lands on both platforms).
+- **Phases 5–6** scaffolds: `phone/` (Capacitor + `build_www.py`) and `packaging/`
+  (PyInstaller). Remaining: run the device/OS builds, and the phone `.buyn`
+  file-bridge (`@capacitor/filesystem`+`share`) — backend/API are already identical.
+
 ### Done since the 8-layer build (UI surfacing, 2026-06)
 
 The previously API-only features now have web-UI front ends:

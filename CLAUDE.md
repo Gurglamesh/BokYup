@@ -212,7 +212,17 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
       `{lines,total}` shape the form already edits. Engine choice still open.
-- [ ] Later — phone wrappers (Android/iOS) against the same API; camera receipt capture.
+- [~] **Phone = same backend as WASM (Pyodide), fully local** (2026-06). Decided NOT to
+      run a server or talk to the PC: the phone runs the SAME Python backend compiled to
+      WebAssembly inside the WebView, so legal logic stays written-once. Proven end-to-end
+      (`tools/wasm-smoke/`): real `crypto.py` + sqlite3 run in WASM and `.buyn` export/
+      import round-trips BOTH ways across native CPython ↔ WASM (encrypted fields + receipt
+      photos intact). Enabler: Argon2 `parallelism=1` (see Encryption). Shipped: transport-
+      independent `api/facade.py` (Phase 1), `api/phone.py` JSON boundary + `static/
+      pyodide-boot.js` + `app.js` native branch (Phase 2), key-mgmt/backup/reference-edit
+      UI (Phase 4). Scaffolded, build on a dev machine: `phone/` (Capacitor) + `packaging/`
+      (PyInstaller). Remaining: run device/OS builds; phone `.buyn` file-bridge
+      (`@capacitor/filesystem`+`share`). Camera receipt capture already works in the WebView.
 
 ## Working agreement
 
