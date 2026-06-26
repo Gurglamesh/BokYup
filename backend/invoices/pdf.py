@@ -31,8 +31,12 @@ def _qty(centi: int) -> str:
     return f"{centi / 100:.2f}".replace(".", ",")
 
 
-def render_invoice_pdf(invoice: dict) -> bytes:
-    """Return PDF bytes for the dict returned by BookOps.get_invoice()."""
+def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
+    """Return PDF bytes for the dict returned by BookOps.get_invoice().
+
+    `logo_png` is the book's logo (PNG bytes); when given it is drawn top-right and
+    appears on every document.
+    """
     from fpdf import FPDF
 
     seller = invoice.get("seller") or {}
@@ -51,6 +55,21 @@ def render_invoice_pdf(invoice: dict) -> bytes:
         pdf.set_font("Helvetica", "B" if bold else "", size)
         pdf.cell(0, 5, _s(s))
 
+    # ---- logo (top-right, on every document), fit within 45 x 24 mm ----------
+    logo_bottom = 12
+    if logo_png:
+        import io
+        from PIL import Image
+        iw, ih = Image.open(io.BytesIO(logo_png)).size
+        ratio = (iw / ih) if ih else 1
+        w = 45.0
+        h = w / ratio
+        if h > 24:
+            h = 24.0
+            w = h * ratio
+        pdf.image(io.BytesIO(logo_png), x=pdf.w - pdf.r_margin - w, y=12, w=w, h=h)
+        logo_bottom = 12 + h
+
     # ---- header: title + seller (left) / invoice meta (right) ----------------
     text(pdf.l_margin, 16, "FAKTURA", size=22, bold=True)
     y = 30
@@ -68,13 +87,13 @@ def render_invoice_pdf(invoice: dict) -> bytes:
         y += 5
         pdf.set_xy(pdf.l_margin, y); pdf.cell(0, 5, _s("Godkänd för F-skatt"))
 
-    # invoice meta box (right)
+    # invoice meta box (right) — pushed below the logo if there is one
     mx = pdf.l_margin + W * 0.62
     meta = [("Fakturanr", str(invoice.get("invoice_number") or "")),
             ("Fakturadatum", invoice.get("invoice_date") or ""),
             ("Förfallodatum", invoice.get("due_date") or ""),
             ("Leveransdatum", invoice.get("delivery_date") or "")]
-    my = 30
+    my = max(30, logo_bottom + 3)
     for label, val in meta:
         if not val:
             continue

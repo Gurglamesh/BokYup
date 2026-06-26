@@ -567,13 +567,53 @@ class BookOps:
 
     def get_company(self) -> dict:
         row = self.conn.execute(
-            "SELECT id, name, org_nr, vat_nr, address, email, phone, f_skatt, updated_at "
-            "FROM company WHERE id=1"
+            "SELECT id, name, org_nr, vat_nr, address, email, phone, f_skatt, updated_at, "
+            "(logo_enc IS NOT NULL) AS has_logo FROM company WHERE id=1"
         ).fetchone()
         if row is None:
             return {"id": 1, "name": None, "org_nr": None, "vat_nr": None,
-                    "address": None, "email": None, "phone": None, "f_skatt": 1}
-        return dict(row)
+                    "address": None, "email": None, "phone": None, "f_skatt": 1,
+                    "has_logo": False}
+        d = dict(row)
+        d["has_logo"] = bool(d["has_logo"])
+        return d
+
+    def set_logo(self, image_bytes: bytes) -> None:
+        """
+        Store the book's logo (used on every document). Any common format the phone
+        or PC can produce (PNG/JPG/WEBP/…) is normalised to a size-bounded PNG via
+        Pillow, then AES-256-GCM-encrypted with the DEK and stored in the company row
+        (so it travels in the .buyn bundle). Replaces any existing logo.
+        """
+        import io
+        from PIL import Image
+        try:
+            img = Image.open(io.BytesIO(image_bytes))
+            img.load()
+        except Exception as exc:
+            raise ValueError("Unsupported or corrupt image") from exc
+        img = img.convert("RGBA")
+        max_px = 600
+        if max(img.size) > max_px:
+            img.thumbnail((max_px, max_px))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        enc = self.session.encrypt_blob(buf.getvalue())
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO company(id) VALUES (1)")
+            self.conn.execute("UPDATE company SET logo_enc=?, updated_at=? WHERE id=1",
+                              (enc, _now()))
+
+    def get_logo(self) -> Optional[tuple[bytes, str]]:
+        """Return (png_bytes, 'image/png') for the book's logo, or None if unset."""
+        row = self.conn.execute("SELECT logo_enc FROM company WHERE id=1").fetchone()
+        if row is None or row["logo_enc"] is None:
+            return None
+        return self.session.decrypt_blob(row["logo_enc"]), "image/png"
+
+    def delete_logo(self) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE company SET logo_enc=NULL, updated_at=? WHERE id=1", (_now(),))
 
     def set_company(self, **fields) -> None:
         allowed = ("name", "org_nr", "vat_nr", "address", "email", "phone", "f_skatt")

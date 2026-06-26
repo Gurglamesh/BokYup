@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -244,6 +244,7 @@ CREATE TABLE company (
     email       TEXT,
     phone       TEXT,
     f_skatt     INTEGER NOT NULL DEFAULT 1,            -- godkänd för F-skatt
+    logo_enc    BLOB,                                  -- AES-GCM(DEK) PNG logo, on all documents
     updated_at  TEXT
 );
 
@@ -476,6 +477,9 @@ _MIGRATIONS: dict[int, str] = {
         CREATE INDEX IF NOT EXISTS idx_invoice_line_inv ON invoice_line(invoice_id);
         CREATE INDEX IF NOT EXISTS idx_rut_recipient_inv ON rut_recipient(invoice_id);
     """,
+    4: """
+        ALTER TABLE company ADD COLUMN logo_enc BLOB;
+    """,
 }
 
 
@@ -488,11 +492,29 @@ def migrate(conn: sqlite3.Connection) -> int:
     current = get_schema_version(conn)
     for target in sorted(_MIGRATIONS):
         if current < target:
-            conn.executescript(_MIGRATIONS[target])
+            _run_migration(conn, _MIGRATIONS[target])
             conn.execute(f"PRAGMA user_version = {target}")
             current = target
     conn.commit()
     return current
+
+
+def _run_migration(conn: sqlite3.Connection, script: str) -> None:
+    """
+    Execute a forward migration statement-by-statement, tolerating an already-applied
+    `ALTER TABLE ... ADD COLUMN` (SQLite has no IF NOT EXISTS for it). This keeps
+    migrations idempotent so a partially-migrated book can be re-run safely. The
+    statements here contain no semicolons inside literals, so a naive split is safe.
+    """
+    for stmt in script.split(";"):
+        sql = stmt.strip()
+        if not sql:
+            continue
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
 
 def is_initialized(conn: sqlite3.Connection) -> bool:

@@ -465,3 +465,43 @@ class TestInvoices:
         assert pdf.status_code == 200
         assert pdf.headers["content-type"] == "application/pdf"
         assert pdf.content[:4] == b"%PDF"
+
+
+class TestLogo:
+    def _b64png(self):
+        import base64, io
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (200, 80), (20, 90, 170)).save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode()
+
+    def test_logo_upload_get_delete(self, client, book):
+        assert client.get(f"/books/{book}/logo").status_code == 404      # none yet
+        assert client.put(f"/books/{book}/logo",
+                          json={"image_base64": self._b64png()}).status_code == 200
+        assert client.get(f"/books/{book}/company").json()["has_logo"] is True
+        img = client.get(f"/books/{book}/logo")
+        assert img.status_code == 200
+        assert img.headers["content-type"] == "image/png"
+        assert img.content[:4] == b"\x89PNG"
+        assert client.delete(f"/books/{book}/logo").status_code == 200
+        assert client.get(f"/books/{book}/logo").status_code == 404
+
+    def test_logo_appears_on_invoice_pdf(self, client, book):
+        client.put(f"/books/{book}/logo", json={"image_base64": self._b64png()})
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "T", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "private", "first_name": "A", "last_name": "B",
+                                "personnummer": "811218-9876"}).json()["kundnummer"]
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "X", "quantity_centi": 100,
+                       "unit_price_ore": 100000, "rate_code": "25"}]}).json()
+        pdf = client.get(f"/books/{book}/invoices/{inv['invoice_id']}/pdf")
+        assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
+
+    def test_logo_rejects_bad_base64(self, client, book):
+        resp = client.put(f"/books/{book}/logo", json={"image_base64": "not base64!!!"})
+        assert resp.status_code == 400

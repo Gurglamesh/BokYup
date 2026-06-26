@@ -172,6 +172,10 @@ class CompanyReq(BaseModel):
     f_skatt: Optional[int] = None
 
 
+class LogoReq(BaseModel):
+    image_base64: str             # any common image; normalised to PNG server-side
+
+
 class PaymentMethodReq(BaseModel):
     label: str                    # "Swish" | "Bankgiro" | "IBAN" | ...
     value: str                    # the number / link

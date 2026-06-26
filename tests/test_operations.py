@@ -542,3 +542,31 @@ class TestInvoices:
         assert got["seller"]["name"] == "Min Firma AB"
         assert got["payment_methods"][0]["label"] == "Swish"
         assert got["lines"][0]["description"] == "X"
+
+
+class TestLogo:
+    def _png(self, fmt="PNG"):
+        import io
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (200, 80), (20, 90, 170)).save(buf, format=fmt)
+        return buf.getvalue()
+
+    def test_set_get_delete_logo(self, ops):
+        assert ops.get_company()["has_logo"] is False
+        assert ops.get_logo() is None
+        ops.set_logo(self._png("PNG"))
+        assert ops.get_company()["has_logo"] is True
+        data, mime = ops.get_logo()
+        assert mime == "image/png" and data[:4] == b"\x89PNG"
+        ops.delete_logo()
+        assert ops.get_company()["has_logo"] is False and ops.get_logo() is None
+
+    def test_logo_normalises_webp_to_png(self, ops):
+        ops.set_logo(self._png("WEBP"))               # uploaded as webp
+        data, mime = ops.get_logo()
+        assert mime == "image/png" and data[:4] == b"\x89PNG"
+
+    def test_logo_rejects_garbage(self, ops):
+        with pytest.raises(ValueError):
+            ops.set_logo(b"not an image")

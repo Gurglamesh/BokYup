@@ -308,6 +308,20 @@ def _build_router():
     def set_company(book_id: str, body: sc.CompanyReq, request: Request):
         return fac(request).h_set_company({"book_id": book_id}, body.model_dump(), {})
 
+    # ---- logo (used on every document) ----
+    @r.get("/books/{book_id}/logo")
+    def get_logo(book_id: str, request: Request):
+        res = fac(request).h_get_logo({"book_id": book_id}, {}, {})
+        return Response(content=res.content, media_type=res.media_type)
+
+    @r.put("/books/{book_id}/logo")
+    def set_logo(book_id: str, body: sc.LogoReq, request: Request):
+        return fac(request).h_set_logo({"book_id": book_id}, body.model_dump(), {})
+
+    @r.delete("/books/{book_id}/logo")
+    def delete_logo(book_id: str, request: Request):
+        return fac(request).h_delete_logo({"book_id": book_id}, {}, {})
+
     # ---- payment methods ----
     @r.get("/books/{book_id}/payment-methods")
     def list_payment_methods(book_id: str, request: Request):

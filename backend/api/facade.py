@@ -351,6 +351,27 @@ class AppFacade:
         self._ops(p["book_id"]).set_company(**_clean(b))
         return {"saved": True}
 
+    def h_get_logo(self, p, b, q):
+        logo = self._ops(p["book_id"]).get_logo()
+        if logo is None:
+            raise KeyError("No logo set")
+        data, mime = logo
+        return RawResult(content=data, media_type=mime)
+
+    def h_set_logo(self, p, b, q):
+        import base64
+        import binascii
+        try:
+            data = base64.b64decode(b["image_base64"], validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("image_base64 is not valid base64")
+        self._ops(p["book_id"]).set_logo(data)
+        return {"saved": True}
+
+    def h_delete_logo(self, p, b, q):
+        self._ops(p["book_id"]).delete_logo()
+        return {"deleted": True}
+
     # ---- payment methods ----
     def h_list_payment_methods(self, p, b, q):
         return self._ops(p["book_id"]).list_payment_methods()
@@ -381,7 +402,9 @@ class AppFacade:
     def h_invoice_pdf(self, p, b, q):
         from backend.invoices.pdf import render_invoice_pdf
         ops = self._ops(p["book_id"])
-        pdf = render_invoice_pdf(ops.get_invoice(int(p["invoice_id"])))
+        logo = ops.get_logo()
+        pdf = render_invoice_pdf(ops.get_invoice(int(p["invoice_id"])),
+                                 logo_png=logo[0] if logo else None)
         return RawResult(content=pdf, media_type="application/pdf")
 
 
@@ -452,6 +475,9 @@ _route("GET", "/books/{book_id}/reports/sie", "h_report_sie")
 
 _route("GET", "/books/{book_id}/company", "h_get_company")
 _route("PUT", "/books/{book_id}/company", "h_set_company")
+_route("GET", "/books/{book_id}/logo", "h_get_logo")
+_route("PUT", "/books/{book_id}/logo", "h_set_logo")
+_route("DELETE", "/books/{book_id}/logo", "h_delete_logo")
 _route("GET", "/books/{book_id}/payment-methods", "h_list_payment_methods")
 _route("POST", "/books/{book_id}/payment-methods", "h_create_payment_method", 201)
 _route("PATCH", "/books/{book_id}/payment-methods/{payment_method_id}", "h_update_payment_method")

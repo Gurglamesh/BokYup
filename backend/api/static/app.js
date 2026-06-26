@@ -614,6 +614,38 @@ const SECTION_RENDERERS = {
     panel.appendChild(el("div", { style: "margin:6px 0 22px" },
       el("button", { class: "btn", onclick: () => guard(saveCompany) }, "Spara företagsuppgifter")));
 
+    // --- Logo (used on every document) ---
+    panel.appendChild(el("h3", {}, "Logotyp"));
+    panel.appendChild(el("p", { class: "muted" },
+      "Visas på alla dokument (fakturor m.m.). PNG, JPG, WEBP — kan bytas när som helst."));
+    const logoImg = el("img", { class: "receipt-thumb", style: "max-height:70px;display:none" });
+    const logoFile = el("input", { type: "file", accept: "image/png,image/jpeg,image/webp,image/gif,image/*" });
+    const removeLogo = el("button", { class: "btn small ghost", onclick: () => guard(async () => {
+      await api("DELETE", `/books/${bid()}/logo`); toast("Logotyp borttagen"); showLogo(false);
+    }) }, "Ta bort logotyp");
+    logoFile.addEventListener("change", () => guard(async () => {
+      const f = logoFile.files && logoFile.files[0];
+      if (!f) return;
+      await api("PUT", `/books/${bid()}/logo`, { image_base64: await blobToBase64(f) });
+      toast("Logotyp sparad"); showLogo(true);
+    }));
+    panel.appendChild(el("div", { class: "row", style: "align-items:center" },
+      logoImg, logoFile, removeLogo));
+    panel.appendChild(el("div", { style: "margin-bottom:22px" }));
+    showLogo(company.has_logo);
+
+    async function showLogo(has) {
+      removeLogo.style.display = has ? "" : "none";
+      if (!has) { logoImg.style.display = "none"; logoImg.removeAttribute("src"); return; }
+      if (window.__BOKYUP_NATIVE__) {
+        const r = await api("GET", `/books/${bid()}/logo`);
+        logoImg.src = `data:${r.media_type};base64,${r.base64}`;
+      } else {
+        logoImg.src = `/books/${bid()}/logo?t=${Date.now()}`;
+      }
+      logoImg.style.display = "block";
+    }
+
     // --- Payment methods ---
     panel.appendChild(el("h3", {}, "Betalsätt"));
     panel.appendChild(el("p", { class: "muted" }, "T.ex. Swish, Bankgiro, IBAN — namn + nummer/länk."));
