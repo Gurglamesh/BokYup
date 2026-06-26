@@ -562,6 +562,191 @@ class BookOps:
         return row is not None
 
     # ==================================================================
+    # Company profile (seller) + payment methods — reference data
+    # ==================================================================
+
+    def get_company(self) -> dict:
+        row = self.conn.execute(
+            "SELECT id, name, org_nr, vat_nr, address, email, phone, f_skatt, updated_at "
+            "FROM company WHERE id=1"
+        ).fetchone()
+        if row is None:
+            return {"id": 1, "name": None, "org_nr": None, "vat_nr": None,
+                    "address": None, "email": None, "phone": None, "f_skatt": 1}
+        return dict(row)
+
+    def set_company(self, **fields) -> None:
+        allowed = ("name", "org_nr", "vat_nr", "address", "email", "phone", "f_skatt")
+        data = {k: v for k, v in fields.items() if k in allowed}
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO company(id) VALUES (1)")
+            if data:
+                sets = ", ".join(f"{k}=?" for k in data)
+                self.conn.execute(f"UPDATE company SET {sets}, updated_at=? WHERE id=1",
+                                  (*data.values(), _now()))
+
+    def list_payment_methods(self, active_only: bool = False) -> list[dict]:
+        sql = ("SELECT id, label, value, sort_order, active FROM payment_method "
+               + ("WHERE active=1 " if active_only else "") + "ORDER BY sort_order, id")
+        return [dict(r) for r in self.conn.execute(sql).fetchall()]
+
+    def create_payment_method(self, label: str, value: str, sort_order: int = 0) -> int:
+        if not label or not value:
+            raise ValueError("Payment method needs a label and a value")
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO payment_method(label, value, sort_order) VALUES (?,?,?)",
+                (label, value, sort_order))
+        return cur.lastrowid
+
+    def update_payment_method(self, payment_method_id: int, **fields) -> None:
+        allowed = ("label", "value", "sort_order", "active")
+        data = {k: v for k, v in fields.items() if k in allowed}
+        if not data:
+            return
+        sets = ", ".join(f"{k}=?" for k in data)
+        with self.conn:
+            self.conn.execute(f"UPDATE payment_method SET {sets} WHERE id=?",
+                              (*data.values(), payment_method_id))
+
+    # ==================================================================
+    # Invoices (faktura) — issued as a pending income; numbered sequentially
+    # ==================================================================
+
+    def create_invoice(self, *, customer_id: int, category_id: int,
+                       invoice_date: str, due_date: str, lines: list[dict],
+                       recipients: Optional[list[dict]] = None,
+                       delivery_date: Optional[str] = None,
+                       payment_terms: Optional[str] = None,
+                       our_reference: Optional[str] = None,
+                       your_reference: Optional[str] = None,
+                       note: Optional[str] = None) -> dict:
+        """
+        Issue a faktura: compute the article lines, snapshot the buyer/seller/payment
+        methods, split RUT across household recipients, and create the underlying
+        PENDING income (so the existing pending->paid booking and the reports apply).
+        Assigns the next unbroken invoice_number. Returns a summary dict.
+        """
+        customer = self.get_customer(customer_id)
+        self._check_category(category_id, "income")
+        recipients = recipients or []
+        if not lines:
+            raise ValueError("An invoice needs at least one article line")
+
+        # 1) Per-line figures + aggregate the moms lines by rate (unit price is ex-moms).
+        computed, agg = [], {}
+        for i, ln in enumerate(lines, start=1):
+            rate_code = ln["rate_code"]
+            if rate_code not in S.MOMS_RATES:
+                raise ValueError(f"Unknown moms rate {rate_code!r}")
+            qty_centi = int(ln["quantity_centi"])
+            unit_price_ore = int(ln["unit_price_ore"])
+            ex = round(qty_centi * unit_price_ore / 100)
+            _, moms, _ = compute_moms_figures(ex, rate_code, inclusive=False)
+            computed.append({
+                "line_no": i, "description": ln["description"], "quantity_centi": qty_centi,
+                "unit": ln.get("unit"), "unit_price_ore": unit_price_ore, "rate_code": rate_code,
+                "rut_eligible": 1 if ln.get("rut_eligible") else 0,
+                "ex_moms_ore": ex, "moms_ore": moms,
+            })
+            agg[rate_code] = agg.get(rate_code, 0) + ex
+        moms_lines = [{"rate_code": rc, "amount_ore": ex, "inclusive": False}
+                      for rc, ex in agg.items()]
+
+        # 2) RUT recipients (household split) — validate name + personnummer.
+        rut_total = 0
+        clean_recipients = []
+        for r in recipients:
+            if not r.get("first_name") or not r.get("last_name"):
+                raise ValueError("Each RUT recipient needs a first and last name")
+            if not S.is_valid_personnummer(r["personnummer"]):
+                raise ValueError("RUT recipient has an invalid personnummer")
+            amount = int(r["rut_amount_ore"])
+            rut_total += amount
+            clean_recipients.append({
+                "first_name": r["first_name"], "last_name": r["last_name"],
+                "personnummer": S.normalize_personnummer(r["personnummer"]),
+                "rut_amount_ore": amount,
+            })
+
+        # 3) Underlying pending income (snapshot + moms_lines + rut_claim + reports).
+        income = self.record_income(customer_id, category_id, moms_lines, invoice_date,
+                                    rut_amount_ore=rut_total, note=note)
+        tid = income["transaktion_id"]
+        ex_total, _, inc_total = self._sum_moms(tid)
+        moms_total = inc_total - ex_total
+
+        # 4) Frozen snapshots + the sequential invoice number.
+        buyer_snapshot_enc = self.session.encrypt_text(json.dumps(customer, default=str))
+        seller_snapshot = json.dumps(self.get_company(), default=str)
+        pm_snapshot = json.dumps(self.list_payment_methods(active_only=True), default=str)
+        number = self.conn.execute(
+            "SELECT COALESCE(MAX(invoice_number), 0) FROM invoice").fetchone()[0] + 1
+
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO invoice(invoice_number, customer_id, transaktion_id, invoice_date, "
+                "due_date, delivery_date, payment_terms, buyer_snapshot_enc, seller_snapshot, "
+                "payment_methods_snapshot, our_reference, your_reference, note, ex_moms_ore, "
+                "moms_ore, inc_moms_ore, rut_total_ore, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (number, customer_id, tid, invoice_date, due_date, delivery_date, payment_terms,
+                 buyer_snapshot_enc, seller_snapshot, pm_snapshot, our_reference, your_reference,
+                 note, ex_total, moms_total, inc_total, rut_total, _now()))
+            invoice_id = cur.lastrowid
+            for cl in computed:
+                self.conn.execute(
+                    "INSERT INTO invoice_line(invoice_id, line_no, description, quantity_centi, "
+                    "unit, unit_price_ore, rate_code, rut_eligible, ex_moms_ore, moms_ore) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (invoice_id, cl["line_no"], cl["description"], cl["quantity_centi"],
+                     cl["unit"], cl["unit_price_ore"], cl["rate_code"], cl["rut_eligible"],
+                     cl["ex_moms_ore"], cl["moms_ore"]))
+            for r in clean_recipients:
+                self.conn.execute(
+                    "INSERT INTO rut_recipient(invoice_id, first_name, last_name, "
+                    "personnummer_enc, rut_amount_ore) VALUES (?,?,?,?,?)",
+                    (invoice_id, r["first_name"], r["last_name"],
+                     self.session.encrypt_text(r["personnummer"]), r["rut_amount_ore"]))
+
+        return {"invoice_id": invoice_id, "invoice_number": number, "transaktion_id": tid,
+                "ex_moms_ore": ex_total, "moms_ore": moms_total, "inc_moms_ore": inc_total,
+                "rut_total_ore": rut_total}
+
+    def list_invoices(self) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT i.id, i.invoice_number, i.invoice_date, i.due_date, i.customer_id, "
+            "i.inc_moms_ore, i.rut_total_ore, t.status "
+            "FROM invoice i LEFT JOIN transaktion t ON t.id = i.transaktion_id "
+            "ORDER BY i.invoice_number").fetchall()]
+
+    def get_invoice(self, invoice_id: int) -> dict:
+        row = self.conn.execute("SELECT * FROM invoice WHERE id=?", (invoice_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No invoice {invoice_id}")
+        inv = dict(row)
+        status_row = self.conn.execute(
+            "SELECT status, payment_date FROM transaktion WHERE id=?",
+            (inv["transaktion_id"],)).fetchone()
+        inv["status"] = status_row["status"] if status_row else None
+        inv["payment_date"] = status_row["payment_date"] if status_row else None
+        inv["buyer"] = json.loads(self.session.decrypt_text(inv.pop("buyer_snapshot_enc")))
+        inv["seller"] = json.loads(inv.pop("seller_snapshot") or "{}")
+        inv["payment_methods"] = json.loads(inv.pop("payment_methods_snapshot") or "[]")
+        inv["lines"] = [dict(r) for r in self.conn.execute(
+            "SELECT line_no, description, quantity_centi, unit, unit_price_ore, rate_code, "
+            "rut_eligible, ex_moms_ore, moms_ore FROM invoice_line WHERE invoice_id=? "
+            "ORDER BY line_no", (invoice_id,)).fetchall()]
+        inv["recipients"] = [{
+            "first_name": r["first_name"], "last_name": r["last_name"],
+            "personnummer": self.session.decrypt_text(r["personnummer_enc"]),
+            "rut_amount_ore": r["rut_amount_ore"],
+        } for r in self.conn.execute(
+            "SELECT first_name, last_name, personnummer_enc, rut_amount_ore "
+            "FROM rut_recipient WHERE invoice_id=? ORDER BY id", (invoice_id,)).fetchall()]
+        return inv
+
+    # ==================================================================
     # Receipts (encrypted photos, stored as files beside the db)
     # ==================================================================
 

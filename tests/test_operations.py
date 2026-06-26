@@ -446,3 +446,99 @@ class TestReceipts:
     def test_attach_rejects_unknown_transaktion(self, ops: BookOps):
         with pytest.raises(KeyError):
             ops.attach_receipt(9999, b"x", "image/png")
+
+
+# ---------------------------------------------------------------------------
+# Invoices (faktura)
+# ---------------------------------------------------------------------------
+
+class TestInvoices:
+    def _setup(self, ops):
+        cat = ops.create_category("Tjänster", "income", 3001)
+        kid = ops.create_customer("private", first_name="Anna", last_name="Svensson",
+                                  personnummer="811218-9876", address="Storgatan 1, Stockholm")
+        return cat, kid
+
+    def test_company_and_payment_methods(self, ops):
+        ops.set_company(name="Min Firma AB", org_nr="556677-8899", vat_nr="SE556677889901",
+                        address="Vägen 2", f_skatt=1)
+        assert ops.get_company()["name"] == "Min Firma AB"
+        pid = ops.create_payment_method("Swish", "123 456 78 90")
+        ops.create_payment_method("Bankgiro", "123-4567", sort_order=1)
+        methods = ops.list_payment_methods(active_only=True)
+        assert [m["label"] for m in methods] == ["Swish", "Bankgiro"]
+        ops.update_payment_method(pid, active=0)
+        assert [m["label"] for m in ops.list_payment_methods(active_only=True)] == ["Bankgiro"]
+
+    def test_create_invoice_numbering_and_lines(self, ops):
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Konsult", "quantity_centi": 200, "unit": "h",
+                    "unit_price_ore": 100000, "rate_code": "25"},
+                   {"description": "Material", "quantity_centi": 100, "unit": "st",
+                    "unit_price_ore": 5000, "rate_code": "25"}])
+        # 2h*1000 + 1*50 = 2050 kr ex; moms 25% = 512.50 kr
+        assert inv["invoice_number"] == 1
+        assert inv["ex_moms_ore"] == 205000
+        assert inv["moms_ore"] == 51250
+        assert inv["inc_moms_ore"] == 256250
+        # next invoice gets the next unbroken number
+        inv2 = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-02",
+                                  due_date="2026-04-01",
+                                  lines=[{"description": "X", "quantity_centi": 100,
+                                          "unit_price_ore": 10000, "rate_code": "25"}])
+        assert inv2["invoice_number"] == 2
+
+    def test_invoice_is_pending_then_books_when_paid(self, ops):
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                                 due_date="2026-03-31",
+                                 lines=[{"description": "Jobb", "quantity_centi": 100,
+                                         "unit_price_ore": 100000, "rate_code": "25"}])
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["status"] == "pending"
+        ops.register_payment(inv["transaktion_id"], "2026-03-15")
+        assert ops.get_invoice(inv["invoice_id"])["status"] == "paid"
+
+    def test_rut_split_across_household(self, ops):
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Städning", "quantity_centi": 100, "unit_price_ore": 1000000,
+                    "rate_code": "25", "rut_eligible": True}],
+            recipients=[{"first_name": "Anna", "last_name": "Svensson",
+                         "personnummer": "811218-9876", "rut_amount_ore": 150000},
+                        {"first_name": "Björn", "last_name": "Svensson",
+                         "personnummer": "19811218-9876", "rut_amount_ore": 100000}])
+        assert inv["rut_total_ore"] == 250000
+        got = ops.get_invoice(inv["invoice_id"])
+        assert len(got["recipients"]) == 2
+        assert got["recipients"][0]["personnummer"] == "8112189876"   # normalized + decrypted
+        assert sum(r["rut_amount_ore"] for r in got["recipients"]) == 250000
+
+    def test_invoice_rejects_bad_recipient_personnummer(self, ops):
+        cat, kid = self._setup(ops)
+        with pytest.raises(ValueError):
+            ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                               due_date="2026-03-31",
+                               lines=[{"description": "X", "quantity_centi": 100,
+                                       "unit_price_ore": 1000, "rate_code": "25"}],
+                               recipients=[{"first_name": "A", "last_name": "B",
+                                            "personnummer": "811218-9875",  # bad Luhn
+                                            "rut_amount_ore": 100}])
+
+    def test_get_invoice_decrypts_buyer_and_snapshots(self, ops):
+        ops.set_company(name="Min Firma AB", org_nr="556677-8899")
+        ops.create_payment_method("Swish", "123 456 78 90")
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                                 due_date="2026-03-31",
+                                 lines=[{"description": "X", "quantity_centi": 100,
+                                         "unit_price_ore": 100000, "rate_code": "25"}])
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["buyer"]["first_name"] == "Anna"
+        assert got["buyer"]["personnummer"] == "811218-9876"
+        assert got["seller"]["name"] == "Min Firma AB"
+        assert got["payment_methods"][0]["label"] == "Swish"
+        assert got["lines"][0]["description"] == "X"
