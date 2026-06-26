@@ -221,6 +221,10 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       Inställningar. Verified end-to-end in a real browser on desktop and the phone
       WASM bundle. NOTE: per-recipient RUT *cap* tracking still uses the customer's
       claim (recipients captured for the document + future per-person cap).
+      LOGO (schema v4): an editable per-book logo (`company.logo_enc`) shown on every
+      document. Any PNG/JPG/WEBP is normalised to a size-bounded PNG via Pillow,
+      DEK-encrypted, and drawn top-right on the faktura (current logo at render time).
+      `set/get/delete_logo`, API `PUT/GET/DELETE /logo`, uploader in Inställningar.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
