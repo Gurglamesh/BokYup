@@ -208,6 +208,19 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       **multiple moms lines** (a receipt can mix 6/12/25 %) and a receipt picker (file
       import + `capture` for phone camera + live `getUserMedia` "Ta foto" on desktop);
       Transaktioner has a 📎 viewer. DONE, all tests pass, live-smoke-tested.
+- [x] **Invoices (faktura) + PDF** (2026-06). Fully compliant Swedish faktura on PC
+      AND phone. Schema v3 (company/payment_method/invoice/invoice_line/rut_recipient);
+      `create_invoice` numbers sequentially (unbroken), snapshots buyer(enc)/seller/
+      payment-methods, splits RUT across household recipients (each name + encrypted
+      personnummer + share of the skattereduktion), and issues the underlying PENDING
+      income so booking + reports are unchanged. PDF via **fpdf2** (`backend/invoices/
+      pdf.py`) — pure-pip and verified under Pyodide, so it renders on the phone too
+      (Pillow + fpdf2/defusedxml/fonttools vendored; pure wheels listed in
+      `vendor/pure_wheels.json`). API `/company` `/payment-methods` `/invoices(/pdf)`;
+      "Fakturor" UI with line-item + RUT-recipient editors; company + betalsätt in
+      Inställningar. Verified end-to-end in a real browser on desktop and the phone
+      WASM bundle. NOTE: per-recipient RUT *cap* tracking still uses the customer's
+      claim (recipients captured for the document + future per-person cap).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
