@@ -233,6 +233,7 @@ function renderHome() {
 const SECTIONS = [
   ["transactions", "Transaktioner"],
   ["record", "Bokför"],
+  ["invoices", "Fakturor"],
   ["customers", "Kunder"],
   ["suppliers", "Leverantörer"],
   ["categories", "Kategorier"],
@@ -590,6 +591,56 @@ const SECTION_RENDERERS = {
   async settings(panel) {
     panel.appendChild(el("h2", {}, "Inställningar"));
 
+    // --- Company / seller profile (for invoices) ---
+    const [company, methods] = await Promise.all([
+      api("GET", `/books/${bid()}/company`),
+      api("GET", `/books/${bid()}/payment-methods`),
+    ]);
+    panel.appendChild(el("h3", {}, "Företagsuppgifter (säljare)"));
+    panel.appendChild(el("p", { class: "muted" }, "Visas på fakturor."));
+    const cName = el("input", { type: "text", value: company.name || "" });
+    const cOrg = el("input", { type: "text", value: company.org_nr || "" });
+    const cVat = el("input", { type: "text", value: company.vat_nr || "" });
+    const cAddr = el("input", { type: "text", value: company.address || "" });
+    const cEmail = el("input", { type: "text", value: company.email || "" });
+    const cPhone = el("input", { type: "text", value: company.phone || "" });
+    const cFskatt = el("select", {}, el("option", { value: "1" }, "Ja"), el("option", { value: "0" }, "Nej"));
+    cFskatt.value = company.f_skatt ? "1" : "0";
+    panel.appendChild(el("div", { class: "row" },
+      wrap("Företagsnamn", cName), wrap("Org.nr", cOrg), wrap("Momsreg.nr", cVat)));
+    panel.appendChild(el("div", { class: "row" },
+      wrap("Adress", cAddr), wrap("E-post", cEmail), wrap("Telefon", cPhone),
+      wrap("Godkänd för F-skatt", cFskatt)));
+    panel.appendChild(el("div", { style: "margin:6px 0 22px" },
+      el("button", { class: "btn", onclick: () => guard(saveCompany) }, "Spara företagsuppgifter")));
+
+    // --- Payment methods ---
+    panel.appendChild(el("h3", {}, "Betalsätt"));
+    panel.appendChild(el("p", { class: "muted" }, "T.ex. Swish, Bankgiro, IBAN — namn + nummer/länk."));
+    panel.appendChild(simpleTable(["Betalsätt", "Nummer/länk", "Aktiv"],
+      methods.map((m) => [m.label, m.value, m.active ? "Ja" : "Nej"])));
+    panel.appendChild(el("div", { style: "margin:6px 0 22px" },
+      el("button", { class: "btn small", onclick: () => guard(addPaymentMethod) }, "+ Nytt betalsätt")));
+
+    async function saveCompany() {
+      await api("PUT", `/books/${bid()}/company`, {
+        name: cName.value || null, org_nr: cOrg.value || null, vat_nr: cVat.value || null,
+        address: cAddr.value || null, email: cEmail.value || null, phone: cPhone.value || null,
+        f_skatt: parseInt(cFskatt.value, 10),
+      });
+      toast("Företagsuppgifter sparade");
+    }
+    async function addPaymentMethod() {
+      const f = await modal("Nytt betalsätt", [
+        { name: "label", label: "Namn (t.ex. Swish)" },
+        { name: "value", label: "Nummer/länk" },
+      ], "Spara");
+      if (!f || !f.label || !f.value) return;
+      await api("POST", `/books/${bid()}/payment-methods`, { label: f.label, value: f.value });
+      toast("Betalsätt sparat");
+      renderWorkspace();
+    }
+
     // --- Change passphrase ---
     panel.appendChild(el("h3", {}, "Byt lösenord"));
     panel.appendChild(el("p", { class: "muted" },
@@ -651,6 +702,34 @@ const SECTION_RENDERERS = {
       rkStatus.textContent = "✓ En återställningsnyckel finns redan.";
       toast("Återställningsnyckel skapad — spara den säkert");
     }
+  },
+
+  // ----- invoices (faktura): list + create with line items & RUT recipients -----
+  async invoices(panel) {
+    const list = await api("GET", `/books/${bid()}/invoices`);
+    panel.appendChild(headerWithAdd("Fakturor", "+ Ny faktura", () => guard(() => invoiceForm(panel))));
+    if (list.length === 0) {
+      panel.appendChild(el("p", { class: "muted", style: "margin-top:14px" },
+        "Inga fakturor ännu. Ställ in företagsuppgifter och betalsätt under Inställningar."));
+      return;
+    }
+    const rows = list.map((iv) => el("tr", {},
+      el("td", { class: "num" }, String(iv.invoice_number)),
+      el("td", {}, iv.invoice_date),
+      el("td", {}, iv.due_date),
+      el("td", { class: "num" }, toKr(iv.inc_moms_ore) + " kr"),
+      el("td", { class: "num" }, iv.rut_total_ore ? toKr(iv.rut_total_ore) + " kr" : ""),
+      el("td", {}, el("span", { class: "pill " + (iv.status === "paid" ? "paid" : "pending") },
+        iv.status === "paid" ? "Betald" : "Obetald")),
+      el("td", { class: "num" },
+        el("button", { class: "btn small", onclick: () => guard(() => invoicePdf(iv.id, iv.invoice_number)) }, "PDF")),
+    ));
+    panel.appendChild(el("table", { style: "margin-top:14px" },
+      el("thead", {}, el("tr", {},
+        el("th", { class: "num" }, "Nr"), el("th", {}, "Datum"), el("th", {}, "Förfaller"),
+        el("th", { class: "num" }, "Summa"), el("th", { class: "num" }, "RUT"),
+        el("th", {}, "Status"), el("th", {}, ""))),
+      el("tbody", {}, rows)));
   },
 };
 
@@ -1003,6 +1082,140 @@ async function importBackupFlow() {
   await loadBooks();
   renderHome();
   toast(`Återställd: ${rec.display_name} — lås upp med dess lösenord`);
+}
+
+// ---------------------------------------------------------------------------
+// Invoices (faktura)
+// ---------------------------------------------------------------------------
+async function invoiceForm(panel) {
+  const [customers, cats] = await Promise.all([
+    api("GET", `/books/${bid()}/customers`),
+    api("GET", `/books/${bid()}/categories`),
+  ]);
+  const incomeCats = cats.filter((c) => c.kind === "income");
+  if (customers.length === 0 || incomeCats.length === 0) {
+    toast("Lägg till minst en kund och en inkomstkategori först", true);
+    return;
+  }
+  panel.innerHTML = "";
+  panel.appendChild(el("h2", {}, "Ny faktura"));
+
+  const customer = el("select", {}, ...customers.map((c) => el("option", { value: c.kundnummer },
+    c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer))));
+  const cat = el("select", {}, ...incomeCats.map((c) => el("option", { value: c.id }, c.name)));
+  const today = new Date().toISOString().slice(0, 10);
+  const due = new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
+  const invDate = el("input", { type: "date", value: today });
+  const dueDate = el("input", { type: "date", value: due });
+  const delivery = el("input", { type: "date", value: "" });
+  const terms = el("input", { type: "text", value: "30 dagar netto" });
+  const yourRef = el("input", { type: "text" });
+  const note = el("input", { type: "text" });
+  const lines = lineItemsEditor();
+  const recips = recipientsEditor();
+
+  panel.appendChild(el("div", { class: "row" },
+    wrap("Kund", customer), wrap("Kategori (BAS)", cat)));
+  panel.appendChild(el("div", { class: "row" },
+    wrap("Fakturadatum", invDate), wrap("Förfallodatum", dueDate),
+    wrap("Leveransdatum (valfritt)", delivery)));
+  panel.appendChild(el("h3", { style: "margin-top:18px" }, "Artikelrader"));
+  panel.appendChild(lines.element);
+  panel.appendChild(el("h3", { style: "margin-top:18px" }, "RUT-mottagare (hushåll, valfritt)"));
+  panel.appendChild(el("p", { class: "muted" },
+    "Lägg till en rad per person som delar på RUT-avdraget — namn, personnummer och "
+    + "personens del av skattereduktionen."));
+  panel.appendChild(recips.element);
+  panel.appendChild(el("div", { class: "row", style: "margin-top:14px" },
+    wrap("Betalningsvillkor", terms), wrap("Er referens", yourRef), wrap("Notering", note)));
+  panel.appendChild(el("div", { style: "margin-top:16px" },
+    el("button", { class: "btn brand", onclick: () => guard(submit) }, "Skapa faktura"),
+    el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => { state.section = "invoices"; renderWorkspace(); } }, "Avbryt")));
+
+  async function submit() {
+    const lineData = lines.get();
+    if (lineData.length === 0) { toast("Lägg till minst en artikelrad", true); return; }
+    const body = {
+      customer_id: parseInt(customer.value, 10), category_id: parseInt(cat.value, 10),
+      invoice_date: invDate.value, due_date: dueDate.value,
+      delivery_date: delivery.value || null, payment_terms: terms.value || null,
+      your_reference: yourRef.value || null, note: note.value || null,
+      lines: lineData, recipients: recips.get(),
+    };
+    const res = await api("POST", `/books/${bid()}/invoices`, body);
+    toast(`Faktura ${res.invoice_number} skapad`);
+    state.section = "invoices";
+    renderWorkspace();
+    invoicePdf(res.invoice_id, res.invoice_number);
+  }
+}
+
+function lineItemsEditor() {
+  const rowsBox = el("div", {});
+  const RATES = ["25", "12", "6", "0", "momsfri", "ej_avdragsgill"];
+  function addRow() {
+    const desc = el("input", { type: "text", placeholder: "Beskrivning" });
+    const qty = el("input", { type: "text", value: "1", style: "width:64px" });
+    const unit = el("input", { type: "text", value: "st", style: "width:54px" });
+    const price = el("input", { type: "text", value: "0,00", style: "width:96px" });
+    const rate = el("select", {}, ...RATES.map((r) => el("option", { value: r }, r === "momsfri" || r === "ej_avdragsgill" ? r : r + "%")));
+    const rut = el("input", { type: "checkbox" });
+    const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end" },
+      wrap("Beskrivning", desc), wrap("Antal", qty), wrap("Enhet", unit),
+      wrap("À-pris ex moms", price), wrap("Moms", rate), wrap("RUT", rut),
+      el("button", { class: "btn small ghost", onclick: (e) => e.target.closest(".row").remove() }, "✕"));
+    row._get = () => ({
+      description: desc.value.trim(),
+      quantity_centi: Math.round(parseFloat((qty.value || "0").replace(",", ".")) * 100),
+      unit: unit.value || null, unit_price_ore: toOre(price.value),
+      rate_code: rate.value, rut_eligible: rut.checked,
+    });
+    rowsBox.appendChild(row);
+  }
+  addRow();
+  const element = el("div", {}, rowsBox,
+    el("button", { class: "btn small ghost", onclick: () => addRow() }, "+ Rad"));
+  return { element, get: () => [...rowsBox.children].map((r) => r._get()).filter((l) => l.description) };
+}
+
+function recipientsEditor() {
+  const rowsBox = el("div", {});
+  function addRow() {
+    const fn = el("input", { type: "text", placeholder: "Förnamn" });
+    const ln = el("input", { type: "text", placeholder: "Efternamn" });
+    const pnr = el("input", { type: "text", placeholder: "ÅÅMMDD-XXXX" });
+    const amt = el("input", { type: "text", value: "0,00", style: "width:96px" });
+    const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end" },
+      wrap("Förnamn", fn), wrap("Efternamn", ln), wrap("Personnummer", pnr),
+      wrap("Skattereduktion (kr)", amt),
+      el("button", { class: "btn small ghost", onclick: (e) => e.target.closest(".row").remove() }, "✕"));
+    row._get = () => ({
+      first_name: fn.value.trim(), last_name: ln.value.trim(),
+      personnummer: pnr.value.trim(), rut_amount_ore: toOre(amt.value),
+    });
+    rowsBox.appendChild(row);
+  }
+  const element = el("div", {}, rowsBox,
+    el("button", { class: "btn small ghost", onclick: () => addRow() }, "+ Mottagare"));
+  return {
+    element,
+    get: () => [...rowsBox.children].map((r) => r._get()).filter((x) => x.first_name && x.personnummer),
+  };
+}
+
+// Download/preview an invoice PDF (HTTP link on desktop, Blob from base64 on phone).
+async function invoicePdf(invoiceId, number) {
+  const path = `/books/${bid()}/invoices/${invoiceId}/pdf`;
+  const fname = `faktura-${number || invoiceId}.pdf`;
+  if (window.__BOKYUP_NATIVE__) {
+    const r = await api("GET", path);                 // { raw, base64, media_type }
+    const bytes = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0));
+    const url = URL.createObjectURL(new Blob([bytes], { type: r.media_type }));
+    const a = el("a", { href: url, download: fname }); document.body.appendChild(a); a.click(); a.remove();
+    return;
+  }
+  const a = el("a", { href: path, download: fname, target: "_blank" });
+  document.body.appendChild(a); a.click(); a.remove();
 }
 
 // ---------------------------------------------------------------------------
