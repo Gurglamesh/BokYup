@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -234,6 +234,81 @@ CREATE TABLE receipt (
     created_at      TEXT NOT NULL
 );
 
+-- ----- seller/company profile (single row id=1) — frozen onto each invoice ---
+CREATE TABLE company (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    name        TEXT,
+    org_nr      TEXT,
+    vat_nr      TEXT,                                  -- momsregistreringsnummer
+    address     TEXT,
+    email       TEXT,
+    phone       TEXT,
+    f_skatt     INTEGER NOT NULL DEFAULT 1,            -- godkänd för F-skatt
+    updated_at  TEXT
+);
+
+-- ----- payment methods (Swish / Bankgiro / IBAN / ...) — label + number/link --
+CREATE TABLE payment_method (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    label      TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    active     INTEGER NOT NULL DEFAULT 1
+);
+
+-- ----- invoice (faktura). invoice_number is an UNBROKEN sequential series, ----
+-- assigned at issue (legal, like verifikationsnummer). The buyer block (which may
+-- hold a personnummer) is encrypted; the seller + payment-method blocks are frozen
+-- as JSON so later edits never change an already-issued faktura.
+CREATE TABLE invoice (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_number           INTEGER UNIQUE,
+    customer_id              INTEGER REFERENCES customer(kundnummer),
+    transaktion_id           INTEGER REFERENCES transaktion(id),
+    invoice_date             TEXT NOT NULL,
+    due_date                 TEXT NOT NULL,
+    delivery_date            TEXT,
+    payment_terms            TEXT,
+    buyer_snapshot_enc       TEXT,
+    seller_snapshot          TEXT,
+    payment_methods_snapshot TEXT,
+    our_reference            TEXT,
+    your_reference           TEXT,
+    note                     TEXT,
+    ex_moms_ore              INTEGER NOT NULL DEFAULT 0,
+    moms_ore                 INTEGER NOT NULL DEFAULT 0,
+    inc_moms_ore             INTEGER NOT NULL DEFAULT 0,
+    rut_total_ore            INTEGER NOT NULL DEFAULT 0,
+    created_at               TEXT NOT NULL
+);
+
+-- ----- invoice line items (articles) -------------------------------------
+CREATE TABLE invoice_line (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_id     INTEGER NOT NULL REFERENCES invoice(id),
+    line_no        INTEGER NOT NULL,
+    description    TEXT NOT NULL,
+    quantity_centi INTEGER NOT NULL,                  -- quantity * 100 (1.50 -> 150)
+    unit           TEXT,                              -- "h", "st", ...
+    unit_price_ore INTEGER NOT NULL,                  -- ex moms, per unit
+    rate_code      TEXT NOT NULL CHECK (rate_code IN
+                       ('25','12','6','0','momsfri','ej_avdragsgill')),
+    rut_eligible   INTEGER NOT NULL DEFAULT 0,
+    ex_moms_ore    INTEGER NOT NULL,                  -- line total ex moms
+    moms_ore       INTEGER NOT NULL
+);
+
+-- ----- RUT recipients: a household can split RUT across several people, each ---
+-- with their own name + personnummer (encrypted) and share of the skattereduktion.
+CREATE TABLE rut_recipient (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_id       INTEGER NOT NULL REFERENCES invoice(id),
+    first_name       TEXT NOT NULL,
+    last_name        TEXT NOT NULL,
+    personnummer_enc TEXT NOT NULL,
+    rut_amount_ore   INTEGER NOT NULL
+);
+
 -- ----- indexes ------------------------------------------------------------
 CREATE INDEX idx_verifikation_date   ON verifikation(ver_date);
 CREATE INDEX idx_posting_ver         ON posting(verifikation_id);
@@ -243,6 +318,9 @@ CREATE INDEX idx_moms_line_trans     ON moms_line(transaktion_id);
 CREATE INDEX idx_rut_state           ON rut_claim(state);
 CREATE INDEX idx_customer_type       ON customer(type);
 CREATE INDEX idx_receipt_trans       ON receipt(transaktion_id);
+CREATE INDEX idx_invoice_number      ON invoice(invoice_number);
+CREATE INDEX idx_invoice_line_inv    ON invoice_line(invoice_id);
+CREATE INDEX idx_rut_recipient_inv   ON rut_recipient(invoice_id);
 """
 
 # ---------------------------------------------------------------------------
@@ -354,6 +432,49 @@ _MIGRATIONS: dict[int, str] = {
             created_at      TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_receipt_trans ON receipt(transaktion_id);
+    """,
+    3: """
+        CREATE TABLE IF NOT EXISTS company (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            name TEXT, org_nr TEXT, vat_nr TEXT, address TEXT, email TEXT, phone TEXT,
+            f_skatt INTEGER NOT NULL DEFAULT 1, updated_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS payment_method (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL, value TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS invoice (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_number INTEGER UNIQUE,
+            customer_id INTEGER REFERENCES customer(kundnummer),
+            transaktion_id INTEGER REFERENCES transaktion(id),
+            invoice_date TEXT NOT NULL, due_date TEXT NOT NULL, delivery_date TEXT,
+            payment_terms TEXT, buyer_snapshot_enc TEXT, seller_snapshot TEXT,
+            payment_methods_snapshot TEXT, our_reference TEXT, your_reference TEXT, note TEXT,
+            ex_moms_ore INTEGER NOT NULL DEFAULT 0, moms_ore INTEGER NOT NULL DEFAULT 0,
+            inc_moms_ore INTEGER NOT NULL DEFAULT 0, rut_total_ore INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS invoice_line (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id INTEGER NOT NULL REFERENCES invoice(id),
+            line_no INTEGER NOT NULL, description TEXT NOT NULL,
+            quantity_centi INTEGER NOT NULL, unit TEXT, unit_price_ore INTEGER NOT NULL,
+            rate_code TEXT NOT NULL CHECK (rate_code IN
+                ('25','12','6','0','momsfri','ej_avdragsgill')),
+            rut_eligible INTEGER NOT NULL DEFAULT 0,
+            ex_moms_ore INTEGER NOT NULL, moms_ore INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS rut_recipient (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id INTEGER NOT NULL REFERENCES invoice(id),
+            first_name TEXT NOT NULL, last_name TEXT NOT NULL,
+            personnummer_enc TEXT NOT NULL, rut_amount_ore INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_invoice_number   ON invoice(invoice_number);
+        CREATE INDEX IF NOT EXISTS idx_invoice_line_inv ON invoice_line(invoice_id);
+        CREATE INDEX IF NOT EXISTS idx_rut_recipient_inv ON rut_recipient(invoice_id);
     """,
 }
 
