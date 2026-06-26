@@ -160,6 +160,61 @@ class YearEndAccrualReq(BaseModel):
     fiscal_year_end: str          # YYYY-MM-DD (last day of the räkenskapsår)
 
 
+# ----- invoices (faktura) -------------------------------------------------
+
+class CompanyReq(BaseModel):
+    name: Optional[str] = None
+    org_nr: Optional[str] = None
+    vat_nr: Optional[str] = None
+    address: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    f_skatt: Optional[int] = None
+
+
+class PaymentMethodReq(BaseModel):
+    label: str                    # "Swish" | "Bankgiro" | "IBAN" | ...
+    value: str                    # the number / link
+    sort_order: int = 0
+
+
+class PaymentMethodUpdateReq(BaseModel):
+    label: Optional[str] = None
+    value: Optional[str] = None
+    sort_order: Optional[int] = None
+    active: Optional[int] = None
+
+
+class InvoiceLineReq(BaseModel):
+    description: str
+    quantity_centi: int           # quantity * 100 (1.50 -> 150)
+    unit_price_ore: int           # ex moms, per unit
+    rate_code: str
+    unit: Optional[str] = None
+    rut_eligible: bool = False
+
+
+class RutRecipientReq(BaseModel):
+    first_name: str
+    last_name: str
+    personnummer: str
+    rut_amount_ore: int           # this person's share of the skattereduktion
+
+
+class CreateInvoiceReq(BaseModel):
+    customer_id: int
+    category_id: int
+    invoice_date: str
+    due_date: str
+    lines: list[InvoiceLineReq]
+    recipients: Optional[list[RutRecipientReq]] = None
+    delivery_date: Optional[str] = None
+    payment_terms: Optional[str] = None
+    our_reference: Optional[str] = None
+    your_reference: Optional[str] = None
+    note: Optional[str] = None
+
+
 class ReceiptUploadReq(BaseModel):
     image_base64: str             # the raw image bytes, base64-encoded
     mime: str                     # e.g. 'image/jpeg', 'image/png'

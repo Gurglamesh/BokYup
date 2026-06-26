@@ -343,6 +343,47 @@ class AppFacade:
         )
         return RawResult(content=text, media_type="text/plain; charset=utf-8")
 
+    # ---- company profile (seller) ----
+    def h_get_company(self, p, b, q):
+        return self._ops(p["book_id"]).get_company()
+
+    def h_set_company(self, p, b, q):
+        self._ops(p["book_id"]).set_company(**_clean(b))
+        return {"saved": True}
+
+    # ---- payment methods ----
+    def h_list_payment_methods(self, p, b, q):
+        return self._ops(p["book_id"]).list_payment_methods()
+
+    def h_create_payment_method(self, p, b, q):
+        return {"id": self._ops(p["book_id"]).create_payment_method(
+            b["label"], b["value"], b.get("sort_order", 0))}
+
+    def h_update_payment_method(self, p, b, q):
+        self._ops(p["book_id"]).update_payment_method(int(p["payment_method_id"]), **_clean(b))
+        return {"id": int(p["payment_method_id"])}
+
+    # ---- invoices (faktura) ----
+    def h_create_invoice(self, p, b, q):
+        return self._ops(p["book_id"]).create_invoice(
+            customer_id=b["customer_id"], category_id=b["category_id"],
+            invoice_date=b["invoice_date"], due_date=b["due_date"], lines=b["lines"],
+            recipients=b.get("recipients"), delivery_date=b.get("delivery_date"),
+            payment_terms=b.get("payment_terms"), our_reference=b.get("our_reference"),
+            your_reference=b.get("your_reference"), note=b.get("note"))
+
+    def h_list_invoices(self, p, b, q):
+        return self._ops(p["book_id"]).list_invoices()
+
+    def h_get_invoice(self, p, b, q):
+        return self._ops(p["book_id"]).get_invoice(int(p["invoice_id"]))
+
+    def h_invoice_pdf(self, p, b, q):
+        from backend.invoices.pdf import render_invoice_pdf
+        ops = self._ops(p["book_id"])
+        pdf = render_invoice_pdf(ops.get_invoice(int(p["invoice_id"])))
+        return RawResult(content=pdf, media_type="application/pdf")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -408,3 +449,13 @@ _route("DELETE", "/books/{book_id}/receipts/{receipt_id}", "h_delete_receipt")
 _route("GET", "/books/{book_id}/reports/momsdeklaration", "h_report_moms")
 _route("GET", "/books/{book_id}/reports/result", "h_report_result")
 _route("GET", "/books/{book_id}/reports/sie", "h_report_sie")
+
+_route("GET", "/books/{book_id}/company", "h_get_company")
+_route("PUT", "/books/{book_id}/company", "h_set_company")
+_route("GET", "/books/{book_id}/payment-methods", "h_list_payment_methods")
+_route("POST", "/books/{book_id}/payment-methods", "h_create_payment_method", 201)
+_route("PATCH", "/books/{book_id}/payment-methods/{payment_method_id}", "h_update_payment_method")
+_route("POST", "/books/{book_id}/invoices", "h_create_invoice", 201)
+_route("GET", "/books/{book_id}/invoices", "h_list_invoices")
+_route("GET", "/books/{book_id}/invoices/{invoice_id}/pdf", "h_invoice_pdf")
+_route("GET", "/books/{book_id}/invoices/{invoice_id}", "h_get_invoice")

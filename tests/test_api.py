@@ -399,3 +399,69 @@ class TestExportImport:
         client.post(f"/books/{new_id}/unlock", json={"passphrase": "correct-horse"})
         got = client.get(f"/books/{new_id}/customers/1").json()
         assert got["personnummer"] == "811218-9876"
+
+
+# ---------------------------------------------------------------------------
+# Invoices (faktura)
+# ---------------------------------------------------------------------------
+
+class TestInvoices:
+    def _setup(self, client, book):
+        client.put(f"/books/{book}/company",
+                   json={"name": "Min Firma AB", "org_nr": "556677-8899", "f_skatt": 1})
+        client.post(f"/books/{book}/payment-methods", json={"label": "Swish", "value": "1234567890"})
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Tjänster", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "private", "first_name": "Anna", "last_name": "Svensson",
+                                "personnummer": "811218-9876", "address": "Storgatan 1"}).json()["kundnummer"]
+        return cat, kid
+
+    def test_company_and_payment_methods(self, client, book):
+        self._setup(client, book)
+        assert client.get(f"/books/{book}/company").json()["name"] == "Min Firma AB"
+        assert client.get(f"/books/{book}/payment-methods").json()[0]["label"] == "Swish"
+
+    def test_create_list_get_invoice(self, client, book):
+        cat, kid = self._setup(client, book)
+        resp = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31", "payment_terms": "30 dagar",
+            "lines": [{"description": "Konsult", "quantity_centi": 200, "unit": "h",
+                       "unit_price_ore": 100000, "rate_code": "25"}]})
+        assert resp.status_code == 201
+        inv = resp.json()
+        assert inv["invoice_number"] == 1 and inv["inc_moms_ore"] == 250000
+        lst = client.get(f"/books/{book}/invoices").json()
+        assert len(lst) == 1 and lst[0]["status"] == "pending"
+        got = client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()
+        assert got["seller"]["name"] == "Min Firma AB"
+        assert got["buyer"]["first_name"] == "Anna"
+        assert got["payment_methods"][0]["label"] == "Swish"
+
+    def test_invoice_with_rut_household_split(self, client, book):
+        cat, kid = self._setup(client, book)
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 1000000,
+                       "rate_code": "25", "rut_eligible": True}],
+            "recipients": [{"first_name": "Anna", "last_name": "Svensson",
+                            "personnummer": "811218-9876", "rut_amount_ore": 150000},
+                           {"first_name": "Björn", "last_name": "Svensson",
+                            "personnummer": "19811218-9876", "rut_amount_ore": 100000}]}).json()
+        assert inv["rut_total_ore"] == 250000
+        got = client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()
+        assert len(got["recipients"]) == 2
+
+    def test_invoice_pdf_download(self, client, book):
+        cat, kid = self._setup(client, book)
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "Konsult", "quantity_centi": 100,
+                       "unit_price_ore": 100000, "rate_code": "25"}]}).json()
+        pdf = client.get(f"/books/{book}/invoices/{inv['invoice_id']}/pdf")
+        assert pdf.status_code == 200
+        assert pdf.headers["content-type"] == "application/pdf"
+        assert pdf.content[:4] == b"%PDF"

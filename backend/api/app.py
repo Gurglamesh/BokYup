@@ -299,6 +299,48 @@ def _build_router():
             "fiscal_year_start": fiscal_year_start, "fiscal_year_end": fiscal_year_end})
         return PlainTextResponse(res.content)
 
+    # ---- company profile (seller) ----
+    @r.get("/books/{book_id}/company")
+    def get_company(book_id: str, request: Request):
+        return fac(request).h_get_company({"book_id": book_id}, {}, {})
+
+    @r.put("/books/{book_id}/company")
+    def set_company(book_id: str, body: sc.CompanyReq, request: Request):
+        return fac(request).h_set_company({"book_id": book_id}, body.model_dump(), {})
+
+    # ---- payment methods ----
+    @r.get("/books/{book_id}/payment-methods")
+    def list_payment_methods(book_id: str, request: Request):
+        return fac(request).h_list_payment_methods({"book_id": book_id}, {}, {})
+
+    @r.post("/books/{book_id}/payment-methods", status_code=201)
+    def create_payment_method(book_id: str, body: sc.PaymentMethodReq, request: Request):
+        return fac(request).h_create_payment_method({"book_id": book_id}, body.model_dump(), {})
+
+    @r.patch("/books/{book_id}/payment-methods/{payment_method_id}")
+    def update_payment_method(book_id: str, payment_method_id: int,
+                              body: sc.PaymentMethodUpdateReq, request: Request):
+        return fac(request).h_update_payment_method(
+            {"book_id": book_id, "payment_method_id": payment_method_id}, body.model_dump(), {})
+
+    # ---- invoices (faktura) ----
+    @r.post("/books/{book_id}/invoices", status_code=201)
+    def create_invoice(book_id: str, body: sc.CreateInvoiceReq, request: Request):
+        return fac(request).h_create_invoice({"book_id": book_id}, body.model_dump(), {})
+
+    @r.get("/books/{book_id}/invoices")
+    def list_invoices(book_id: str, request: Request):
+        return fac(request).h_list_invoices({"book_id": book_id}, {}, {})
+
+    @r.get("/books/{book_id}/invoices/{invoice_id}")
+    def get_invoice(book_id: str, invoice_id: int, request: Request):
+        return fac(request).h_get_invoice({"book_id": book_id, "invoice_id": invoice_id}, {}, {})
+
+    @r.get("/books/{book_id}/invoices/{invoice_id}/pdf")
+    def invoice_pdf(book_id: str, invoice_id: int, request: Request):
+        res = fac(request).h_invoice_pdf({"book_id": book_id, "invoice_id": invoice_id}, {}, {})
+        return Response(content=res.content, media_type=res.media_type)
+
     return r
 
 
