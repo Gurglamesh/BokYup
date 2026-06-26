@@ -34,9 +34,15 @@ BACKEND = ROOT / "backend"
 
 # Wheels required in <vendor> (filenames vary with the Pyodide release; these are
 # the packages, resolved from the distribution's pyodide-lock.json at build time).
+# The first group is the crypto stack; the second is the faktura PDF engine (fpdf2)
+# and its deps. Pillow is a binary Pyodide package; the rest are pure-Python.
 REQUIRED_WHEEL_PACKAGES = [
     "cryptography", "argon2-cffi", "argon2-cffi-bindings", "cffi", "pycparser", "six",
+    "pillow", "fpdf2", "defusedxml", "fonttools",
 ]
+# Pure-Python wheels listed in vendor/pure_wheels.json so pyodide-boot.js unpacks them
+# onto sys.path (they are not Pyodide packages, so loadPackage can't fetch them).
+PURE_WHEEL_PREFIXES = ["fpdf2", "defusedxml", "fonttools"]
 REQUIRED_RUNTIME_FILES = [
     "pyodide.js", "pyodide.asm.js", "pyodide.asm.wasm",
     "python_stdlib.zip", "pyodide-lock.json",
@@ -69,6 +75,16 @@ def main() -> None:
     build_backend_zip(out)
 
     have = {f.name for f in out.glob("*")}
+
+    # Record the pure-Python wheels present so pyodide-boot.js can unpack them.
+    import json
+    pure = sorted(n for n in have
+                  if n.endswith(".whl")
+                  and any(n.startswith(p.replace("-", "_")) for p in PURE_WHEEL_PREFIXES))
+    (out / "pure_wheels.json").write_text(json.dumps(pure), encoding="utf-8")
+    if pure:
+        print(f"  pure_wheels.json: {pure}")
+
     missing_runtime = [f for f in REQUIRED_RUNTIME_FILES if f not in have]
     missing_wheels = [p for p in REQUIRED_WHEEL_PACKAGES
                       if not any(n.startswith(p.replace("-", "_")) and n.endswith(".whl")

@@ -34,8 +34,9 @@
   async function init() {
     // loadPyodide is provided by vendor/pyodide.js (loaded before this script).
     pyodide = await loadPyodide({ indexURL: VENDOR });
-    // Crypto stack as WASM wheels (must be parallelism=1 — see crypto.py).
-    await pyodide.loadPackage(["cryptography", "argon2-cffi"]);
+    // Crypto stack (parallelism=1 — see crypto.py) + Pillow (binary dep of fpdf2,
+    // the faktura PDF engine). These are Pyodide packages resolved from vendor/.
+    await pyodide.loadPackage(["cryptography", "argon2-cffi", "pillow"]);
 
     // Persist the data directory in IndexedDB and load anything already there.
     pyodide.FS.mkdirTree(DATA_DIR);
@@ -45,6 +46,20 @@
     // Unpack the backend source and instantiate the in-process app.
     const buf = await (await fetch(VENDOR + "backend_src.zip")).arrayBuffer();
     pyodide.unpackArchive(buf, "zip", { extractDir: SRC_DIR });
+
+    // Pure-Python wheels fpdf2 needs that are NOT Pyodide packages (fpdf2,
+    // defusedxml, fonttools). They are just zips — unpack onto sys.path. Listed in
+    // vendor/pure_wheels.json so versions aren't hard-coded; absent => no PDF, the
+    // rest of the app still runs.
+    try {
+      const wheels = await (await fetch(VENDOR + "pure_wheels.json")).json();
+      for (const name of wheels) {
+        const wbuf = await (await fetch(VENDOR + name)).arrayBuffer();
+        pyodide.unpackArchive(wbuf, "zip", { extractDir: SRC_DIR });
+      }
+    } catch (e) {
+      console.warn("BokYup: PDF wheels not vendored, invoices PDF disabled:", e);
+    }
     phone = pyodide.runPython(
       `import sys
 sys.path.insert(0, ${JSON.stringify(SRC_DIR)})

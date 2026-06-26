@@ -32,6 +32,9 @@ python phone/build_www.py
 #      pyodide.js, pyodide.asm.js, pyodide.asm.wasm, python_stdlib.zip, pyodide-lock.json
 #    and the matching cp3xx wasm32 wheels:
 #      cryptography, argon2-cffi, argon2-cffi-bindings, cffi, pycparser, six
+#      + the faktura-PDF engine: pillow (binary) and pure-Python fpdf2, defusedxml,
+#        fonttools. build_phone_assets.py writes vendor/pure_wheels.json so the boot
+#        unpacks the pure wheels; pillow loads as a Pyodide package.
 #    These come from the Pyodide release bundle (pyodide-<ver>.tar.bz2) — the SAME
 #    versions tools/build_phone_assets.py reports. CRITICAL: the crypto must run with
 #    Argon2 parallelism=1 (already pinned in crypto.py) or WASM throws "Threading
