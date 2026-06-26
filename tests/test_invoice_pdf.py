@@ -1,0 +1,58 @@
+"""Tests for the faktura PDF renderer (backend/invoices/pdf.py)."""
+
+from __future__ import annotations
+
+import pytest
+from pathlib import Path
+
+from backend.db.manager import DatabaseManager
+from backend.db.operations import BookOps
+from backend.invoices.pdf import render_invoice_pdf, _kr, _qty
+from backend.models import schema as S
+
+
+@pytest.fixture()
+def ops(tmp_path: Path) -> BookOps:
+    mgr = DatabaseManager(app_dir=tmp_path / "app")
+    _, session = mgr.create_book("Book", str(tmp_path / "book.db"), "pw")
+    S.initialize_schema(session.connection())
+    return BookOps(session)
+
+
+def test_formatters():
+    assert _kr(123456) == "1 234,56 kr"
+    assert _kr(50) == "0,50 kr"
+    assert _qty(200) == "2"
+    assert _qty(150) == "1,50"
+
+
+def test_render_plain_invoice(ops):
+    ops.set_company(name="Räksmörgås AB", org_nr="556677-8899", vat_nr="SE556677889901",
+                    address="Storgatan 1, Stockholm", f_skatt=1)
+    ops.create_payment_method("Swish", "123 456 78 90")
+    cat = ops.create_category("Tjänster", "income", 3001)
+    kid = ops.create_customer("business", company_name="Köpare AB", org_nr="551122-3344",
+                              address="Kungsgatan 5, Göteborg")
+    inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                             due_date="2026-03-31", payment_terms="30 dagar netto",
+                             lines=[{"description": "Konsultarvode (åäö)", "quantity_centi": 250,
+                                     "unit": "h", "unit_price_ore": 120000, "rate_code": "25"}])
+    pdf = render_invoice_pdf(ops.get_invoice(inv["invoice_id"]))
+    assert pdf[:4] == b"%PDF" and len(pdf) > 800
+
+
+def test_render_rut_household_split(ops):
+    ops.set_company(name="Städ AB", org_nr="556677-8899")
+    cat = ops.create_category("Städning", "income", 3001)
+    kid = ops.create_customer("private", first_name="Anna", last_name="Svensson",
+                              personnummer="811218-9876", address="Hemgatan 3")
+    inv = ops.create_invoice(
+        customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+        lines=[{"description": "Hemstädning", "quantity_centi": 100, "unit_price_ore": 1000000,
+                "rate_code": "25", "rut_eligible": True}],
+        recipients=[{"first_name": "Anna", "last_name": "Svensson",
+                     "personnummer": "811218-9876", "rut_amount_ore": 150000},
+                    {"first_name": "Björn", "last_name": "Svensson",
+                     "personnummer": "19811218-9876", "rut_amount_ore": 100000}])
+    pdf = render_invoice_pdf(ops.get_invoice(inv["invoice_id"]))
+    assert pdf[:4] == b"%PDF" and len(pdf) > 800
