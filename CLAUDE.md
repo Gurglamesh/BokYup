@@ -82,6 +82,15 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
   a photo of a digital receipt is not a valid substitute for the digital original.
 - **Method**: kontantmetod (book when money moves) fits the pending→paid flow; at
   year-end even kontantmetod must book unpaid invoices.
+- **Both methods now selectable per book** (config `bokforingsmetod`, default
+  kontantmetod; 2026-06). **Fakturametoden** books an invoice at issue (1510
+  Kundfordringar + income + utgående moms, dated the invoice date → moms reported in
+  the invoice's period) and again at payment (1930 Bank / 1510 settling the
+  receivable). The issue posting is the transaktion's verifikation so the reports
+  attribute moms to the invoice date; payment carries no moms_lines. register_payment
+  is method-aware; year-end accrual + makulera skip issue-booked invoices; kreditera
+  reverses the issue posting. Plain (non-invoice) incomes/expenses still book at
+  payment. See `create_invoice`/`_book_invoice_issue`/`register_payment`.
 
 ## Moms (VAT) model
 
