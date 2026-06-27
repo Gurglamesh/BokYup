@@ -199,7 +199,7 @@ class BookOps:
 
         cols = {"type": type, "personnummer_enc": pnr_enc, "created_at": _now()}
         for k in ("first_name", "last_name", "company_name", "org_nr",
-                  "contact_person", "vat_nr", "address", "email", "phone"):
+                  "contact_person", "vat_nr", "address", "shipping_address", "email", "phone"):
             if k in fields:
                 cols[k] = fields[k]
 
@@ -223,7 +223,7 @@ class BookOps:
             else:
                 updates["personnummer_enc"] = None
         for k in ("first_name", "last_name", "company_name", "org_nr", "contact_person",
-                  "vat_nr", "address", "email", "phone", "active"):
+                  "vat_nr", "address", "shipping_address", "email", "phone", "active"):
             if k in fields:
                 updates[k] = fields[k]
         sets, params = _build_update(updates)

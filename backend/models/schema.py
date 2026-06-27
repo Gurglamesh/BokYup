@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -120,7 +120,8 @@ CREATE TABLE customer (
     contact_person  TEXT,
     vat_nr          TEXT,
     -- shared
-    address         TEXT,
+    address          TEXT,               -- billing / faktureringsadress
+    shipping_address TEXT,               -- leveransadress (if different)
     email           TEXT,
     phone           TEXT,
     active          INTEGER NOT NULL DEFAULT 1,
@@ -480,6 +481,9 @@ _MIGRATIONS: dict[int, str] = {
     4: """
         ALTER TABLE company ADD COLUMN logo_enc BLOB;
     """,
+    5: """
+        ALTER TABLE customer ADD COLUMN shipping_address TEXT;
+    """,
 }
 
 
@@ -489,6 +493,10 @@ def migrate(conn: sqlite3.Connection) -> int:
     forward migrations in order. No-op on a fresh/current database. Returns the
     resulting schema version.
     """
+    # Migrations bring an EXISTING book up to date; a brand-new/empty database is
+    # created at the current version by initialize_schema, not migrated into one.
+    if not is_initialized(conn):
+        return get_schema_version(conn)
     current = get_schema_version(conn)
     for target in sorted(_MIGRATIONS):
         if current < target:

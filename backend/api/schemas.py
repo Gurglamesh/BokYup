@@ -79,7 +79,8 @@ class CustomerReq(BaseModel):
     org_nr: Optional[str] = None
     contact_person: Optional[str] = None
     vat_nr: Optional[str] = None
-    address: Optional[str] = None
+    address: Optional[str] = None              # billing / faktureringsadress
+    shipping_address: Optional[str] = None     # leveransadress (if different)
     email: Optional[str] = None
     phone: Optional[str] = None
 
@@ -93,6 +94,7 @@ class CustomerUpdateReq(BaseModel):
     contact_person: Optional[str] = None
     vat_nr: Optional[str] = None
     address: Optional[str] = None
+    shipping_address: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
     active: Optional[bool] = None

@@ -966,11 +966,15 @@ async function addCustomerFlow() {
     { name: "personnummer", label: "Personnummer (privat)" },
     { name: "company_name", label: "Företagsnamn (företag)" },
     { name: "org_nr", label: "Org.nr (företag)" },
+    { name: "vat_nr", label: "Momsreg.nr (företag/EU)" },
+    { name: "address", label: "Faktureringsadress" },
+    { name: "shipping_address", label: "Leveransadress (om annan)" },
     { name: "email", label: "E-post" },
   ], "Spara");
   if (!f) return;
   const body = { type: f.type };
-  for (const k of ["first_name", "last_name", "personnummer", "company_name", "org_nr", "email"]) {
+  for (const k of ["first_name", "last_name", "personnummer", "company_name", "org_nr",
+                   "vat_nr", "address", "shipping_address", "email"]) {
     if (f[k]) body[k] = f[k];
   }
   await api("POST", `/books/${bid()}/customers`, body);
@@ -1018,7 +1022,10 @@ async function editCustomerFlow(kundnummer) {
        { name: "last_name", label: "Efternamn", value: c.last_name || "" },
        { name: "personnummer", label: "Personnummer", value: c.personnummer || "" }]
     : [{ name: "company_name", label: "Företagsnamn", value: c.company_name || "" },
-       { name: "org_nr", label: "Org.nr", value: c.org_nr || "" }];
+       { name: "org_nr", label: "Org.nr", value: c.org_nr || "" },
+       { name: "vat_nr", label: "Momsreg.nr", value: c.vat_nr || "" }];
+  fields.push({ name: "address", label: "Faktureringsadress", value: c.address || "" });
+  fields.push({ name: "shipping_address", label: "Leveransadress (om annan)", value: c.shipping_address || "" });
   fields.push({ name: "email", label: "E-post", value: c.email || "" });
   fields.push({ name: "phone", label: "Telefon", value: c.phone || "" });
   const f = await modal(`Ändra kund ${kundnummer}`, fields, "Spara");

@@ -570,3 +570,19 @@ class TestLogo:
     def test_logo_rejects_garbage(self, ops):
         with pytest.raises(ValueError):
             ops.set_logo(b"not an image")
+
+
+class TestInvoiceAddresses:
+    def test_billing_shipping_and_vat_in_snapshot(self, ops):
+        cat = ops.create_category("Tjänst", "income", 3001)
+        kid = ops.create_customer("business", company_name="Köpare AB", org_nr="551122-3344",
+                                  vat_nr="SE551122334401", address="Kungsgatan 5, Göteborg",
+                                  shipping_address="Lagervägen 9, Mölndal")
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                                 due_date="2026-03-31",
+                                 lines=[{"description": "X", "quantity_centi": 100,
+                                         "unit_price_ore": 100000, "rate_code": "25"}])
+        buyer = ops.get_invoice(inv["invoice_id"])["buyer"]
+        assert buyer["address"] == "Kungsgatan 5, Göteborg"
+        assert buyer["shipping_address"] == "Lagervägen 9, Mölndal"
+        assert buyer["vat_nr"] == "SE551122334401"
