@@ -399,6 +399,13 @@ class AppFacade:
     def h_get_invoice(self, p, b, q):
         return self._ops(p["book_id"]).get_invoice(int(p["invoice_id"]))
 
+    def h_cancel_invoice(self, p, b, q):
+        return self._ops(p["book_id"]).cancel_invoice(int(p["invoice_id"]))
+
+    def h_credit_invoice(self, p, b, q):
+        return self._ops(p["book_id"]).credit_invoice(
+            int(p["invoice_id"]), b.get("reason"), b.get("date"))
+
     def h_invoice_pdf(self, p, b, q):
         from backend.invoices.pdf import render_invoice_pdf
         ops = self._ops(p["book_id"])
@@ -484,4 +491,6 @@ _route("PATCH", "/books/{book_id}/payment-methods/{payment_method_id}", "h_updat
 _route("POST", "/books/{book_id}/invoices", "h_create_invoice", 201)
 _route("GET", "/books/{book_id}/invoices", "h_list_invoices")
 _route("GET", "/books/{book_id}/invoices/{invoice_id}/pdf", "h_invoice_pdf")
+_route("POST", "/books/{book_id}/invoices/{invoice_id}/cancel", "h_cancel_invoice", 201)
+_route("POST", "/books/{book_id}/invoices/{invoice_id}/credit", "h_credit_invoice", 201)
 _route("GET", "/books/{book_id}/invoices/{invoice_id}", "h_get_invoice")

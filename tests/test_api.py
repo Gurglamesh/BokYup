@@ -505,3 +505,44 @@ class TestLogo:
     def test_logo_rejects_bad_base64(self, client, book):
         resp = client.put(f"/books/{book}/logo", json={"image_base64": "not base64!!!"})
         assert resp.status_code == 400
+
+
+class TestInvoiceLifecycleApi:
+    def _inv(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "T", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "private", "first_name": "A", "last_name": "B",
+                                "personnummer": "811218-9876"}).json()["kundnummer"]
+        return client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "X", "quantity_centi": 100,
+                       "unit_price_ore": 100000, "rate_code": "25"}]}).json()
+
+    def test_pay_then_state_paid(self, client, book):
+        inv = self._inv(client, book)
+        client.post(f"/books/{book}/transaktioner/{inv['transaktion_id']}/pay",
+                    json={"payment_date": "2026-03-10"})
+        lst = client.get(f"/books/{book}/invoices").json()
+        assert lst[0]["state"] == "paid"
+
+    def test_makulera_unpaid(self, client, book):
+        inv = self._inv(client, book)
+        assert client.post(f"/books/{book}/invoices/{inv['invoice_id']}/cancel").status_code == 201
+        assert client.get(f"/books/{book}/invoices").json()[0]["state"] == "cancelled"
+
+    def test_makulera_booked_is_409(self, client, book):
+        inv = self._inv(client, book)
+        client.post(f"/books/{book}/transaktioner/{inv['transaktion_id']}/pay",
+                    json={"payment_date": "2026-03-10"})
+        assert client.post(f"/books/{book}/invoices/{inv['invoice_id']}/cancel").status_code == 409
+
+    def test_kreditera_booked(self, client, book):
+        inv = self._inv(client, book)
+        client.post(f"/books/{book}/transaktioner/{inv['transaktion_id']}/pay",
+                    json={"payment_date": "2026-03-10"})
+        res = client.post(f"/books/{book}/invoices/{inv['invoice_id']}/credit",
+                          json={"reason": "fel", "date": "2026-03-20"})
+        assert res.status_code == 201 and res.json()["ver_number"] == 2
+        assert client.get(f"/books/{book}/invoices").json()[0]["state"] == "credited"

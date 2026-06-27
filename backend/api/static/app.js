@@ -745,17 +745,32 @@ const SECTION_RENDERERS = {
         "Inga fakturor ännu. Ställ in företagsuppgifter och betalsätt under Inställningar."));
       return;
     }
-    const rows = list.map((iv) => el("tr", {},
-      el("td", { class: "num" }, String(iv.invoice_number)),
-      el("td", {}, iv.invoice_date),
-      el("td", {}, iv.due_date),
-      el("td", { class: "num" }, toKr(iv.inc_moms_ore) + " kr"),
-      el("td", { class: "num" }, iv.rut_total_ore ? toKr(iv.rut_total_ore) + " kr" : ""),
-      el("td", {}, el("span", { class: "pill " + (iv.status === "paid" ? "paid" : "pending") },
-        iv.status === "paid" ? "Betald" : "Obetald")),
-      el("td", { class: "num" },
-        el("button", { class: "btn small", onclick: () => guard(() => invoicePdf(iv.id, iv.invoice_number)) }, "PDF")),
-    ));
+    const STATE = {
+      paid: ["paid", "Betald"], pending: ["pending", "Obetald"],
+      cancelled: ["", "Makulerad"], credited: ["", "Krediterad"],
+    };
+    const rows = list.map((iv) => {
+      const [cls, label] = STATE[iv.state] || STATE.pending;
+      const actions = el("td", { class: "num" },
+        el("button", { class: "btn small ghost", onclick: () => guard(() => invoicePdf(iv.id, iv.invoice_number)) }, "PDF"));
+      if (iv.state === "pending") {
+        actions.appendChild(el("button", { class: "btn small", style: "margin-left:4px",
+          onclick: () => guard(() => payFlow(iv.transaktion_id)) }, "Bokför betalning"));
+        actions.appendChild(el("button", { class: "btn small ghost danger", style: "margin-left:4px",
+          onclick: () => guard(() => makuleraInvoiceFlow(iv)) }, "Makulera"));
+      } else if (iv.state === "paid") {
+        actions.appendChild(el("button", { class: "btn small ghost", style: "margin-left:4px",
+          onclick: () => guard(() => kreditInvoiceFlow(iv)) }, "Kreditera"));
+      }
+      return el("tr", {},
+        el("td", { class: "num" }, String(iv.invoice_number)),
+        el("td", {}, iv.invoice_date),
+        el("td", {}, iv.due_date),
+        el("td", { class: "num" }, toKr(iv.inc_moms_ore) + " kr"),
+        el("td", { class: "num" }, iv.rut_total_ore ? toKr(iv.rut_total_ore) + " kr" : ""),
+        el("td", {}, el("span", { class: "pill " + cls }, label)),
+        actions);
+    });
     panel.appendChild(el("table", { style: "margin-top:14px" },
       el("thead", {}, el("tr", {},
         el("th", { class: "num" }, "Nr"), el("th", {}, "Datum"), el("th", {}, "Förfaller"),
@@ -1255,6 +1270,30 @@ async function invoicePdf(invoiceId, number) {
   }
   const a = el("a", { href: path, download: fname, target: "_blank" });
   document.body.appendChild(a); a.click(); a.remove();
+}
+
+// Makulera (void) an unbooked invoice — keeps the number, nothing was booked.
+async function makuleraInvoiceFlow(iv) {
+  const f = await modal(
+    `Makulera faktura ${iv.invoice_number}? Fakturan blir ogiltig men numret behålls (obruten serie).`,
+    [], "Makulera");
+  if (!f) return;
+  await api("POST", `/books/${bid()}/invoices/${iv.id}/cancel`);
+  toast(`Faktura ${iv.invoice_number} makulerad`);
+  renderWorkspace();
+}
+
+// Kreditera a booked invoice — reverses the verifikation (rättelse).
+async function kreditInvoiceFlow(iv) {
+  const f = await modal(`Kreditera faktura ${iv.invoice_number}`, [
+    { name: "reason", label: "Orsak" },
+    { name: "date", label: "Bokföringsdatum", type: "date", value: new Date().toISOString().slice(0, 10) },
+  ], "Kreditera");
+  if (!f) return;
+  const res = await api("POST", `/books/${bid()}/invoices/${iv.id}/credit`,
+                        { reason: f.reason || null, date: f.date || null });
+  toast(`Faktura ${iv.invoice_number} krediterad (ver ${res.ver_number})`);
+  renderWorkspace();
 }
 
 // ---------------------------------------------------------------------------

@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -281,6 +281,9 @@ CREATE TABLE invoice (
     moms_ore                 INTEGER NOT NULL DEFAULT 0,
     inc_moms_ore             INTEGER NOT NULL DEFAULT 0,
     rut_total_ore            INTEGER NOT NULL DEFAULT 0,
+    cancelled_at             TEXT,                  -- makulerad (voided before booking)
+    credited_at              TEXT,                  -- krediterad (booking reversed)
+    credit_verifikation_id   INTEGER REFERENCES verifikation(id),
     created_at               TEXT NOT NULL
 );
 
@@ -483,6 +486,11 @@ _MIGRATIONS: dict[int, str] = {
     """,
     5: """
         ALTER TABLE customer ADD COLUMN shipping_address TEXT;
+    """,
+    6: """
+        ALTER TABLE invoice ADD COLUMN cancelled_at TEXT;
+        ALTER TABLE invoice ADD COLUMN credited_at TEXT;
+        ALTER TABLE invoice ADD COLUMN credit_verifikation_id INTEGER;
     """,
 }
 

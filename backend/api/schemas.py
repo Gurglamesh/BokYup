@@ -207,6 +207,11 @@ class RutRecipientReq(BaseModel):
     rut_amount_ore: int           # this person's share of the skattereduktion
 
 
+class CreditInvoiceReq(BaseModel):
+    reason: Optional[str] = None
+    date: Optional[str] = None     # rättelse booking date (defaults to today)
+
+
 class CreateInvoiceReq(BaseModel):
     customer_id: int
     category_id: int

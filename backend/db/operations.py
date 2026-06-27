@@ -129,6 +129,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _invoice_state(cancelled_at, credited_at, tx_status) -> str:
+    """Display lifecycle state of an invoice (makulerad/krediterad override the
+    underlying transaktion's paid/pending status)."""
+    if cancelled_at:
+        return "cancelled"
+    if credited_at:
+        return "credited"
+    return "paid" if tx_status == "paid" else "pending"
+
+
 # ---------------------------------------------------------------------------
 # Operations facade over one unlocked book
 # ---------------------------------------------------------------------------
@@ -754,11 +764,17 @@ class BookOps:
                 "rut_total_ore": rut_total}
 
     def list_invoices(self) -> list[dict]:
-        return [dict(r) for r in self.conn.execute(
+        rows = self.conn.execute(
             "SELECT i.id, i.invoice_number, i.invoice_date, i.due_date, i.customer_id, "
-            "i.inc_moms_ore, i.rut_total_ore, t.status "
-            "FROM invoice i LEFT JOIN transaktion t ON t.id = i.transaktion_id "
-            "ORDER BY i.invoice_number").fetchall()]
+            "i.transaktion_id, i.inc_moms_ore, i.rut_total_ore, i.cancelled_at, i.credited_at, "
+            "t.status FROM invoice i LEFT JOIN transaktion t ON t.id = i.transaktion_id "
+            "ORDER BY i.invoice_number").fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["state"] = _invoice_state(d["cancelled_at"], d["credited_at"], d["status"])
+            out.append(d)
+        return out
 
     def get_invoice(self, invoice_id: int) -> dict:
         row = self.conn.execute("SELECT * FROM invoice WHERE id=?", (invoice_id,)).fetchone()
@@ -770,6 +786,7 @@ class BookOps:
             (inv["transaktion_id"],)).fetchone()
         inv["status"] = status_row["status"] if status_row else None
         inv["payment_date"] = status_row["payment_date"] if status_row else None
+        inv["state"] = _invoice_state(inv.get("cancelled_at"), inv.get("credited_at"), inv["status"])
         inv["buyer"] = json.loads(self.session.decrypt_text(inv.pop("buyer_snapshot_enc")))
         inv["seller"] = json.loads(inv.pop("seller_snapshot") or "{}")
         inv["payment_methods"] = json.loads(inv.pop("payment_methods_snapshot") or "[]")
@@ -785,6 +802,64 @@ class BookOps:
             "SELECT first_name, last_name, personnummer_enc, rut_amount_ore "
             "FROM rut_recipient WHERE invoice_id=? ORDER BY id", (invoice_id,)).fetchall()]
         return inv
+
+    def cancel_invoice(self, invoice_id: int) -> dict:
+        """
+        Makulera (void) an UNBOOKED invoice. Only allowed while the underlying income
+        is still pending (kontantmetod: nothing has hit the ledger). The pending
+        transaktion + its moms_lines/rut_claim are removed so it is no longer payable;
+        the invoice_number stays reserved (a gap-free series) and the invoice row is
+        kept and flagged makulerad. A booked invoice must be credited instead.
+        """
+        inv = self.conn.execute(
+            "SELECT transaktion_id, cancelled_at, credited_at FROM invoice WHERE id=?",
+            (invoice_id,)).fetchone()
+        if inv is None:
+            raise KeyError(f"No invoice {invoice_id}")
+        if inv["cancelled_at"] or inv["credited_at"]:
+            raise InvalidState("Invoice is already makulerad/krediterad")
+        tid = inv["transaktion_id"]
+        t = self.conn.execute("SELECT verifikation_id FROM transaktion WHERE id=?",
+                              (tid,)).fetchone() if tid else None
+        if t and t["verifikation_id"] is not None:
+            raise InvalidState("Invoice is booked (paid); kreditera it instead of makulera")
+        with self.conn:
+            # Detach the invoice first so deleting the transaktion can't trip the FK.
+            self.conn.execute(
+                "UPDATE invoice SET cancelled_at=?, transaktion_id=NULL WHERE id=?",
+                (_now(), invoice_id))
+            if tid:
+                self.conn.execute("DELETE FROM moms_line WHERE transaktion_id=?", (tid,))
+                self.conn.execute("DELETE FROM rut_claim WHERE transaktion_id=?", (tid,))
+                self.conn.execute("DELETE FROM transaktion WHERE id=?", (tid,))
+        return {"invoice_id": invoice_id, "cancelled": True}
+
+    def credit_invoice(self, invoice_id: int, reason: Optional[str] = None,
+                       date: Optional[str] = None) -> dict:
+        """
+        Kreditera a BOOKED invoice: reverse its verifikation with a rättelse (the moms
+        is netted in the reports), and flag the invoice krediterad. Only allowed once
+        the invoice is booked (paid); an unbooked invoice should be makulerad instead.
+        """
+        inv = self.conn.execute(
+            "SELECT invoice_number, transaktion_id, cancelled_at, credited_at "
+            "FROM invoice WHERE id=?", (invoice_id,)).fetchone()
+        if inv is None:
+            raise KeyError(f"No invoice {invoice_id}")
+        if inv["cancelled_at"] or inv["credited_at"]:
+            raise InvalidState("Invoice is already makulerad/krediterad")
+        t = self.conn.execute("SELECT verifikation_id FROM transaktion WHERE id=?",
+                              (inv["transaktion_id"],)).fetchone() if inv["transaktion_id"] else None
+        if t is None or t["verifikation_id"] is None:
+            raise InvalidState("Invoice is not booked; makulera it instead of kreditera")
+        rev = self.reverse_verifikation(
+            t["verifikation_id"], reason or f"Kreditering av faktura {inv['invoice_number']}", date)
+        with self.conn:
+            self.conn.execute(
+                "UPDATE invoice SET credited_at=?, credit_verifikation_id=? WHERE id=?",
+                (_now(), rev["verifikation_id"], invoice_id))
+        return {"invoice_id": invoice_id, "credited": True,
+                "credit_verifikation_id": rev["verifikation_id"], "ver_number": rev["ver_number"]}
 
     # ==================================================================
     # Receipts (encrypted photos, stored as files beside the db)

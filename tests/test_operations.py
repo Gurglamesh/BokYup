@@ -586,3 +586,50 @@ class TestInvoiceAddresses:
         assert buyer["address"] == "Kungsgatan 5, Göteborg"
         assert buyer["shipping_address"] == "Lagervägen 9, Mölndal"
         assert buyer["vat_nr"] == "SE551122334401"
+
+
+class TestInvoiceLifecycle:
+    def _inv(self, ops, **kw):
+        cat = ops.create_category("Tjänst", "income", 3001)
+        kid = ops.create_customer("private", first_name="A", last_name="B",
+                                  personnummer="811218-9876")
+        return ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                                  due_date="2026-03-31",
+                                  lines=[{"description": "X", "quantity_centi": 100,
+                                          "unit_price_ore": 100000, "rate_code": "25"}], **kw)
+
+    def test_makulera_unpaid_invoice(self, ops):
+        inv = self._inv(ops)
+        tid = inv["transaktion_id"]
+        ops.cancel_invoice(inv["invoice_id"])
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["state"] == "cancelled"
+        # the pending transaktion is gone (no longer payable)
+        assert ops.conn.execute("SELECT 1 FROM transaktion WHERE id=?", (tid,)).fetchone() is None
+        with pytest.raises(InvalidState):
+            ops.cancel_invoice(inv["invoice_id"])         # already cancelled
+
+    def test_cannot_makulera_booked_invoice(self, ops):
+        inv = self._inv(ops)
+        ops.register_payment(inv["transaktion_id"], "2026-03-10")
+        with pytest.raises(InvalidState):
+            ops.cancel_invoice(inv["invoice_id"])
+
+    def test_kreditera_booked_invoice_reverses_ledger(self, ops):
+        from backend.reports import vat as vat_report
+        inv = self._inv(ops)
+        ops.register_payment(inv["transaktion_id"], "2026-03-10")
+        before = vat_report.momsdeklaration(ops.conn, "2026-01-01", "2026-03-31")["boxes"]["10"]
+        assert before == 25000
+        res = ops.credit_invoice(inv["invoice_id"], "fel pris", date="2026-03-20")
+        assert res["ver_number"] == 2                      # the rättelse
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["state"] == "credited"
+        # the rättelse nets the moms back out in the same period
+        after = vat_report.momsdeklaration(ops.conn, "2026-01-01", "2026-03-31")["boxes"]["10"]
+        assert after == 0
+
+    def test_cannot_kreditera_unbooked_invoice(self, ops):
+        inv = self._inv(ops)
+        with pytest.raises(InvalidState):
+            ops.credit_invoice(inv["invoice_id"], "x")
