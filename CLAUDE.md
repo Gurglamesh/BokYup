@@ -225,6 +225,15 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       document. Any PNG/JPG/WEBP is normalised to a size-bounded PNG via Pillow,
       DEK-encrypted, and drawn top-right on the faktura (current logo at render time).
       `set/get/delete_logo`, API `PUT/GET/DELETE /logo`, uploader in Inställningar.
+      LAYOUT (schema v5): buyer block on top (Faktureras till + Leveransadress, with
+      `customer.shipping_address`), seller details moved to a footer under the payment
+      methods. LIFECYCLE (schema v6): driven from the Fakturor tab — bokför betalning
+      (pay), makulera (void an UNBOOKED invoice; number stays reserved, pending
+      transaktion removed, nothing hits the ledger), kreditera (reverse a BOOKED
+      invoice via rättelse). `cancel_invoice`/`credit_invoice` + derived `state`
+      (pending/paid/cancelled/credited); booking itself happens at payment
+      (kontantmetod) — verified: balanced double-entry + moms into the
+      momsdeklaration, RUT books the 1513 receivable.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
