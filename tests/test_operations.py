@@ -633,3 +633,69 @@ class TestInvoiceLifecycle:
         inv = self._inv(ops)
         with pytest.raises(InvalidState):
             ops.credit_invoice(inv["invoice_id"], "x")
+
+
+class TestFakturametod:
+    def _setup(self, ops):
+        cat = ops.create_category("Tjänst", "income", 3001)
+        kid = ops.create_customer("private", first_name="A", last_name="B",
+                                  personnummer="811218-9876")
+        return cat, kid
+
+    def _postings(self, ops, vid):
+        return {r["bas_konto"]: r["amount_ore"] for r in ops.conn.execute(
+            "SELECT bas_konto, amount_ore FROM posting WHERE verifikation_id=?", (vid,))}
+
+    def test_default_is_kontantmetod(self, ops):
+        assert ops.get_accounting_method() == "kontantmetod"
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                                 due_date="2026-03-31",
+                                 lines=[{"description": "X", "quantity_centi": 100,
+                                         "unit_price_ore": 100000, "rate_code": "25"}])
+        # kontantmetod: nothing booked at issue
+        v = ops.conn.execute("SELECT verifikation_id FROM transaktion WHERE id=?",
+                             (inv["transaktion_id"],)).fetchone()["verifikation_id"]
+        assert v is None
+
+    def test_fakturametod_books_at_issue_and_payment(self, ops):
+        from backend.reports import vat as vat_report
+        ops.set_accounting_method("fakturametod")
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                                 due_date="2026-03-31",
+                                 lines=[{"description": "X", "quantity_centi": 100,
+                                         "unit_price_ore": 100000, "rate_code": "25"}])
+        tid = inv["transaktion_id"]
+        # issue verifikation: kundfordran 1510 / income 3001 / moms 2610
+        vid = ops.conn.execute("SELECT verifikation_id FROM transaktion WHERE id=?",
+                               (tid,)).fetchone()["verifikation_id"]
+        assert vid is not None
+        p = self._postings(ops, vid)
+        assert p[1510] == 125000 and p[3001] == -100000 and p[2610] == -25000
+        # moms reported in the invoice's period already
+        assert vat_report.momsdeklaration(ops.conn, "2026-01-01", "2026-03-31")["boxes"]["10"] == 25000
+        assert ops.get_invoice(inv["invoice_id"])["state"] == "pending"   # booked but unpaid
+
+        # payment (later quarter) settles the receivable: bank / kundfordran, no moms
+        res = ops.register_payment(tid, "2026-05-10")
+        pay = self._postings(ops, res["verifikation_id"])
+        assert pay[1930] == 125000 and pay[1510] == -125000
+        # moms stays in Q1, not the payment quarter
+        assert vat_report.momsdeklaration(ops.conn, "2026-04-01", "2026-06-30")["boxes"]["10"] == 0
+        assert ops.get_invoice(inv["invoice_id"])["state"] == "paid"
+
+    def test_fakturametod_rut_split_at_issue(self, ops):
+        ops.set_accounting_method("fakturametod")
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 1000000,
+                    "rate_code": "25", "rut_eligible": True}],
+            recipients=[{"first_name": "A", "last_name": "B", "personnummer": "811218-9876",
+                         "rut_amount_ore": 250000}])
+        vid = ops.conn.execute("SELECT verifikation_id FROM transaktion WHERE id=?",
+                               (inv["transaktion_id"],)).fetchone()["verifikation_id"]
+        p = self._postings(ops, vid)
+        # inc 1 250 000; customer owes inc - rut = 1 000 000 on 1510, rut 250 000 on 1513
+        assert p[1510] == 1000000 and p[1513] == 250000

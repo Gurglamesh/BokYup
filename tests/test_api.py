@@ -546,3 +546,31 @@ class TestInvoiceLifecycleApi:
                           json={"reason": "fel", "date": "2026-03-20"})
         assert res.status_code == 201 and res.json()["ver_number"] == 2
         assert client.get(f"/books/{book}/invoices").json()[0]["state"] == "credited"
+
+
+class TestAccountingMethod:
+    def test_get_set_method(self, client, book):
+        assert client.get(f"/books/{book}/accounting-method").json()["method"] == "kontantmetod"
+        assert client.put(f"/books/{book}/accounting-method",
+                          json={"method": "fakturametod"}).status_code == 200
+        assert client.get(f"/books/{book}/accounting-method").json()["method"] == "fakturametod"
+
+    def test_fakturametod_books_invoice_at_issue(self, client, book):
+        client.put(f"/books/{book}/accounting-method", json={"method": "fakturametod"})
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "T", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "private", "first_name": "A", "last_name": "B",
+                                "personnummer": "811218-9876"}).json()["kundnummer"]
+        client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "X", "quantity_centi": 100,
+                       "unit_price_ore": 100000, "rate_code": "25"}]})
+        # already booked at issue -> appears as a verifikation
+        vers = client.get(f"/books/{book}/verifikationer").json()
+        assert len(vers) == 1 and vers[0]["ver_date"] == "2026-03-01"
+
+    def test_invalid_method_rejected(self, client, book):
+        assert client.put(f"/books/{book}/accounting-method",
+                          json={"method": "nope"}).status_code == 400

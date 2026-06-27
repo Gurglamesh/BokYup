@@ -343,6 +343,14 @@ class AppFacade:
         )
         return RawResult(content=text, media_type="text/plain; charset=utf-8")
 
+    # ---- accounting method (per book) ----
+    def h_get_accounting_method(self, p, b, q):
+        return {"method": self._ops(p["book_id"]).get_accounting_method()}
+
+    def h_set_accounting_method(self, p, b, q):
+        self._ops(p["book_id"]).set_accounting_method(b["method"])
+        return {"method": b["method"]}
+
     # ---- company profile (seller) ----
     def h_get_company(self, p, b, q):
         return self._ops(p["book_id"]).get_company()
@@ -480,6 +488,8 @@ _route("GET", "/books/{book_id}/reports/momsdeklaration", "h_report_moms")
 _route("GET", "/books/{book_id}/reports/result", "h_report_result")
 _route("GET", "/books/{book_id}/reports/sie", "h_report_sie")
 
+_route("GET", "/books/{book_id}/accounting-method", "h_get_accounting_method")
+_route("PUT", "/books/{book_id}/accounting-method", "h_set_accounting_method")
 _route("GET", "/books/{book_id}/company", "h_get_company")
 _route("PUT", "/books/{book_id}/company", "h_set_company")
 _route("GET", "/books/{book_id}/logo", "h_get_logo")

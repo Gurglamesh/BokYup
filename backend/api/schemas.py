@@ -174,6 +174,10 @@ class CompanyReq(BaseModel):
     f_skatt: Optional[int] = None
 
 
+class AccountingMethodReq(BaseModel):
+    method: str                   # 'kontantmetod' | 'fakturametod'
+
+
 class LogoReq(BaseModel):
     image_base64: str             # any common image; normalised to PNG server-side
 

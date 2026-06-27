@@ -592,10 +592,28 @@ const SECTION_RENDERERS = {
     panel.appendChild(el("h2", {}, "Inställningar"));
 
     // --- Company / seller profile (for invoices) ---
-    const [company, methods] = await Promise.all([
+    const [company, methods, acct] = await Promise.all([
       api("GET", `/books/${bid()}/company`),
       api("GET", `/books/${bid()}/payment-methods`),
+      api("GET", `/books/${bid()}/accounting-method`),
     ]);
+
+    // --- Bookkeeping method ---
+    panel.appendChild(el("h3", {}, "Bokföringsmetod"));
+    panel.appendChild(el("p", { class: "muted" },
+      "Kontantmetod: fakturan bokförs när den betalas (+ periodisering vid bokslut). "
+      + "Fakturametoden: fakturan bokförs direkt (kundfordran + moms) och betalningen "
+      + "bokförs separat. Påverkar endast nya fakturor."));
+    const acctSel = el("select", {},
+      el("option", { value: "kontantmetod" }, "Kontantmetod"),
+      el("option", { value: "fakturametod" }, "Fakturametoden"));
+    acctSel.value = acct.method;
+    acctSel.addEventListener("change", () => guard(async () => {
+      await api("PUT", `/books/${bid()}/accounting-method`, { method: acctSel.value });
+      toast("Bokföringsmetod: " + (acctSel.value === "fakturametod" ? "Fakturametoden" : "Kontantmetod"));
+    }));
+    panel.appendChild(el("div", { class: "row", style: "margin-bottom:22px" },
+      wrap("Metod", acctSel)));
     panel.appendChild(el("h3", {}, "Företagsuppgifter (säljare)"));
     panel.appendChild(el("p", { class: "muted" }, "Visas på fakturor."));
     const cName = el("input", { type: "text", value: company.name || "" });

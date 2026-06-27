@@ -299,6 +299,15 @@ def _build_router():
             "fiscal_year_start": fiscal_year_start, "fiscal_year_end": fiscal_year_end})
         return PlainTextResponse(res.content)
 
+    # ---- accounting method (per book) ----
+    @r.get("/books/{book_id}/accounting-method")
+    def get_accounting_method(book_id: str, request: Request):
+        return fac(request).h_get_accounting_method({"book_id": book_id}, {}, {})
+
+    @r.put("/books/{book_id}/accounting-method")
+    def set_accounting_method(book_id: str, body: sc.AccountingMethodReq, request: Request):
+        return fac(request).h_set_accounting_method({"book_id": book_id}, body.model_dump(), {})
+
     # ---- company profile (seller) ----
     @r.get("/books/{book_id}/company")
     def get_company(book_id: str, request: Request):

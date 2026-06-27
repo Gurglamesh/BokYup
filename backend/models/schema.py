@@ -378,6 +378,10 @@ END;
 # RUT/ROT amount is taken as user input.)
 _DEFAULT_CONFIG = {
     "rut_rot_cap_ore_per_customer_year": "7500000",  # 75 000 kr (verified 2026-06)
+    # Bookkeeping method for invoices (per book): 'kontantmetod' (book at payment +
+    # year-end accruals) or 'fakturametod' (book kundfordran/income/moms at issue,
+    # then bank/kundfordran at payment). Default kontantmetod.
+    "bokforingsmetod": "kontantmetod",
     # System BAS-konton used by the booking engine (Layer 4). Editable so a
     # revisor can map them to the entity's chart. Defaults follow standard BAS.
     "account_bank": "1930",                 # Företagskonto / bank

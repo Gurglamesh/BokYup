@@ -358,8 +358,8 @@ class BookOps:
         ).fetchone()
         if t is None:
             raise KeyError(f"No transaktion {transaktion_id}")
-        if t["verifikation_id"] is not None:
-            raise InvalidState("Transaktion is already booked")
+        if t["status"] == "paid":
+            raise InvalidState("Transaktion is already paid")
 
         ex, moms_by_rate, inc = self._sum_moms(transaktion_id)
         sum_moms = sum(moms_by_rate.values())
@@ -369,6 +369,27 @@ class BookOps:
             "SELECT * FROM rut_claim WHERE transaktion_id=?", (transaktion_id,)
         ).fetchone()
         rut = claim["rut_amount_ore"] if claim else 0
+
+        # Fakturametod: the invoice was already booked at issue (kundfordran). Payment
+        # only settles the receivable (bank <- kundfordran); income/moms already booked.
+        if t["verifikation_id"] is not None:
+            cust_part = inc - rut
+            postings = []
+            if cust_part:
+                postings.append((self._sys_account("account_bank"), cust_part, "inbetalning"))
+                postings.append((self._sys_account("account_kundfordran"), -cust_part,
+                                 "kvitta kundfordran"))
+            with self.conn:
+                vid, number = self._post_verifikation(
+                    payment_date, payment_date, "Betalning faktura", postings)
+                self.conn.execute(
+                    "UPDATE transaktion SET status='paid', payment_date=? WHERE id=?",
+                    (payment_date, transaktion_id))
+                if claim:
+                    self.conn.execute(
+                        "UPDATE rut_claim SET state='customer_paid', customer_payment_date=? "
+                        "WHERE id=?", (payment_date, claim["id"]))
+            return {"verifikation_id": vid, "ver_number": number}
 
         if t["direction"] == "in":
             postings = [(konto, ex, "utgift")]
@@ -575,6 +596,20 @@ class BookOps:
     # Company profile (seller) + payment methods — reference data
     # ==================================================================
 
+    def get_accounting_method(self) -> str:
+        """'kontantmetod' (book at payment) or 'fakturametod' (book at issue + payment)."""
+        row = self.conn.execute(
+            "SELECT value FROM config WHERE key='bokforingsmetod'").fetchone()
+        return row[0] if row else "kontantmetod"
+
+    def set_accounting_method(self, method: str) -> None:
+        if method not in ("kontantmetod", "fakturametod"):
+            raise ValueError("method must be 'kontantmetod' or 'fakturametod'")
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO config(key, value) VALUES ('bokforingsmetod', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (method,))
+
     def get_company(self) -> dict:
         row = self.conn.execute(
             "SELECT id, name, org_nr, vat_nr, address, email, phone, f_skatt, updated_at, "
@@ -726,6 +761,13 @@ class BookOps:
         ex_total, _, inc_total = self._sum_moms(tid)
         moms_total = inc_total - ex_total
 
+        # 3b) Fakturametod: book the invoice NOW (kundfordran/income/moms at issue).
+        # The transaktion's verifikation becomes this issue posting, so the moms is
+        # reported in the invoice's period; payment later only settles the receivable.
+        # Kontantmetod leaves it pending (booked when paid + year-end accrual).
+        if self.get_accounting_method() == "fakturametod":
+            self._book_invoice_issue(tid, invoice_date, rut_total)
+
         # 4) Frozen snapshots + the sequential invoice number.
         buyer_snapshot_enc = self.session.encrypt_text(json.dumps(customer, default=str))
         seller_snapshot = json.dumps(self.get_company(), default=str)
@@ -860,6 +902,34 @@ class BookOps:
                 (_now(), rev["verifikation_id"], invoice_id))
         return {"invoice_id": invoice_id, "credited": True,
                 "credit_verifikation_id": rev["verifikation_id"], "ver_number": rev["ver_number"]}
+
+    def _book_invoice_issue(self, transaktion_id: int, ver_date: str, rut_ore: int) -> tuple[int, int]:
+        """
+        Fakturametod issue posting for a sale: debit the receivable(s) and credit the
+        income + utgående moms, dated `ver_date`, and set it as the transaktion's
+        verifikation (so the moms is reported in the invoice's period). The later
+        payment settles the receivable. Must be a sale (direction 'out').
+        """
+        t = self.conn.execute(
+            "SELECT category_id FROM transaktion WHERE id=?", (transaktion_id,)).fetchone()
+        ex, moms_by_rate, inc = self._sum_moms(transaktion_id)
+        konto = self._category_konto(t["category_id"])
+        cust_part = inc - rut_ore
+        postings = []
+        if cust_part:
+            postings.append((self._sys_account("account_kundfordran"), cust_part, "kundfordran"))
+        if rut_ore:
+            postings.append((self._sys_account("account_rut_fordran"), rut_ore, "husavdrag fordran"))
+        postings.append((konto, -ex, "försäljning"))
+        for rate_code, m in moms_by_rate.items():
+            if m and rate_code in _UTG_MOMS_KEY:
+                postings.append((self._sys_account(_UTG_MOMS_KEY[rate_code]), -m,
+                                 f"utgående moms {rate_code}%"))
+        with self.conn:
+            vid, number = self._post_verifikation(ver_date, ver_date, "Faktura (kundfordran)", postings)
+            self.conn.execute("UPDATE transaktion SET verifikation_id=? WHERE id=?",
+                              (vid, transaktion_id))
+        return vid, number
 
     # ==================================================================
     # Receipts (encrypted photos, stored as files beside the db)
