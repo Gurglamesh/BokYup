@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -287,6 +287,20 @@ CREATE TABLE invoice (
     created_at               TEXT NOT NULL
 );
 
+-- ----- invoice settlement subledger: each payment / refund / credit is an event
+-- that books its own verifikation; the invoice's outstanding balance + state are
+-- derived from these (supports partial payments, partial credits, and refunds).
+CREATE TABLE invoice_event (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_id      INTEGER NOT NULL REFERENCES invoice(id),
+    kind            TEXT NOT NULL CHECK (kind IN ('payment','refund','credit')),
+    amount_ore      INTEGER NOT NULL,        -- inc-moms amount of this event (positive)
+    date            TEXT NOT NULL,
+    verifikation_id INTEGER REFERENCES verifikation(id),
+    note            TEXT,
+    created_at      TEXT NOT NULL
+);
+
 -- ----- invoice line items (articles) -------------------------------------
 CREATE TABLE invoice_line (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -326,6 +340,7 @@ CREATE INDEX idx_receipt_trans       ON receipt(transaktion_id);
 CREATE INDEX idx_invoice_number      ON invoice(invoice_number);
 CREATE INDEX idx_invoice_line_inv    ON invoice_line(invoice_id);
 CREATE INDEX idx_rut_recipient_inv   ON rut_recipient(invoice_id);
+CREATE INDEX idx_invoice_event_inv   ON invoice_event(invoice_id);
 """
 
 # ---------------------------------------------------------------------------
@@ -495,6 +510,17 @@ _MIGRATIONS: dict[int, str] = {
         ALTER TABLE invoice ADD COLUMN cancelled_at TEXT;
         ALTER TABLE invoice ADD COLUMN credited_at TEXT;
         ALTER TABLE invoice ADD COLUMN credit_verifikation_id INTEGER;
+    """,
+    7: """
+        CREATE TABLE IF NOT EXISTS invoice_event (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id INTEGER NOT NULL REFERENCES invoice(id),
+            kind TEXT NOT NULL CHECK (kind IN ('payment','refund','credit')),
+            amount_ore INTEGER NOT NULL, date TEXT NOT NULL,
+            verifikation_id INTEGER REFERENCES verifikation(id),
+            note TEXT, created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_invoice_event_inv ON invoice_event(invoice_id);
     """,
 }
 

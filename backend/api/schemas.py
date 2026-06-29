@@ -211,9 +211,21 @@ class RutRecipientReq(BaseModel):
     rut_amount_ore: int           # this person's share of the skattereduktion
 
 
+class PayInvoiceReq(BaseModel):
+    amount_ore: Optional[int] = None   # None = full outstanding
+    date: Optional[str] = None
+
+
+class RefundInvoiceReq(BaseModel):
+    amount_ore: int
+    date: Optional[str] = None
+    note: Optional[str] = None
+
+
 class CreditInvoiceReq(BaseModel):
+    amount_ore: Optional[int] = None   # None = full remaining
     reason: Optional[str] = None
-    date: Optional[str] = None     # rättelse booking date (defaults to today)
+    date: Optional[str] = None
 
 
 class CreateInvoiceReq(BaseModel):

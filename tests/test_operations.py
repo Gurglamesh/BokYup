@@ -618,21 +618,21 @@ class TestInvoiceLifecycle:
     def test_kreditera_booked_invoice_reverses_ledger(self, ops):
         from backend.reports import vat as vat_report
         inv = self._inv(ops)
-        ops.register_payment(inv["transaktion_id"], "2026-03-10")
+        ops.pay_invoice(inv["invoice_id"], date="2026-03-10")        # full payment (kontantmetod)
         before = vat_report.momsdeklaration(ops.conn, "2026-01-01", "2026-03-31")["boxes"]["10"]
         assert before == 25000
-        res = ops.credit_invoice(inv["invoice_id"], "fel pris", date="2026-03-20")
-        assert res["ver_number"] == 2                      # the rättelse
+        res = ops.credit_invoice(inv["invoice_id"], reason="fel pris", date="2026-03-20")
+        assert res["ver_number"] == 2                      # the credit verifikation
         got = ops.get_invoice(inv["invoice_id"])
         assert got["state"] == "credited"
-        # the rättelse nets the moms back out in the same period
+        # the credit nets the moms back out in the same period
         after = vat_report.momsdeklaration(ops.conn, "2026-01-01", "2026-03-31")["boxes"]["10"]
         assert after == 0
 
-    def test_cannot_kreditera_unbooked_invoice(self, ops):
-        inv = self._inv(ops)
+    def test_cannot_kreditera_unpaid_kontantmetod_invoice(self, ops):
+        inv = self._inv(ops)   # kontantmetod, unpaid -> nothing recognised to reverse
         with pytest.raises(InvalidState):
-            ops.credit_invoice(inv["invoice_id"], "x")
+            ops.credit_invoice(inv["invoice_id"], reason="x")
 
 
 class TestFakturametod:
@@ -699,3 +699,38 @@ class TestFakturametod:
         p = self._postings(ops, vid)
         # inc 1 250 000; customer owes inc - rut = 1 000 000 on 1510, rut 250 000 on 1513
         assert p[1510] == 1000000 and p[1513] == 250000
+
+
+class TestPartialSettlement:
+    def _inv(self, ops, amount_ore=100003):
+        cat = ops.create_category("T", "income", 3001)
+        kid = ops.create_customer("private", first_name="A", last_name="B",
+                                  personnummer="811218-9876")
+        # ex 100003 @ 25% -> moms 25001, inc 125004 (deliberately awkward for rounding)
+        return ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-02-01",
+                                  due_date="2026-02-28",
+                                  lines=[{"description": "X", "quantity_centi": 100,
+                                          "unit_price_ore": amount_ore, "rate_code": "25"}])
+
+    def test_kontant_partials_reconcile_to_ore(self, ops):
+        from backend.reports import vat as vat_report
+        inv = self._inv(ops)                                   # inc 125004
+        for amt, d in [(33333, "2026-02-05"), (50000, "2026-02-10")]:
+            ops.pay_invoice(inv["invoice_id"], amt, d)
+        ops.pay_invoice(inv["invoice_id"], date="2026-02-20")  # remainder
+        b = ops.get_invoice(inv["invoice_id"])
+        assert b["outstanding_ore"] == 0 and b["state"] == "paid"
+        # the three proportional slices reconcile to the exact full moms (25001)
+        assert vat_report.momsdeklaration(ops.conn, "2026-01-01", "2026-02-28")["boxes"]["10"] == 25001
+
+    def test_fakturametod_partials_settle_receivable(self, ops):
+        ops.set_accounting_method("fakturametod")
+        inv = self._inv(ops)                                   # inc 125004
+        ops.pay_invoice(inv["invoice_id"], 25004, "2026-02-05")
+        assert ops.get_invoice(inv["invoice_id"])["outstanding_ore"] == 100000
+        ops.pay_invoice(inv["invoice_id"], date="2026-02-20")
+        b = ops.get_invoice(inv["invoice_id"])
+        assert b["outstanding_ore"] == 0 and b["state"] == "paid"
+        for v in ops.conn.execute("SELECT id FROM verifikation"):
+            assert sum(p["amount_ore"] for p in ops.conn.execute(
+                "SELECT amount_ore FROM posting WHERE verifikation_id=?", (v["id"],))) == 0

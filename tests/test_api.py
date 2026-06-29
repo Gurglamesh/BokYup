@@ -433,7 +433,7 @@ class TestInvoices:
         inv = resp.json()
         assert inv["invoice_number"] == 1 and inv["inc_moms_ore"] == 250000
         lst = client.get(f"/books/{book}/invoices").json()
-        assert len(lst) == 1 and lst[0]["status"] == "pending"
+        assert len(lst) == 1 and lst[0]["state"] == "pending"
         got = client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()
         assert got["seller"]["name"] == "Min Firma AB"
         assert got["buyer"]["first_name"] == "Anna"
@@ -522,30 +522,54 @@ class TestInvoiceLifecycleApi:
 
     def test_pay_then_state_paid(self, client, book):
         inv = self._inv(client, book)
-        client.post(f"/books/{book}/transaktioner/{inv['transaktion_id']}/pay",
-                    json={"payment_date": "2026-03-10"})
+        client.post(f"/books/{book}/invoices/{inv['invoice_id']}/pay",
+                    json={"date": "2026-03-10"})
         lst = client.get(f"/books/{book}/invoices").json()
-        assert lst[0]["state"] == "paid"
+        assert lst[0]["state"] == "paid" and lst[0]["outstanding_ore"] == 0
+
+    def test_partial_payment(self, client, book):
+        inv = self._inv(client, book)   # inc 125000
+        r = client.post(f"/books/{book}/invoices/{inv['invoice_id']}/pay",
+                        json={"amount_ore": 50000, "date": "2026-03-10"})
+        assert r.status_code == 201 and r.json()["outstanding_ore"] == 75000
+        assert client.get(f"/books/{book}/invoices").json()[0]["state"] == "partial"
+        client.post(f"/books/{book}/invoices/{inv['invoice_id']}/pay", json={"date": "2026-03-20"})
+        assert client.get(f"/books/{book}/invoices").json()[0]["state"] == "paid"
+
+    def test_refund(self, client, book):
+        inv = self._inv(client, book)
+        client.post(f"/books/{book}/invoices/{inv['invoice_id']}/pay", json={"date": "2026-03-10"})
+        r = client.post(f"/books/{book}/invoices/{inv['invoice_id']}/refund",
+                        json={"amount_ore": 25000, "date": "2026-03-15"})
+        assert r.status_code == 201
+        assert client.get(f"/books/{book}/invoices").json()[0]["outstanding_ore"] == 25000
 
     def test_makulera_unpaid(self, client, book):
         inv = self._inv(client, book)
         assert client.post(f"/books/{book}/invoices/{inv['invoice_id']}/cancel").status_code == 201
         assert client.get(f"/books/{book}/invoices").json()[0]["state"] == "cancelled"
 
-    def test_makulera_booked_is_409(self, client, book):
+    def test_makulera_paid_is_409(self, client, book):
         inv = self._inv(client, book)
-        client.post(f"/books/{book}/transaktioner/{inv['transaktion_id']}/pay",
-                    json={"payment_date": "2026-03-10"})
+        client.post(f"/books/{book}/invoices/{inv['invoice_id']}/pay", json={"date": "2026-03-10"})
         assert client.post(f"/books/{book}/invoices/{inv['invoice_id']}/cancel").status_code == 409
 
-    def test_kreditera_booked(self, client, book):
+    def test_kreditera_paid(self, client, book):
         inv = self._inv(client, book)
-        client.post(f"/books/{book}/transaktioner/{inv['transaktion_id']}/pay",
-                    json={"payment_date": "2026-03-10"})
+        client.post(f"/books/{book}/invoices/{inv['invoice_id']}/pay", json={"date": "2026-03-10"})
         res = client.post(f"/books/{book}/invoices/{inv['invoice_id']}/credit",
                           json={"reason": "fel", "date": "2026-03-20"})
-        assert res.status_code == 201 and res.json()["ver_number"] == 2
+        assert res.status_code == 201
         assert client.get(f"/books/{book}/invoices").json()[0]["state"] == "credited"
+
+    def test_partial_credit(self, client, book):
+        inv = self._inv(client, book)   # inc 125000
+        client.post(f"/books/{book}/invoices/{inv['invoice_id']}/pay", json={"date": "2026-03-10"})
+        r = client.post(f"/books/{book}/invoices/{inv['invoice_id']}/credit",
+                        json={"amount_ore": 25000, "reason": "retur", "date": "2026-03-20"})
+        assert r.status_code == 201
+        # paid 125000, credited 25000 -> owe the customer 25000 (negative outstanding)
+        assert client.get(f"/books/{book}/invoices").json()[0]["outstanding_ore"] == -25000
 
 
 class TestAccountingMethod:
