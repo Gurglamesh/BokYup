@@ -243,6 +243,16 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       (pending/paid/cancelled/credited); booking itself happens at payment
       (kontantmetod) — verified: balanced double-entry + moms into the
       momsdeklaration, RUT books the 1513 receivable.
+      SUBLEDGER (schema v7, 2026-06): `invoice_event` (payment|refund|credit) — an
+      invoice's outstanding/state are derived from it, so settlements can be PARTIAL.
+      `pay_invoice`/`refund_invoice`/`credit_invoice(amount=None)`: fakturametod
+      moves cash against 1510; kontantmetod recognises income+moms PROPORTIONALLY per
+      payment (per-rate slices, cumulative öre-exact rounding) via hidden report-
+      clones (`fakturabetalning`/`kreditering` notes). A credit on a paid invoice
+      makes 1510 negative (owed back) → refund pays it out. RUT invoices keep the full
+      register_payment + Skatteverket flow (subledger guarded). API POST
+      /invoices/{id}/pay|refund|credit; Fakturor UI shows "Kvar" + Delbetald + the
+      pay/refund/credit actions.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
