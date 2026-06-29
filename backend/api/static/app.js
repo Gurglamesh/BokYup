@@ -765,34 +765,53 @@ const SECTION_RENDERERS = {
     }
     const STATE = {
       paid: ["paid", "Betald"], pending: ["pending", "Obetald"],
+      partial: ["pending", "Delbetald"],
       cancelled: ["", "Makulerad"], credited: ["", "Krediterad"],
     };
+    const act = (label, cls, fn) => el("button",
+      { class: "btn small " + cls, style: "margin-left:4px", onclick: () => guard(fn) }, label);
     const rows = list.map((iv) => {
       const [cls, label] = STATE[iv.state] || STATE.pending;
+      const isRut = iv.rut_total_ore > 0;
+      const owed = iv.outstanding_ore < 0 ? -iv.outstanding_ore : 0;   // we owe the customer
       const actions = el("td", { class: "num" },
         el("button", { class: "btn small ghost", onclick: () => guard(() => invoicePdf(iv.id, iv.invoice_number)) }, "PDF"));
-      if (iv.state === "pending") {
-        actions.appendChild(el("button", { class: "btn small", style: "margin-left:4px",
-          onclick: () => guard(() => payFlow(iv.transaktion_id)) }, "Bokför betalning"));
-        actions.appendChild(el("button", { class: "btn small ghost danger", style: "margin-left:4px",
-          onclick: () => guard(() => makuleraInvoiceFlow(iv)) }, "Makulera"));
-      } else if (iv.state === "paid") {
-        actions.appendChild(el("button", { class: "btn small ghost", style: "margin-left:4px",
-          onclick: () => guard(() => kreditInvoiceFlow(iv)) }, "Kreditera"));
+      if (isRut) {
+        // RUT invoices keep the full payment + Skatteverket flow (RUT-tab)
+        if (iv.state === "pending") {
+          actions.appendChild(act("Bokför betalning", "", () => payFlow(iv.transaktion_id)));
+          actions.appendChild(act("Makulera", "ghost danger", () => makuleraInvoiceFlow(iv)));
+        }
+      } else {
+        if (iv.state === "pending" || iv.state === "partial") {
+          actions.appendChild(act("Betala", "", () => payInvoiceFlow(iv)));
+          actions.appendChild(act("Kreditera", "ghost", () => kreditInvoiceFlow(iv)));
+        }
+        if (iv.state === "paid") {
+          actions.appendChild(act("Kreditera", "ghost", () => kreditInvoiceFlow(iv)));
+        }
+        if (iv.paid_ore > 0 || owed) {
+          actions.appendChild(act(owed ? "Återbetala" : "Återbetala", "ghost", () => refundInvoiceFlow(iv)));
+        }
+        if (iv.state === "pending" && iv.paid_ore === 0 && iv.credited_ore === 0) {
+          actions.appendChild(act("Makulera", "ghost danger", () => makuleraInvoiceFlow(iv)));
+        }
       }
+      const kvar = owed ? ("−" + toKr(owed) + " kr") : (toKr(iv.outstanding_ore) + " kr");
       return el("tr", {},
         el("td", { class: "num" }, String(iv.invoice_number)),
         el("td", {}, iv.invoice_date),
         el("td", {}, iv.due_date),
         el("td", { class: "num" }, toKr(iv.inc_moms_ore) + " kr"),
-        el("td", { class: "num" }, iv.rut_total_ore ? toKr(iv.rut_total_ore) + " kr" : ""),
-        el("td", {}, el("span", { class: "pill " + cls }, label)),
+        el("td", { class: "num", title: owed ? "Att återbetala till kund" : "Kvar att betala" }, kvar),
+        el("td", {}, el("span", { class: "pill " + cls }, label),
+          owed ? el("span", { class: "pill", style: "margin-left:4px" }, "återbet.") : null),
         actions);
     });
     panel.appendChild(el("table", { style: "margin-top:14px" },
       el("thead", {}, el("tr", {},
         el("th", { class: "num" }, "Nr"), el("th", {}, "Datum"), el("th", {}, "Förfaller"),
-        el("th", { class: "num" }, "Summa"), el("th", { class: "num" }, "RUT"),
+        el("th", { class: "num" }, "Summa"), el("th", { class: "num" }, "Kvar"),
         el("th", {}, "Status"), el("th", {}, ""))),
       el("tbody", {}, rows)));
   },
@@ -1301,15 +1320,48 @@ async function makuleraInvoiceFlow(iv) {
   renderWorkspace();
 }
 
-// Kreditera a booked invoice — reverses the verifikation (rättelse).
+// Register a customer payment (partial or full) against an invoice.
+async function payInvoiceFlow(iv) {
+  const f = await modal(`Betalning faktura ${iv.invoice_number}`, [
+    { name: "amount", label: "Belopp (kr) — kvar att betala", value: toKr(iv.outstanding_ore) },
+    { name: "date", label: "Betaldatum", type: "date", value: new Date().toISOString().slice(0, 10) },
+  ], "Bokför betalning");
+  if (!f) return;
+  const body = { date: f.date || null };
+  if (f.amount) body.amount_ore = toOre(f.amount);
+  const res = await api("POST", `/books/${bid()}/invoices/${iv.id}/pay`, body);
+  toast(res.outstanding_ore > 0
+    ? `Delbetalning bokförd — ${toKr(res.outstanding_ore)} kr kvar`
+    : `Faktura ${iv.invoice_number} fullt betald`);
+  renderWorkspace();
+}
+
+// Pay money back to the customer (partial or full).
+async function refundInvoiceFlow(iv) {
+  const owed = iv.outstanding_ore < 0 ? -iv.outstanding_ore : iv.paid_ore;
+  const f = await modal(`Återbetalning faktura ${iv.invoice_number}`, [
+    { name: "amount", label: "Belopp att återbetala (kr)", value: toKr(owed) },
+    { name: "date", label: "Datum", type: "date", value: new Date().toISOString().slice(0, 10) },
+  ], "Återbetala");
+  if (!f || !f.amount) return;
+  await api("POST", `/books/${bid()}/invoices/${iv.id}/refund`,
+            { amount_ore: toOre(f.amount), date: f.date || null });
+  toast(`Återbetalning bokförd`);
+  renderWorkspace();
+}
+
+// Kreditera (partial or full) — reverses the income/moms slice against the receivable.
 async function kreditInvoiceFlow(iv) {
+  const billable = iv.customer_total_ore - iv.credited_ore;
   const f = await modal(`Kreditera faktura ${iv.invoice_number}`, [
+    { name: "amount", label: "Belopp att kreditera (kr)", value: toKr(billable) },
     { name: "reason", label: "Orsak" },
     { name: "date", label: "Bokföringsdatum", type: "date", value: new Date().toISOString().slice(0, 10) },
   ], "Kreditera");
   if (!f) return;
-  const res = await api("POST", `/books/${bid()}/invoices/${iv.id}/credit`,
-                        { reason: f.reason || null, date: f.date || null });
+  const body = { reason: f.reason || null, date: f.date || null };
+  if (f.amount) body.amount_ore = toOre(f.amount);
+  const res = await api("POST", `/books/${bid()}/invoices/${iv.id}/credit`, body);
   toast(`Faktura ${iv.invoice_number} krediterad (ver ${res.ver_number})`);
   renderWorkspace();
 }
