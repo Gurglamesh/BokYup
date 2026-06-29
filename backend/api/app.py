@@ -383,6 +383,12 @@ def _build_router():
         res = fac(request).h_invoice_pdf({"book_id": book_id, "invoice_id": invoice_id}, {}, {})
         return Response(content=res.content, media_type=res.media_type)
 
+    @r.get("/books/{book_id}/invoices/{invoice_id}/credit-notes/{event_id}/pdf")
+    def credit_note_pdf(book_id: str, invoice_id: int, event_id: int, request: Request):
+        res = fac(request).h_credit_note_pdf(
+            {"book_id": book_id, "invoice_id": invoice_id, "event_id": event_id}, {}, {})
+        return Response(content=res.content, media_type=res.media_type)
+
     return r
 
 

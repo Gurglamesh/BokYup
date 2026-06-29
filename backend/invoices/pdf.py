@@ -44,6 +44,8 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     lines = invoice.get("lines") or []
     recipients = invoice.get("recipients") or []
     methods = invoice.get("payment_methods") or []
+    credit_of = invoice.get("credit_of")
+    is_credit = credit_of is not None
 
     pdf = FPDF(format="A4", unit="mm")
     pdf.set_auto_page_break(auto=True, margin=18)
@@ -71,13 +73,18 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         logo_bottom = 12 + h
 
     # ---- header: title (left) + invoice meta (right). Seller goes in the footer.
-    text(pdf.l_margin, 16, "FAKTURA", size=22, bold=True)
+    text(pdf.l_margin, 16, "KREDITFAKTURA" if is_credit else "FAKTURA", size=22, bold=True)
 
     mx = pdf.l_margin + W * 0.62
-    meta = [("Fakturanr", str(invoice.get("invoice_number") or "")),
-            ("Fakturadatum", invoice.get("invoice_date") or ""),
-            ("Förfallodatum", invoice.get("due_date") or ""),
-            ("Leveransdatum", invoice.get("delivery_date") or "")]
+    if is_credit:
+        meta = [("Kreditfakturanr", str(invoice.get("invoice_number") or "")),
+                ("Avser faktura", str(credit_of)),
+                ("Datum", invoice.get("invoice_date") or "")]
+    else:
+        meta = [("Fakturanr", str(invoice.get("invoice_number") or "")),
+                ("Fakturadatum", invoice.get("invoice_date") or ""),
+                ("Förfallodatum", invoice.get("due_date") or ""),
+                ("Leveransdatum", invoice.get("delivery_date") or "")]
     my = max(28, logo_bottom + 3)
     for label, val in meta:
         if not val:
@@ -167,15 +174,19 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         _kv(pdf, rx, ty, rw, "Att betala", _kr(invoice["inc_moms_ore"] - rut_total), bold=True)
         ty += 8
     else:
-        _kv(pdf, rx, ty, rw, "Att betala", _kr(invoice["inc_moms_ore"]), bold=True); ty += 8
+        pay_label = "Att återfå" if is_credit else "Att betala"
+        pay_amount = -invoice["inc_moms_ore"] if is_credit else invoice["inc_moms_ore"]
+        _kv(pdf, rx, ty, rw, pay_label, _kr(pay_amount), bold=True); ty += 8
 
     # ---- payment methods + terms --------------------------------------------
     ty += 4
-    pdf.set_font("Helvetica", "B", 9); pdf.set_xy(pdf.l_margin, ty)
-    pdf.cell(0, 5, _s("Betalning")); ty += 5
+    if methods:
+        pdf.set_font("Helvetica", "B", 9); pdf.set_xy(pdf.l_margin, ty)
+        pdf.cell(0, 5, _s("Betalning")); ty += 5
+        pdf.set_font("Helvetica", "", 9)
+        for m in methods:
+            pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 5, _s(f"{m['label']}: {m['value']}")); ty += 5
     pdf.set_font("Helvetica", "", 9)
-    for m in methods:
-        pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 5, _s(f"{m['label']}: {m['value']}")); ty += 5
     if invoice.get("payment_terms"):
         pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 5, _s(f"Betalningsvillkor: {invoice['payment_terms']}")); ty += 5
     if invoice.get("note"):

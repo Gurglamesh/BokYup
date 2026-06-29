@@ -765,8 +765,7 @@ class BookOps:
         buyer_snapshot_enc = self.session.encrypt_text(json.dumps(customer, default=str))
         seller_snapshot = json.dumps(self.get_company(), default=str)
         pm_snapshot = json.dumps(self.list_payment_methods(active_only=True), default=str)
-        number = self.conn.execute(
-            "SELECT COALESCE(MAX(invoice_number), 0) FROM invoice").fetchone()[0] + 1
+        number = self._next_invoice_number()
 
         with self.conn:
             cur = self.conn.execute(
@@ -854,6 +853,10 @@ class BookOps:
         for r in rows:
             d = dict(r)
             d.update(self._invoice_balances(r["id"]))
+            d["credit_notes"] = [dict(c) for c in self.conn.execute(
+                "SELECT id, credit_note_number, date, amount_ore FROM invoice_event "
+                "WHERE invoice_id=? AND kind='credit' AND credit_note_number IS NOT NULL "
+                "ORDER BY id", (r["id"],)).fetchall()]
             out.append(d)
         return out
 
@@ -869,8 +872,8 @@ class BookOps:
         inv["payment_date"] = status_row["payment_date"] if status_row else None
         inv.update(self._invoice_balances(invoice_id))
         inv["events"] = [dict(r) for r in self.conn.execute(
-            "SELECT id, kind, amount_ore, date, verifikation_id, note FROM invoice_event "
-            "WHERE invoice_id=? ORDER BY date, id", (invoice_id,)).fetchall()]
+            "SELECT id, kind, amount_ore, date, verifikation_id, credit_note_number, note "
+            "FROM invoice_event WHERE invoice_id=? ORDER BY date, id", (invoice_id,)).fetchall()]
         inv["buyer"] = json.loads(self.session.decrypt_text(inv.pop("buyer_snapshot_enc")))
         inv["seller"] = json.loads(inv.pop("seller_snapshot") or "{}")
         inv["payment_methods"] = json.loads(inv.pop("payment_methods_snapshot") or "[]")
@@ -1031,14 +1034,61 @@ class BookOps:
             vid, num = self._post_verifikation(date, date, text, postings)
             # negative report-clone so the momsdeklaration/result net the credit
             self._book_recognition_clone(tid, vid, date, slices, -1, "kreditering")
-            self._record_invoice_event(invoice_id, "credit", amount, date, vid, reason)
+            credit_note_number = self._next_invoice_number()
+            ev_id = self._record_invoice_event(invoice_id, "credit", amount, date, vid, reason,
+                                               credit_note_number)
             fully = bal["credited_ore"] + amount >= inv["inc_moms_ore"] - inv["rut_total_ore"]
             if fully:
                 self.conn.execute(
                     "UPDATE invoice SET credited_at=?, credit_verifikation_id=? WHERE id=?",
                     (_now(), vid, invoice_id))
         return {"invoice_id": invoice_id, "verifikation_id": vid, "ver_number": num,
-                "amount_ore": amount, "credited": True}
+                "amount_ore": amount, "credited": True, "credit_note_number": credit_note_number,
+                "credit_event_id": ev_id}
+
+    def _next_invoice_number(self) -> int:
+        """Next number in the faktura series, shared by invoices and credit notes
+        (so every issued document has a unique, unbroken number)."""
+        a = self.conn.execute("SELECT COALESCE(MAX(invoice_number), 0) FROM invoice").fetchone()[0]
+        b = self.conn.execute(
+            "SELECT COALESCE(MAX(credit_note_number), 0) FROM invoice_event").fetchone()[0]
+        return max(a, b) + 1
+
+    def get_credit_note(self, invoice_id: int, event_id: int) -> dict:
+        """Build a render dict for a kreditfaktura: the original invoice's frozen
+        buyer/seller/payment snapshots, a reference to the original number, and the
+        credited slice as NEGATIVE line(s)."""
+        ev = self.conn.execute(
+            "SELECT id, amount_ore, date, credit_note_number, note FROM invoice_event "
+            "WHERE id=? AND invoice_id=? AND kind='credit'", (event_id, invoice_id)).fetchone()
+        if ev is None:
+            raise KeyError(f"No credit note {event_id} on invoice {invoice_id}")
+        orig = self.get_invoice(invoice_id)
+        credited_before = self.conn.execute(
+            "SELECT COALESCE(SUM(amount_ore),0) FROM invoice_event "
+            "WHERE invoice_id=? AND kind='credit' AND id<?", (invoice_id, event_id)).fetchone()[0]
+        slices = self._recognition_slice(orig["transaktion_id"], credited_before,
+                                         ev["amount_ore"], orig["inc_moms_ore"])
+        lines, ex_total, moms_total = [], 0, 0
+        for rate_code, (ex_s, moms_s) in slices.items():
+            if ex_s or moms_s:
+                lines.append({"line_no": len(lines) + 1,
+                              "description": f"Kreditering avseende faktura {orig['invoice_number']}",
+                              "quantity_centi": 100, "unit": None, "unit_price_ore": -ex_s,
+                              "rate_code": rate_code, "rut_eligible": 0,
+                              "ex_moms_ore": -ex_s, "moms_ore": -moms_s})
+                ex_total -= ex_s
+                moms_total -= moms_s
+        return {
+            "invoice_number": ev["credit_note_number"], "invoice_date": ev["date"],
+            "due_date": None, "delivery_date": None,
+            "buyer": orig["buyer"], "seller": orig["seller"],
+            "payment_methods": [], "payment_terms": None,
+            "our_reference": orig.get("our_reference"), "your_reference": orig.get("your_reference"),
+            "note": ev["note"], "lines": lines, "recipients": [],
+            "ex_moms_ore": ex_total, "moms_ore": moms_total, "inc_moms_ore": -ev["amount_ore"],
+            "rut_total_ore": 0, "credit_of": orig["invoice_number"],
+        }
 
     # ---- subledger internals -------------------------------------------------
 
@@ -1052,11 +1102,13 @@ class BookOps:
             raise InvalidState("Invoice is makulerad")
         return inv, self._invoice_balances(invoice_id)
 
-    def _record_invoice_event(self, invoice_id, kind, amount, date, vid, note=None) -> None:
-        self.conn.execute(
+    def _record_invoice_event(self, invoice_id, kind, amount, date, vid, note=None,
+                              credit_note_number=None) -> int:
+        cur = self.conn.execute(
             "INSERT INTO invoice_event(invoice_id, kind, amount_ore, date, verifikation_id, "
-            "note, created_at) VALUES (?,?,?,?,?,?,?)",
-            (invoice_id, kind, amount, date, vid, note, _now()))
+            "credit_note_number, note, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (invoice_id, kind, amount, date, vid, credit_note_number, note, _now()))
+        return cur.lastrowid
 
     def _sync_invoice_paid(self, invoice_id, transaktion_id, date) -> None:
         """Mark the underlying transaktion paid once the invoice is fully settled."""

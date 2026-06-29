@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -297,6 +297,7 @@ CREATE TABLE invoice_event (
     amount_ore      INTEGER NOT NULL,        -- inc-moms amount of this event (positive)
     date            TEXT NOT NULL,
     verifikation_id INTEGER REFERENCES verifikation(id),
+    credit_note_number INTEGER,              -- kreditfaktura number (credit events; shares the faktura series)
     note            TEXT,
     created_at      TEXT NOT NULL
 );
@@ -521,6 +522,9 @@ _MIGRATIONS: dict[int, str] = {
             note TEXT, created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_invoice_event_inv ON invoice_event(invoice_id);
+    """,
+    8: """
+        ALTER TABLE invoice_event ADD COLUMN credit_note_number INTEGER;
     """,
 }
 

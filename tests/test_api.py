@@ -571,6 +571,22 @@ class TestInvoiceLifecycleApi:
         # paid 125000, credited 25000 -> owe the customer 25000 (negative outstanding)
         assert client.get(f"/books/{book}/invoices").json()[0]["outstanding_ore"] == -25000
 
+    def test_credit_note_pdf(self, client, book):
+        inv = self._inv(client, book)
+        client.post(f"/books/{book}/invoices/{inv['invoice_id']}/pay", json={"date": "2026-03-10"})
+        cr = client.post(f"/books/{book}/invoices/{inv['invoice_id']}/credit",
+                         json={"reason": "fel", "date": "2026-03-20"}).json()
+        assert cr["credit_note_number"] > inv["invoice_number"]      # unbroken series
+        # the credit event is exposed on the invoice so the UI can find it
+        ev = [e for e in client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()["events"]
+              if e["kind"] == "credit"][0]
+        assert ev["credit_note_number"] == cr["credit_note_number"]
+        pdf = client.get(
+            f"/books/{book}/invoices/{inv['invoice_id']}/credit-notes/{ev['id']}/pdf")
+        assert pdf.status_code == 200
+        assert pdf.headers["content-type"] == "application/pdf"
+        assert pdf.content[:4] == b"%PDF"
+
 
 class TestAccountingMethod:
     def test_get_set_method(self, client, book):

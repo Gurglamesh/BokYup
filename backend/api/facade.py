@@ -431,6 +431,15 @@ class AppFacade:
                                  logo_png=logo[0] if logo else None)
         return RawResult(content=pdf, media_type="application/pdf")
 
+    def h_credit_note_pdf(self, p, b, q):
+        from backend.invoices.pdf import render_invoice_pdf
+        ops = self._ops(p["book_id"])
+        logo = ops.get_logo()
+        pdf = render_invoice_pdf(
+            ops.get_credit_note(int(p["invoice_id"]), int(p["event_id"])),
+            logo_png=logo[0] if logo else None)
+        return RawResult(content=pdf, media_type="application/pdf")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -510,6 +519,7 @@ _route("PATCH", "/books/{book_id}/payment-methods/{payment_method_id}", "h_updat
 _route("POST", "/books/{book_id}/invoices", "h_create_invoice", 201)
 _route("GET", "/books/{book_id}/invoices", "h_list_invoices")
 _route("GET", "/books/{book_id}/invoices/{invoice_id}/pdf", "h_invoice_pdf")
+_route("GET", "/books/{book_id}/invoices/{invoice_id}/credit-notes/{event_id}/pdf", "h_credit_note_pdf")
 _route("POST", "/books/{book_id}/invoices/{invoice_id}/cancel", "h_cancel_invoice", 201)
 _route("POST", "/books/{book_id}/invoices/{invoice_id}/pay", "h_pay_invoice", 201)
 _route("POST", "/books/{book_id}/invoices/{invoice_id}/refund", "h_refund_invoice", 201)

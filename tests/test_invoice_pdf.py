@@ -41,6 +41,27 @@ def test_render_plain_invoice(ops):
     assert pdf[:4] == b"%PDF" and len(pdf) > 800
 
 
+def test_render_credit_note(ops):
+    ops.set_company(name="Räksmörgås AB", org_nr="556677-8899")
+    cat = ops.create_category("Tjänster", "income", 3001)
+    kid = ops.create_customer("business", company_name="Köpare AB", org_nr="551122-3344",
+                              address="Kungsgatan 5, Göteborg")
+    inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                             due_date="2026-03-31",
+                             lines=[{"description": "Konsultarvode", "quantity_centi": 100,
+                                     "unit_price_ore": 100000, "rate_code": "25"}])
+    ops.pay_invoice(inv["invoice_id"], date="2026-03-10")          # book it (kontantmetod)
+    res = ops.credit_invoice(inv["invoice_id"], reason="fel pris", date="2026-03-20")
+    note = ops.get_credit_note(inv["invoice_id"], res["credit_event_id"])
+    # the credit note carries its own number, references the original, and is negative
+    assert note["invoice_number"] == res["credit_note_number"]
+    assert note["credit_of"] == ops.get_invoice(inv["invoice_id"])["invoice_number"]
+    assert note["inc_moms_ore"] == -125000
+    assert all(ln["ex_moms_ore"] <= 0 for ln in note["lines"])
+    pdf = render_invoice_pdf(note)
+    assert pdf[:4] == b"%PDF" and len(pdf) > 800
+
+
 def test_render_rut_household_split(ops):
     ops.set_company(name="Städ AB", org_nr="556677-8899")
     cat = ops.create_category("Städning", "income", 3001)

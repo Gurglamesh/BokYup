@@ -253,6 +253,17 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       register_payment + Skatteverket flow (subledger guarded). API POST
       /invoices/{id}/pay|refund|credit; Fakturor UI shows "Kvar" + Delbetald + the
       pay/refund/credit actions.
+      CREDIT NOTE (schema v8, 2026-06): a numbered **kreditfaktura** document. Every
+      credit event reserves a number from the SAME faktura series
+      (`_next_invoice_number` = max of `invoice.invoice_number` and
+      `invoice_event.credit_note_number`, +1 → unbroken across both document kinds);
+      stored on `invoice_event.credit_note_number`. `get_credit_note(invoice_id,
+      event_id)` builds a render dict reusing the original's frozen buyer/seller
+      snapshots, with the credited slice as NEGATIVE lines and `credit_of` = the
+      original number. `render_invoice_pdf` renders it in credit-note mode
+      (KREDITFAKTURA title, "Avser faktura" reference, "Att återfå"). API GET
+      /invoices/{id}/credit-notes/{event_id}/pdf; `list_invoices` exposes
+      `credit_notes[]` and Fakturor UI shows a "Kreditnota N" download per credit.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

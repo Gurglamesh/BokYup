@@ -776,6 +776,12 @@ const SECTION_RENDERERS = {
       const owed = iv.outstanding_ore < 0 ? -iv.outstanding_ore : 0;   // we owe the customer
       const actions = el("td", { class: "num" },
         el("button", { class: "btn small ghost", onclick: () => guard(() => invoicePdf(iv.id, iv.invoice_number)) }, "PDF"));
+      for (const cn of iv.credit_notes || []) {
+        actions.appendChild(el("button", { class: "btn small ghost", style: "margin-left:4px",
+          title: `Kreditfaktura nr ${cn.credit_note_number}`,
+          onclick: () => guard(() => creditNotePdf(iv.id, cn.id, cn.credit_note_number)) },
+          `Kreditnota ${cn.credit_note_number}`));
+      }
       if (isRut) {
         // RUT invoices keep the full payment + Skatteverket flow (RUT-tab)
         if (iv.state === "pending") {
@@ -1300,6 +1306,21 @@ async function invoicePdf(invoiceId, number) {
   const fname = `faktura-${number || invoiceId}.pdf`;
   if (window.__BOKYUP_NATIVE__) {
     const r = await api("GET", path);                 // { raw, base64, media_type }
+    const bytes = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0));
+    const url = URL.createObjectURL(new Blob([bytes], { type: r.media_type }));
+    const a = el("a", { href: url, download: fname }); document.body.appendChild(a); a.click(); a.remove();
+    return;
+  }
+  const a = el("a", { href: path, download: fname, target: "_blank" });
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+// Download/preview a numbered kreditfaktura (credit note) PDF.
+async function creditNotePdf(invoiceId, eventId, number) {
+  const path = `/books/${bid()}/invoices/${invoiceId}/credit-notes/${eventId}/pdf`;
+  const fname = `kreditfaktura-${number || eventId}.pdf`;
+  if (window.__BOKYUP_NATIVE__) {
+    const r = await api("GET", path);
     const bytes = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0));
     const url = URL.createObjectURL(new Blob([bytes], { type: r.media_type }));
     const a = el("a", { href: url, download: fname }); document.body.appendChild(a); a.click(); a.remove();
