@@ -632,6 +632,23 @@ class TestSeparateSharesAndCap:
         # a different year is unaffected
         assert ops.husavdrag_cap_status(member, 2025)["used_ore"] == 0
 
+    def test_rot_subcap_flagged_under_combined_cap(self, ops):
+        cat, kid = self._setup(ops)
+        member = ops.create_customer("private", first_name="Mem", last_name="M")
+        # ROT line ex 16 000 000 @25% -> inc 20 000 000 -> ROT pot 6 000 000 (60 000 kr):
+        # under the combined 75 000 cap but OVER the ROT-only 50 000 sub-cap.
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Snickeri", "quantity_centi": 100, "unit_price_ore": 16000000,
+                    "rate_code": "25", "reduction_type": "rot"}],
+            recipients=[{"customer_id": member, "personnummer": "19811218-9876", "share_pct": 100}])
+        st = ops.husavdrag_cap_status(member, 2026)
+        assert st["used_ore"] == 6000000 and st["over_cap"] is False        # combined OK
+        assert st["rot_used_ore"] == 6000000 and st["rot_cap_ore"] == 5000000
+        assert st["rot_over_cap"] is True                                   # ROT sub-cap breached
+        w = [x for x in inv["cap_warnings"] if x["customer_id"] == member][0]
+        assert w["rot_over_cap"] is True and w["over_cap"] is False
+
 
 class TestHouseholdRelations:
     def _two(self, ops):

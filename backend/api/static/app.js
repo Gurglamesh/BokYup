@@ -1443,8 +1443,14 @@ async function invoiceForm(panel) {
     const res = await api("POST", `/books/${bid()}/invoices`, body);
     toast(`Faktura ${res.invoice_number} skapad`);
     for (const w of res.cap_warnings || []) {
-      toast(`OBS: ${w.name} ${w.over_cap ? "har överskridit" : "närmar sig"} `
-        + `husavdragstaket i år (${toKr(w.used_ore)}/${toKr(w.cap_ore)} kr)`, true);
+      if (w.over_cap || w.near_cap) {
+        toast(`OBS: ${w.name} ${w.over_cap ? "har överskridit" : "närmar sig"} `
+          + `husavdragstaket i år (${toKr(w.used_ore)}/${toKr(w.cap_ore)} kr totalt)`, true);
+      }
+      if (w.rot_over_cap || w.rot_near_cap) {
+        toast(`OBS: ${w.name} ${w.rot_over_cap ? "har överskridit" : "närmar sig"} `
+          + `ROT-taket i år (${toKr(w.rot_used_ore)}/${toKr(w.rot_cap_ore)} kr)`, true);
+      }
     }
     state.section = "invoices";
     renderWorkspace();
@@ -1547,21 +1553,26 @@ function recipientsEditor(opts) {
       if (pots.rut) parts.push(`RUT ${toKr(a.rut)}`);
       if (pots.rot) parts.push(`ROT ${toKr(a.rot)}`);
       row._out.textContent = parts.length ? parts.join(" · ") + " kr" : "—";
-      updateCapNote(row, a.rut + a.rot);
+      updateCapNote(row, a);
     }
   }
 
-  // Per-recipient annual cap note: "Använt i år X / 75 000 — kvar Y", red if this
-  // invoice's amount would exceed the remaining.
-  function updateCapNote(row, thisAmount) {
+  // Per-recipient annual cap note vs BOTH caps: the combined RUT+ROT cap and the
+  // ROT-only sub-cap. Red if this invoice would push either over.
+  function updateCapNote(row, amt) {
     const cid = row._who.value;
     const year = getYear ? getYear() : new Date().getFullYear();
     const st = capCache.get(`${cid}:${year}`);
     if (!cid || !st) { row._cap.textContent = ""; return; }
-    const over = thisAmount > st.remaining_ore || st.over_cap;
-    row._cap.textContent = `kvar ${toKr(st.remaining_ore)} kr`;
+    const overCombined = (amt.rut + amt.rot) > st.remaining_ore || st.over_cap;
+    const overRot = amt.rot > st.rot_remaining_ore || st.rot_over_cap;
+    const note = `kvar ${toKr(st.remaining_ore)}`
+      + (st.rot_cap_ore ? ` · ROT ${toKr(st.rot_remaining_ore)}` : "") + " kr";
+    const over = overCombined || overRot;
+    row._cap.textContent = note;
     row._cap.style.color = over ? "var(--danger)" : "";
-    row._cap.title = `Använt i år: ${toKr(st.used_ore)} / ${toKr(st.cap_ore)} kr`;
+    row._cap.title = `Använt i år: ${toKr(st.used_ore)} / ${toKr(st.cap_ore)} kr (totalt)`
+      + `\nROT: ${toKr(st.rot_used_ore)} / ${toKr(st.rot_cap_ore)} kr`;
   }
 
   async function refreshCaps() {
