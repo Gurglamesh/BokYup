@@ -123,6 +123,15 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
   `husavdrag = rut_total + rot_total` as the 1513 receivable (customer pays
   inc − husavdrag); the RUT/ROT lifecycle (register_payment + Skatteverket) is unchanged.
   Customers need only first+last name; personnummer is added when used as a recipient.
+- **Separate RUT/ROT shares + per-recipient cap (schema v11, 2026-06).** A recipient
+  can take a **different % of RUT vs ROT** (`rut_recipient.share_pct_centi` = RUT share,
+  `rot_share_pct_centi` = ROT share; each pot split by its own share sequence, validated
+  independently only when that pot > 0). `husavdrag_cap_status(customer_id, year)` sums a
+  person's RUT+ROT across the year's non-cancelled invoice recipients vs the config
+  per-person cap (75 000 kr); `create_invoice` returns non-blocking **`cap_warnings`**
+  for over/near-cap recipients (Skatteverket reduces the real payout — we only flag).
+  API `GET /customers/{id}/husavdrag-cap/{year}`. UI: per-recipient RUT % and ROT %
+  fields with live "kvar i år" cap notes (red when over), and a toast on issue.
 
 ## Customers
 
@@ -322,6 +331,12 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       `/customers/{id}/relations` (link/list/unlink), `/reduction-config`. UI: per-line
       RUT/ROT selector + recipient editor with the invoice customer / linked members /
       "+ Ny person", live per-recipient kr from the pots. All tests pass (249).
+- [x] **Separate RUT/ROT shares + per-recipient annual cap (schema v11, 2026-06).** A
+      recipient can take a different % of RUT vs ROT (`rot_share_pct_centi`; each pot
+      split by its own share sequence, validated per-pot). `husavdrag_cap_status` +
+      `create_invoice` `cap_warnings` (non-blocking) flag a recipient over/near the
+      75 000 kr/person/year cap; `GET /customers/{id}/husavdrag-cap/{year}`. UI: RUT %/
+      ROT % per recipient + live "kvar i år" cap notes + toast on issue. Tests pass (259).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

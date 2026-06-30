@@ -218,12 +218,15 @@ class InvoiceLineReq(BaseModel):
 
 class RutRecipientReq(BaseModel):
     # A recipient is a household member; identify by an existing customer_id and/or
-    # name + personnummer. share_pct is their slice of each RUT/ROT pot.
+    # name + personnummer. share_pct is the fallback slice of both pots; rut_share_pct
+    # and rot_share_pct override it per pot (a person may take a different % of RUT vs ROT).
     customer_id: Optional[int] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     personnummer: Optional[str] = None
     share_pct: Optional[float] = None
+    rut_share_pct: Optional[float] = None
+    rot_share_pct: Optional[float] = None
 
 
 class CustomerRelationReq(BaseModel):

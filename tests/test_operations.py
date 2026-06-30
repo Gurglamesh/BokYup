@@ -574,6 +574,65 @@ class TestInvoices:
                                             "personnummer": "19811218-9876", "share_pct": 60}])
 
 
+class TestSeparateSharesAndCap:
+    def _setup(self, ops):
+        cat = ops.create_category("Tjänst", "income", 3001)
+        kid = ops.create_customer("private", first_name="Head", last_name="H",
+                                  personnummer="811218-9876")
+        return cat, kid
+
+    def test_different_rut_vs_rot_share_per_person(self, ops):
+        cat, kid = self._setup(ops)
+        a = ops.create_customer("private", first_name="A", last_name="A")
+        b = ops.create_customer("private", first_name="B", last_name="B")
+        # RUT pot 625 000, ROT pot 375 000. A takes all RUT, B takes all ROT.
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 1000000,
+                    "rate_code": "25", "reduction_type": "rut"},
+                   {"description": "Snickeri", "quantity_centi": 100, "unit_price_ore": 1000000,
+                    "rate_code": "25", "reduction_type": "rot"}],
+            recipients=[{"customer_id": a, "personnummer": "811218-9876",
+                         "rut_share_pct": 100, "rot_share_pct": 0},
+                        {"customer_id": b, "personnummer": "19811218-9876",
+                         "rut_share_pct": 0, "rot_share_pct": 100}])
+        assert inv["rut_total_ore"] == 625000 and inv["rot_total_ore"] == 375000
+        recs = {r["first_name"]: r for r in ops.get_invoice(inv["invoice_id"])["recipients"]}
+        assert recs["A"]["rut_amount_ore"] == 625000 and recs["A"]["rot_amount_ore"] == 0
+        assert recs["B"]["rut_amount_ore"] == 0 and recs["B"]["rot_amount_ore"] == 375000
+        assert recs["A"]["rut_share_pct"] == 100 and recs["A"]["rot_share_pct"] == 0
+
+    def test_per_pot_share_validation(self, ops):
+        cat, kid = self._setup(ops)
+        # RUT shares sum to 120 > 100 (ROT pot is 0, so only RUT is validated)
+        with pytest.raises(ValueError):
+            ops.create_invoice(
+                customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+                lines=[{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 100000,
+                        "rate_code": "25", "reduction_type": "rut"}],
+                recipients=[{"first_name": "A", "last_name": "A", "personnummer": "811218-9876",
+                             "rut_share_pct": 60},
+                            {"first_name": "B", "last_name": "B", "personnummer": "19811218-9876",
+                             "rut_share_pct": 60}])
+
+    def test_husavdrag_cap_status_and_warning(self, ops):
+        cat, kid = self._setup(ops)
+        member = ops.create_customer("private", first_name="Mem", last_name="M")
+        # RUT line ex 20 000 000 @25% -> inc 25 000 000 -> RUT pot 12 500 000 > 7 500 000 cap.
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 20000000,
+                    "rate_code": "25", "reduction_type": "rut"}],
+            recipients=[{"customer_id": member, "personnummer": "19811218-9876", "share_pct": 100}])
+        status = ops.husavdrag_cap_status(member, 2026)
+        assert status["used_ore"] == 12500000 and status["cap_ore"] == 7500000
+        assert status["over_cap"] is True
+        # the create result flagged the over-cap recipient
+        assert any(w["customer_id"] == member and w["over_cap"] for w in inv["cap_warnings"])
+        # a different year is unaffected
+        assert ops.husavdrag_cap_status(member, 2025)["used_ore"] == 0
+
+
 class TestHouseholdRelations:
     def _two(self, ops):
         a = ops.create_customer("private", first_name="A", last_name="B")

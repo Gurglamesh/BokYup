@@ -228,6 +228,11 @@ def _build_router():
     def reduction_config(book_id: str, request: Request):
         return fac(request).h_reduction_config({"book_id": book_id}, {}, {})
 
+    @r.get("/books/{book_id}/customers/{kundnummer}/husavdrag-cap/{year}")
+    def husavdrag_cap(book_id: str, kundnummer: int, year: int, request: Request):
+        return fac(request).h_husavdrag_cap(
+            {"book_id": book_id, "kundnummer": kundnummer, "year": year}, {}, {})
+
     # ---- reference: suppliers ----
     @r.get("/books/{book_id}/suppliers")
     def list_suppliers(book_id: str, request: Request):
