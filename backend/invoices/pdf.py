@@ -223,7 +223,7 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     ty += 4
     if methods:
         pdf.set_font("Helvetica", "B", 9); pdf.set_xy(pdf.l_margin, ty)
-        pdf.cell(0, 5, _s("Ange fakturanummer vid betalning. Nedan har ni tillgängliga betalningsalternativ:")); ty += 5
+        pdf.cell(0, 5, _s("Ange fakturanummer vid betalning:")); ty += 5
         pdf.set_font("Helvetica", "", 9)
         for m in methods:
             pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 5, _s(f"{m['label']}: {m['value']}")); ty += 5
