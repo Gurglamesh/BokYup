@@ -355,6 +355,17 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       Also: the recipient editor **prefills personnummer from the picked customer's
       kundkort** when it is already stored (backend `_resolve_recipient` already falls
       back to the customer's pnr). Tests pass (262).
+- [x] **Article catalog (schema v14, 2026-06).** Reusable products/services for invoice
+      lines. `article` table: number **xxxx-xxxx** (user picks the 4-digit prefix, suffix
+      random + unique via `_next_article_number`), description, unit, default
+      `unit_price_ore`, `rate_code`, `reduction_type`, `category_id` (NULL =
+      uncategorised), `active`. `create_article`/`list_articles`/`update_article`
+      (categorise/reprice/rename in the list)/`delete_article` (issued invoice lines keep
+      their frozen values; `invoice_line.article_id` link is nulled on delete). API
+      `GET/POST/PATCH/DELETE /articles[/{id}]`. UI: an **"Artiklar"** tab (list +
+      create/categorise/delete) and, in the faktura line editor, an **article picker**
+      that prefills the whole row (price always editable) plus a **★ "spara som artikel"**
+      that prompts for the prefix. Tests pass (266).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

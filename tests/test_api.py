@@ -715,6 +715,53 @@ class TestAccountingMethod:
                           json={"method": "nope"}).status_code == 400
 
 
+class TestArticles:
+    def test_article_number_format_and_prefix(self, client, book):
+        import re
+        r = client.post(f"/books/{book}/articles", json={
+            "description": "Konsulttimme", "prefix": "1000", "unit_price_ore": 120000,
+            "rate_code": "25", "unit": "h"})
+        assert r.status_code == 201
+        num = r.json()["article_number"]
+        assert re.match(r"^\d{4}-\d{4}$", num) and num.startswith("1000-")
+
+    def test_bad_prefix_rejected(self, client, book):
+        assert client.post(f"/books/{book}/articles",
+                           json={"description": "X", "prefix": "12"}).status_code == 400
+
+    def test_create_uncategorised_then_categorise_and_delete(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "IT", "kind": "income", "bas_konto": 3001}).json()["id"]
+        aid = client.post(f"/books/{book}/articles",
+                          json={"description": "Vara", "prefix": "2000"}).json()["id"]
+        art = [a for a in client.get(f"/books/{book}/articles").json() if a["id"] == aid][0]
+        assert art["category_id"] is None          # first uncategorised
+        # categorise + reprice in the list
+        client.patch(f"/books/{book}/articles/{aid}", json={"category_id": cat, "unit_price_ore": 5000})
+        art = [a for a in client.get(f"/books/{book}/articles").json() if a["id"] == aid][0]
+        assert art["category_id"] == cat and art["unit_price_ore"] == 5000
+        assert client.delete(f"/books/{book}/articles/{aid}").status_code == 200
+        assert all(a["id"] != aid for a in client.get(f"/books/{book}/articles").json())
+
+    def test_invoice_line_links_article_and_survives_delete(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "IT", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "X AB"}).json()["kundnummer"]
+        aid = client.post(f"/books/{book}/articles", json={
+            "description": "Konsult", "prefix": "1000", "unit_price_ore": 100000,
+            "category_id": cat}).json()["id"]
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "Konsult", "quantity_centi": 100,
+                       "unit_price_ore": 90000, "rate_code": "25", "article_id": aid}]}).json()
+        # price was edited (90000) and still booked; deleting the article keeps the invoice
+        assert inv["ex_moms_ore"] == 90000
+        assert client.delete(f"/books/{book}/articles/{aid}").status_code == 200
+        assert client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()["ex_moms_ore"] == 90000
+
+
 class TestBasKontonAndAddress:
     def test_accounts_endpoint_lists_system_konton(self, client, book):
         client.post(f"/books/{book}/categories",
