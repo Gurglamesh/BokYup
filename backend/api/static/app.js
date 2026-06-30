@@ -66,7 +66,9 @@ class ApiError extends Error {
 // ---------------------------------------------------------------------------
 // Money helpers (UI works in kronor; API works in ören)
 // ---------------------------------------------------------------------------
-const toOre = (kr) => Math.round(parseFloat(String(kr).replace(",", ".")) * 100);
+// Strip grouping spaces (regular + non-breaking, e.g. "1 438,40") before parsing,
+// otherwise parseFloat stops at the space and saves a wrong amount (1438,40 -> 1).
+const toOre = (kr) => Math.round(parseFloat(String(kr).replace(/[\s ]/g, "").replace(",", ".")) * 100);
 const toKr = (ore) => (ore / 100).toLocaleString("sv-SE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 // ---------------------------------------------------------------------------
@@ -462,16 +464,21 @@ const SECTION_RENDERERS = {
   async customers(panel) {
     const list = await api("GET", `/books/${bid()}/customers`);
     panel.appendChild(headerWithAdd("Kunder", "+ Ny kund", () => guard(addCustomerFlow)));
+    const cname = (c) => c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim();
     const actions = (c) => el("span", { style: "display:inline-flex;gap:4px" },
+      el("button", { class: "btn small ghost", title: "Skapa faktura till denna kund",
+        onclick: () => newInvoiceForCustomer(c.kundnummer) }, "Ny faktura"),
       editBtn(() => guard(() => editCustomerFlow(c.kundnummer))),
       c.type === "private"
         ? el("button", { class: "btn small ghost", onclick: () => guard(() => householdFlow(c)) }, "Hushåll")
         : null);
-    panel.appendChild(simpleTable(
+    panel.appendChild(searchTable(
+      "Sök kund (namn, nr, org/pers.nr, e-post)…",
       ["Nr", "Typ", "Namn", "Org/Pers", "E-post", ""],
-      list.map((c) => [c.kundnummer, c.type,
-        c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim(),
-        c.org_nr || "", c.email || "", actions(c)]),
+      list,
+      (c, q) => [String(c.kundnummer), cname(c), c.org_nr || "",
+        c.email || "", c.phone || ""].join(" ").toLowerCase().includes(q),
+      (c) => [c.kundnummer, c.type, cname(c), c.org_nr || "", c.email || "", actions(c)],
     ));
   },
 
@@ -857,10 +864,21 @@ const SECTION_RENDERERS = {
 
   // ----- invoices (faktura): list + create with line items & RUT recipients -----
   async invoices(panel) {
-    const [list, drafts] = await Promise.all([
+    // Arriving from the "Ny faktura" button in the Kunder tab: open the form straight
+    // away with that customer preselected.
+    if (state.pendingInvoiceCustomer != null) {
+      const kid = state.pendingInvoiceCustomer;
+      state.pendingInvoiceCustomer = null;
+      await invoiceForm(panel, { payload: { customer_id: kid } });
+      return;
+    }
+    const [list, drafts, customers] = await Promise.all([
       api("GET", `/books/${bid()}/invoices`),
       api("GET", `/books/${bid()}/invoice-drafts`),
+      api("GET", `/books/${bid()}/customers`),
     ]);
+    const custName = Object.fromEntries(customers.map((c) =>
+      [c.kundnummer, c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim()]));
     panel.appendChild(headerWithAdd("Fakturor", "+ Ny faktura", () => guard(() => invoiceForm(panel))));
 
     // Drafts: unissued invoices saved to continue later.
@@ -895,7 +913,7 @@ const SECTION_RENDERERS = {
     };
     const act = (label, cls, fn) => el("button",
       { class: "btn small " + cls, style: "margin-left:4px", onclick: () => guard(fn) }, label);
-    const rows = list.map((iv) => {
+    const rowFor = (iv) => {
       const [cls, label] = STATE[iv.state] || STATE.pending;
       // RUT and ROT invoices both carry a husavdrag receivable -> full Skatteverket flow.
       const isRut = (iv.rut_total_ore > 0) || (iv.rot_total_ore > 0);
@@ -939,6 +957,7 @@ const SECTION_RENDERERS = {
       const kvar = owed ? ("−" + toKr(owed) + " kr") : (toKr(iv.outstanding_ore) + " kr");
       return el("tr", {},
         el("td", { class: "num" }, String(iv.invoice_number)),
+        el("td", {}, custName[iv.customer_id] || ("Kund " + iv.customer_id)),
         el("td", {}, iv.invoice_date),
         el("td", {}, iv.due_date),
         el("td", { class: "num" }, toKr(iv.inc_moms_ore) + " kr"),
@@ -946,13 +965,31 @@ const SECTION_RENDERERS = {
         el("td", {}, el("span", { class: "pill " + cls }, label),
           owed ? el("span", { class: "pill", style: "margin-left:4px" }, "återbet.") : null),
         actions);
-    });
+    };
+    const ivMatch = (iv, q) => [String(iv.invoice_number), custName[iv.customer_id] || "",
+      iv.invoice_date || "", iv.due_date || ""].join(" ").toLowerCase().includes(q);
+    const search = el("input", { type: "search", placeholder: "Sök faktura (nr, kund, datum)…",
+      style: "margin-top:12px;max-width:340px" });
+    const tbody = el("tbody", {});
+    const drawRows = () => {
+      const q = search.value.trim().toLowerCase();
+      const shown = q ? list.filter((iv) => ivMatch(iv, q)) : list;
+      tbody.innerHTML = "";
+      if (q && shown.length === 0) {
+        tbody.appendChild(el("tr", {}, el("td", { colspan: "8", class: "muted" }, "Inga träffar.")));
+      } else {
+        for (const iv of shown) tbody.appendChild(rowFor(iv));
+      }
+    };
+    search.oninput = drawRows;
+    drawRows();
+    panel.appendChild(search);
     panel.appendChild(el("table", { style: "margin-top:14px" },
       el("thead", {}, el("tr", {},
-        el("th", { class: "num" }, "Nr"), el("th", {}, "Datum"), el("th", {}, "Förfaller"),
-        el("th", { class: "num" }, "Summa"), el("th", { class: "num" }, "Kvar"),
-        el("th", {}, "Status"), el("th", {}, ""))),
-      el("tbody", {}, rows)));
+        el("th", { class: "num" }, "Nr"), el("th", {}, "Kund"), el("th", {}, "Datum"),
+        el("th", {}, "Förfaller"), el("th", { class: "num" }, "Summa"),
+        el("th", { class: "num" }, "Kvar"), el("th", {}, "Status"), el("th", {}, ""))),
+      tbody));
   },
 };
 
@@ -1483,6 +1520,15 @@ async function importBackupFlow() {
 // ---------------------------------------------------------------------------
 // Invoices (faktura)
 // ---------------------------------------------------------------------------
+
+// From the Kunder tab: jump to Fakturor and open a fresh invoice form with this
+// customer preselected. The invoices renderer picks up state.pendingInvoiceCustomer.
+function newInvoiceForCustomer(kundnummer) {
+  state.pendingInvoiceCustomer = kundnummer;
+  state.section = "invoices";
+  renderWorkspace();
+}
+
 async function invoiceForm(panel, draft) {
   const dp = (draft && draft.payload) || {};   // prefill from a saved draft
   let draftId = draft ? draft.id : null;
@@ -1500,9 +1546,11 @@ async function invoiceForm(panel, draft) {
   panel.innerHTML = "";
   panel.appendChild(el("h2", {}, draftId ? `Utkast (forts.)` : "Ny faktura"));
 
-  const customer = el("select", {}, ...customers.map((c) => el("option", { value: c.kundnummer },
-    c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer))));
-  if (dp.customer_id) customer.value = String(dp.customer_id);
+  const custSel = searchableSelect(
+    customers.map((c) => ({ value: c.kundnummer,
+      label: c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer) })),
+    dp.customer_id, "Sök kund…");
+  const customer = custSel.select;
   const cat = el("select", {},
     el("option", { value: "" }, "— välj per rad —"),
     ...incomeCats.map((c) => el("option", { value: c.id }, c.name)));
@@ -1526,7 +1574,7 @@ async function invoiceForm(panel, draft) {
   invDate.onchange = () => recips.refreshCaps();
 
   panel.appendChild(el("div", { class: "row" },
-    wrap("Kund", customer), wrap("Standardkategori (BAS, valfri)", cat)));
+    wrap("Kund", custSel.element), wrap("Standardkategori (BAS, valfri)", cat)));
   panel.appendChild(el("div", { class: "row" },
     wrap("Fakturadatum", invDate), wrap("Förfallodatum", dueDate),
     wrap("Leveransdatum (valfritt)", delivery)));
@@ -1978,6 +2026,32 @@ function editBtn(onClick) {
   return el("button", { class: "btn small ghost", onclick: onClick }, "Ändra");
 }
 function wrap(label, input) { return el("div", {}, el("label", {}, label), input); }
+
+// A <select> with a free-text filter above it (for long customer/article lists).
+// options: [{value, label}]. Returns {element, select}; the select keeps the native
+// API so callers can read .value / set .onchange as before.
+function searchableSelect(options, selectedValue, placeholder) {
+  const sel = el("select", {}, ...options.map((o) => el("option", { value: o.value }, o.label)));
+  if (selectedValue != null) sel.value = String(selectedValue);
+  const filter = el("input", { type: "search", placeholder: placeholder || "Sök…",
+    style: "margin-bottom:4px" });
+  filter.oninput = () => {
+    const q = filter.value.trim().toLowerCase();
+    let firstVisible = null;
+    for (const opt of sel.options) {
+      const match = !q || opt.textContent.toLowerCase().includes(q);
+      opt.hidden = !match;
+      if (match && firstVisible === null) firstVisible = opt;
+    }
+    // If the current selection was filtered out, jump to the first match so the
+    // chosen value always reflects what's visible.
+    if (q && sel.selectedOptions[0] && sel.selectedOptions[0].hidden && firstVisible) {
+      sel.value = firstVisible.value;
+      sel.dispatchEvent(new Event("change"));
+    }
+  };
+  return { element: el("div", {}, filter, sel), select: sel };
+}
 function headerWithAdd(title, btn, onClick) {
   return el("div", { style: "display:flex;align-items:center;justify-content:space-between" },
     el("h2", { style: "margin:0" }, title),
@@ -1989,6 +2063,30 @@ function simpleTable(headers, rows) {
     el("thead", {}, el("tr", {}, headers.map((h) => el("th", {}, h)))),
     el("tbody", {}, rows.map((r) => el("tr", {}, r.map((c) =>
       el("td", {}, c instanceof Node ? c : String(c)))))));
+}
+
+// A search box over a list: re-renders a simpleTable filtered by a free-text query.
+//   items   – the data array
+//   matchFn – (item, lowercased-query) -> bool
+//   rowFn   – (item) -> array of cells for simpleTable
+function searchTable(placeholder, headers, items, matchFn, rowFn) {
+  const search = el("input", { type: "search", placeholder,
+    style: "margin-top:12px;max-width:340px" });
+  const body = el("div", {});
+  const draw = () => {
+    const q = search.value.trim().toLowerCase();
+    const shown = q ? items.filter((it) => matchFn(it, q)) : items;
+    body.innerHTML = "";
+    if (q && shown.length === 0) {
+      body.appendChild(el("p", { class: "muted", style: "margin-top:14px" },
+        "Inga träffar."));
+    } else {
+      body.appendChild(simpleTable(headers, shown.map(rowFn)));
+    }
+  };
+  search.oninput = draw;
+  draw();
+  return el("div", {}, search, body);
 }
 
 // ---------------------------------------------------------------------------

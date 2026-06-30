@@ -366,6 +366,17 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       create/categorise/delete) and, in the faktura line editor, an **article picker**
       that prefills the whole row (price always editable) plus a **★ "spara som artikel"**
       that prompts for the prefix. Tests pass (266).
+- [x] **Article-price parse fix + search + invoice-from-customer (frontend, 2026-06).**
+      `toOre` now strips grouping spaces (regular + non-breaking) before parsing, so a
+      price shown as "1 438,40" no longer round-trips to ~1,4 when saved/reused as an
+      article. Added a reusable `searchTable` (free-text filter over a list) and a
+      `searchableSelect` (filter input over a `<select>`): the **Kunder** tab and
+      **Fakturor** tab each gained a search box (Fakturor also shows a **Kund** column,
+      searchable by customer name/nr/date), and the faktura form's customer picker is now
+      filterable. The Kunder tab has a **"Ny faktura"** button per customer that jumps to
+      Fakturor and opens a fresh invoice form with that customer preselected (via
+      `state.pendingInvoiceCustomer` → `newInvoiceForCustomer`). Frontend-only; all 266
+      tests pass, live browser smoke-tested.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
