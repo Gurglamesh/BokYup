@@ -187,8 +187,13 @@ class AppFacade:
     # ---- reference: categories ----
     def h_list_categories(self, p, b, q):
         ops = self._ops(p["book_id"])
-        return _rows(ops, "SELECT id, name, kind, bas_konto, default_rate_code, active "
-                          "FROM category ORDER BY bas_konto")
+        # `used` flags categories already touched by the books (cannot be deleted).
+        return _rows(ops,
+                     "SELECT id, name, kind, bas_konto, default_rate_code, active, "
+                     "(EXISTS(SELECT 1 FROM transaktion t WHERE t.category_id=category.id) "
+                     " OR EXISTS(SELECT 1 FROM moms_line m WHERE m.category_id=category.id) "
+                     " OR EXISTS(SELECT 1 FROM invoice_line il WHERE il.category_id=category.id)) "
+                     "AS used FROM category ORDER BY bas_konto")
 
     def h_list_accounts(self, p, b, q):
         """All BAS-konton, each tagged with whether it is a system account (the
@@ -213,6 +218,10 @@ class AppFacade:
         ops = self._ops(p["book_id"])
         ops.update_category(int(p["category_id"]), **_clean(b))
         return {"id": int(p["category_id"])}
+
+    def h_delete_category(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        return ops.delete_category(int(p["category_id"]))
 
     # ---- reference: customers ----
     def h_list_customers(self, p, b, q):
@@ -514,6 +523,7 @@ _route("GET", "/books/{book_id}/categories", "h_list_categories")
 _route("GET", "/books/{book_id}/accounts", "h_list_accounts")
 _route("POST", "/books/{book_id}/categories", "h_create_category", 201)
 _route("PATCH", "/books/{book_id}/categories/{category_id}", "h_update_category")
+_route("DELETE", "/books/{book_id}/categories/{category_id}", "h_delete_category")
 
 _route("GET", "/books/{book_id}/customers", "h_list_customers")
 _route("GET", "/books/{book_id}/customers/{kundnummer}/rut-cap/{year}", "h_rut_cap")

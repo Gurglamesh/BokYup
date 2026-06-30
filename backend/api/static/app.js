@@ -466,10 +466,15 @@ const SECTION_RENDERERS = {
     if (list.length === 0) {
       panel.appendChild(el("p", { class: "muted" }, "Inga kategorier ännu."));
     } else {
+      panel.appendChild(el("p", { class: "muted" },
+        "Ett BAS-konto som ännu inte använts kan tas bort. Har det bokförts måste det "
+        + "vara kvar (legal spårbarhet) — inaktivera det istället."));
       panel.appendChild(simpleTable(
-        ["Namn", "Typ", "BAS-konto", "Standardmoms", ""],
+        ["Namn", "Typ", "BAS-konto", "Standardmoms", "Status", ""],
         list.map((c) => [c.name, c.kind === "income" ? "Inkomst" : "Utgift", c.bas_konto,
-          rateLabel(c.default_rate_code), editBtn(() => guard(() => editCategoryFlow(c)))]),
+          rateLabel(c.default_rate_code),
+          el("span", { class: "pill " + (c.active ? "paid" : "") }, c.active ? "Aktiv" : "Inaktiv"),
+          categoryActions(c)]),
       ));
     }
 
@@ -1248,19 +1253,53 @@ async function editSupplierFlow(s) {
   renderWorkspace();
 }
 
+// Row actions for a category: edit, activate/inactivate, and delete-if-unused.
+function categoryActions(c) {
+  const box = el("span", { style: "display:inline-flex;gap:4px;flex-wrap:wrap" },
+    editBtn(() => guard(() => editCategoryFlow(c))),
+    el("button", { class: "btn small ghost",
+      onclick: () => guard(() => toggleCategoryActive(c)) },
+      c.active ? "Inaktivera" : "Aktivera"));
+  if (c.used) {
+    box.appendChild(el("span", { class: "muted", style: "align-self:center;font-size:12px",
+      title: "Kontot har bokförts och kan inte tas bort" }, "Använd"));
+  } else {
+    box.appendChild(el("button", { class: "btn small ghost danger",
+      onclick: () => guard(() => deleteCategoryFlow(c)) }, "Ta bort"));
+  }
+  return box;
+}
+
 async function editCategoryFlow(c) {
-  const f = await modal(`Ändra kategori`, [
-    { name: "name", label: "Namn", value: c.name },
-    { name: "bas_konto", label: "BAS-konto", value: c.bas_konto },
-    { name: "default_rate_code", label: "Standardmoms", type: "select",
-      value: c.default_rate_code || "25",
-      options: RATE_OPTIONS.map((r) => ({ value: r, label: rateLabel(r) })) },
-  ], "Spara");
+  // A used BAS-konto must not have its number changed (it would retroactively remap
+  // already-booked entries in the reports); only name + default moms stay editable.
+  const fields = [{ name: "name", label: "Namn", value: c.name }];
+  if (!c.used) fields.push({ name: "bas_konto", label: "BAS-konto", value: c.bas_konto });
+  fields.push({ name: "default_rate_code", label: "Standardmoms", type: "select",
+    value: c.default_rate_code || "25",
+    options: RATE_OPTIONS.map((r) => ({ value: r, label: rateLabel(r) })) });
+  const f = await modal(`Ändra kategori`, fields, "Spara");
   if (!f || !f.name) return;
-  await api("PATCH", `/books/${bid()}/categories/${c.id}`,
-            { name: f.name, bas_konto: parseInt(f.bas_konto, 10),
-              default_rate_code: f.default_rate_code || null });
+  const body = { name: f.name, default_rate_code: f.default_rate_code || null };
+  if (!c.used && f.bas_konto) body.bas_konto = parseInt(f.bas_konto, 10);
+  await api("PATCH", `/books/${bid()}/categories/${c.id}`, body);
   toast("Kategori uppdaterad");
+  renderWorkspace();
+}
+
+async function toggleCategoryActive(c) {
+  await api("PATCH", `/books/${bid()}/categories/${c.id}`, { active: !c.active });
+  toast(c.active ? "Kategori inaktiverad" : "Kategori aktiverad");
+  renderWorkspace();
+}
+
+async function deleteCategoryFlow(c) {
+  const f = await modal(
+    `Ta bort BAS-konto "${c.name}" (${c.bas_konto})? Det har inte använts i bokföringen.`,
+    [], "Ta bort");
+  if (!f) return;
+  await api("DELETE", `/books/${bid()}/categories/${c.id}`);
+  toast(`"${c.name}" borttaget`);
   renderWorkspace();
 }
 

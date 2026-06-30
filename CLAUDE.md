@@ -299,11 +299,17 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       and the faktura PDF renders them as separate lines. Invoice creation in the web UI
       is article-by-article with a per-line category picker. **httpx → httpx2** (the
       starlette TestClient dep; deprecation warning gone). All tests pass (237).
-- [x] **Remove-book + delete/edit unused BAS-konton** (2026-06). Home cards gain a
-      "Ta bort" (forget-from-list, or permanent file deletion behind a typed
-      confirmation; `DELETE /books/{id}?delete_files=`). BAS-konton tab: delete an
-      unused category (`delete_category`, 409 if booked → inactivate instead, orphan
-      account cleaned up), Aktiv/Inaktiv toggle; a used konto's BAS number is locked.
+- [x] **Delete/edit unused BAS-konton + activate toggle** (2026-06). A category that
+      has not yet touched the books (no `transaktion`/`moms_line`/`invoice_line` points
+      at it) can be deleted; `BookOps.delete_category` refuses (`InvalidState`→409) a
+      used one (inactivate instead — legal traceability) and cleans up the orphaned,
+      never-posted, non-system `account` row. `category_in_use` + a `used` flag on
+      `GET /categories` drive the UI; `DELETE /categories/{id}`. The BAS-konton tab now
+      shows Aktiv/Inaktiv status with Ändra / Inaktivera / Ta bort (delete only when
+      unused); editing a *used* konto no longer lets its BAS number change (it would
+      retroactively remap booked entries in the reports). Remove-book button also added
+      (forget-from-list vs. permanent file deletion behind a typed confirmation;
+      `DELETE /books/{id}?delete_files=`).
 - [x] **Per-line RUT/ROT + household recipients** (schema v10, 2026-06). Each invoice
       line is marked RUT/ROT/none; eligible lines' labour-incl-moms × config pct
       (`rut_reduction_pct` 50, `rot_reduction_pct` 30) form two separate pots that

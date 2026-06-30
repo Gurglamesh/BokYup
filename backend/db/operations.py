@@ -204,6 +204,47 @@ class BookOps:
             with self.conn:
                 self.conn.execute(f"UPDATE category SET {sets} WHERE id=?", (*params, category_id))
 
+    def category_in_use(self, category_id: int) -> bool:
+        """Whether a category is referenced by any transaktion, moms-line or invoice
+        line (i.e. it has touched the books and may no longer be deleted)."""
+        return self.conn.execute(
+            "SELECT 1 FROM transaktion WHERE category_id=? "
+            "UNION ALL SELECT 1 FROM moms_line WHERE category_id=? "
+            "UNION ALL SELECT 1 FROM invoice_line WHERE category_id=? LIMIT 1",
+            (category_id, category_id, category_id)).fetchone() is not None
+
+    def delete_category(self, category_id: int) -> dict:
+        """
+        Delete a category (BAS-konto) that has NOT been used in the books yet.
+
+        Reference data is freely editable, but once a category has been booked it is
+        part of the legal record and must stay (inactivate it instead). A category
+        that no transaktion/moms-line/invoice-line points at is safe to remove. If its
+        BAS-konto is then orphaned (no other category, no postings, not a system
+        konto) the chart-of-accounts row is cleaned up too.
+        """
+        row = self.conn.execute(
+            "SELECT bas_konto FROM category WHERE id=?", (category_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No category {category_id}")
+        if self.category_in_use(category_id):
+            raise InvalidState(
+                "Kategorin har använts i bokföringen och kan inte tas bort — inaktivera den istället")
+        konto = row["bas_konto"]
+        account_removed = False
+        with self.conn:
+            self.conn.execute("DELETE FROM category WHERE id=?", (category_id,))
+            # Remove the BAS-konto too if nothing else references it (system konton stay).
+            sys_nums = {int(self._config(k)) for k in _SYS_ACCOUNT_NAMES}
+            still_used = self.conn.execute(
+                "SELECT 1 FROM category WHERE bas_konto=? "
+                "UNION ALL SELECT 1 FROM posting WHERE bas_konto=? LIMIT 1",
+                (konto, konto)).fetchone()
+            if not still_used and konto not in sys_nums:
+                self.conn.execute("DELETE FROM account WHERE bas_konto=?", (konto,))
+                account_removed = True
+        return {"deleted": True, "bas_konto": konto, "account_removed": account_removed}
+
     def create_customer(self, type: str, **fields) -> int:
         """
         Create a customer. type='private'|'business'. Returns the stable kundnummer.

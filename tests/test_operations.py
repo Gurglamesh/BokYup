@@ -774,6 +774,39 @@ class TestPerLineCategory:
                         "unit_price_ore": 100000, "rate_code": "25"}])
 
 
+class TestDeleteCategory:
+    def test_delete_unused_category_removes_it_and_orphan_account(self, ops):
+        cid = ops.create_category("Oanvänd", "income", 3999)
+        res = ops.delete_category(cid)
+        assert res["deleted"] is True and res["account_removed"] is True
+        assert ops.conn.execute("SELECT 1 FROM category WHERE id=?", (cid,)).fetchone() is None
+        # the orphaned, never-posted, non-system konto is cleaned up too
+        assert ops.conn.execute("SELECT 1 FROM account WHERE bas_konto=3999").fetchone() is None
+
+    def test_cannot_delete_used_category(self, ops):
+        cat = ops.create_category("Använd", "income", 3001)
+        kid = ops.create_customer("business", company_name="X AB")
+        ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                           due_date="2026-03-31",
+                           lines=[{"description": "A", "quantity_centi": 100,
+                                   "unit_price_ore": 100000, "rate_code": "25"}])
+        assert ops.category_in_use(cat) is True
+        with pytest.raises(InvalidState):
+            ops.delete_category(cat)
+        assert ops.conn.execute("SELECT 1 FROM category WHERE id=?", (cat,)).fetchone() is not None
+
+    def test_delete_keeps_shared_account(self, ops):
+        a = ops.create_category("A", "income", 3001)
+        ops.create_category("B", "income", 3001)        # shares konto 3001
+        ops.delete_category(a)
+        # konto stays because another category still points at it
+        assert ops.conn.execute("SELECT 1 FROM account WHERE bas_konto=3001").fetchone() is not None
+
+    def test_delete_unknown_category_raises(self, ops):
+        with pytest.raises(KeyError):
+            ops.delete_category(99999)
+
+
 class TestStructuredAddress:
     def test_compose_and_country_default(self, ops):
         kid = ops.create_customer("private", first_name="A", last_name="B",
