@@ -909,10 +909,17 @@ const SECTION_RENDERERS = {
           `Kreditnota ${cn.credit_note_number}`));
       }
       if (isRut) {
-        // RUT invoices keep the full payment + Skatteverket flow (RUT-tab)
+        // RUT/ROT invoices: first book the customer payment, then (once that's done)
+        // book the Skatteverket husavdrag payout — the button stays here until it lands.
         if (iv.state === "pending") {
           actions.appendChild(act("Bokför betalning", "", () => payFlow(iv.transaktion_id)));
           actions.appendChild(act("Makulera", "ghost danger", () => makuleraInvoiceFlow(iv)));
+        } else if (iv.rut_claim_state === "customer_paid" && iv.rut_claim_id) {
+          actions.appendChild(act("Bokför husavdrag (Skatteverket)", "",
+            () => rutSkvPayFlow(iv.rut_claim_id)));
+        } else if (iv.rut_claim_state === "skatteverket_paid") {
+          actions.appendChild(el("span", { class: "pill paid", style: "margin-left:4px" },
+            "Husavdrag betalt"));
         }
       } else {
         if (iv.state === "pending" || iv.state === "partial") {

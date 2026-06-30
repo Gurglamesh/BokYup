@@ -554,6 +554,29 @@ class TestInvoices:
         client.delete(f"/books/{book}/invoice-drafts/{did}")
         assert client.get(f"/books/{book}/invoice-drafts").json() == []
 
+    def test_rut_invoice_keeps_skatteverket_button_after_customer_payment(self, client, book):
+        cat, kid = self._setup(client, book)
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 1000000,
+                       "rate_code": "25", "reduction_type": "rut"}],
+            "recipients": [{"customer_id": kid, "share_pct": 100}]}).json()
+        tid = inv["transaktion_id"]
+        row = lambda: [x for x in client.get(f"/books/{book}/invoices").json()
+                       if x["id"] == inv["invoice_id"]][0]
+        assert row()["rut_claim_state"] == "pending"
+        # book the customer payment -> the SKV husavdrag step becomes available
+        client.post(f"/books/{book}/transaktioner/{tid}/pay", json={"payment_date": "2026-03-10"})
+        r = row()
+        assert r["state"] == "paid" and r["rut_claim_state"] == "customer_paid"
+        claim_id = r["rut_claim_id"]
+        assert claim_id is not None
+        # book the Skatteverket payout -> done
+        client.post(f"/books/{book}/rut/{claim_id}/skatteverket-payment",
+                    json={"payment_date": "2026-04-15"})
+        assert row()["rut_claim_state"] == "skatteverket_paid"
+
     def test_draft_payload_encrypted_at_rest(self, client, book, tmp_path):
         cat, kid = self._setup(client, book)
         client.post(f"/books/{book}/invoice-drafts", json={"payload": {

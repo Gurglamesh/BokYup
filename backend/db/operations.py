@@ -1286,6 +1286,18 @@ class BookOps:
                 "SELECT id, credit_note_number, date, amount_ore FROM invoice_event "
                 "WHERE invoice_id=? AND kind='credit' AND credit_note_number IS NOT NULL "
                 "ORDER BY id", (r["id"],)).fetchall()]
+            # RUT/ROT husavdrag claim (for the Skatteverket-payment step that follows the
+            # customer payment): expose its id + state so the Fakturor tab can keep a
+            # "book the Skatteverket payout" button until it arrives.
+            d["rut_claim_id"] = None
+            d["rut_claim_state"] = None
+            if r["transaktion_id"]:
+                claim = self.conn.execute(
+                    "SELECT id, state FROM rut_claim WHERE transaktion_id=?",
+                    (r["transaktion_id"],)).fetchone()
+                if claim:
+                    d["rut_claim_id"] = claim["id"]
+                    d["rut_claim_state"] = claim["state"]
             out.append(d)
         return out
 
