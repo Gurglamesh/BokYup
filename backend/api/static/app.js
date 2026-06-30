@@ -272,6 +272,7 @@ const SECTIONS = [
   ["transactions", "Transaktioner"],
   ["record", "Bokför"],
   ["invoices", "Fakturor"],
+  ["articles", "Artiklar"],
   ["customers", "Kunder"],
   ["suppliers", "Leverantörer"],
   ["categories", "BAS-konton"],
@@ -423,6 +424,38 @@ const SECTION_RENDERERS = {
       renderWorkspace();
       toast(warn || "Bokfört", Boolean(warn));
     }
+  },
+
+  // ----- articles (reusable invoice line items) -----
+  async articles(panel) {
+    const [list, cats] = await Promise.all([
+      api("GET", `/books/${bid()}/articles`),
+      api("GET", `/books/${bid()}/categories`),
+    ]);
+    const incomeCats = cats.filter((c) => c.kind === "income");
+    panel.appendChild(headerWithAdd("Artiklar", "+ Ny artikel",
+      () => guard(() => addArticleFlow(incomeCats))));
+    panel.appendChild(el("p", { class: "muted", style: "margin-top:6px" },
+      "Återanvändbara artiklar för fakturarader. Artikelnummer xxxx-xxxx (du väljer de "
+      + "4 första siffrorna, resten slumpas). Priset går alltid att ändra på fakturan."));
+    if (list.length === 0) {
+      panel.appendChild(el("p", { class: "muted" }, "Inga artiklar ännu."));
+      return;
+    }
+    panel.appendChild(simpleTable(
+      ["Artikelnr", "Beskrivning", "À-pris", "Moms", "Husavdrag", "Kategori", ""],
+      list.map((a) => [a.article_number, a.description, toKr(a.unit_price_ore) + " kr",
+        rateLabel(a.rate_code), a.reduction_type ? a.reduction_type.toUpperCase() : "—",
+        a.category_name || el("span", { class: "muted" }, "Okategoriserad"),
+        el("span", { style: "display:inline-flex;gap:4px" },
+          editBtn(() => guard(() => editArticleFlow(a, incomeCats))),
+          el("button", { class: "btn small ghost danger", onclick: () => guard(async () => {
+            const f = await modal(`Ta bort artikel ${a.article_number}?`, [], "Ta bort");
+            if (!f) return;
+            await api("DELETE", `/books/${bid()}/articles/${a.id}`);
+            toast("Artikel borttagen"); renderWorkspace();
+          }) }, "Ta bort"))]),
+    ));
   },
 
   // ----- customers -----
@@ -1172,6 +1205,56 @@ async function addSupplierFlow() {
   renderWorkspace();
 }
 
+function articleFields(a, incomeCats) {
+  a = a || {};
+  return [
+    { name: "description", label: "Beskrivning", value: a.description || "" },
+    { name: "unit_price_kr", label: "À-pris (kr, ex moms)",
+      value: a.unit_price_ore != null ? toKr(a.unit_price_ore) : "0,00" },
+    { name: "unit", label: "Enhet", value: a.unit || "st" },
+    { name: "rate_code", label: "Moms", type: "select", value: a.rate_code || "25",
+      options: RATE_OPTIONS.map((r) => ({ value: r, label: rateLabel(r) })) },
+    { name: "reduction_type", label: "Husavdrag", type: "select", value: a.reduction_type || "",
+      options: [{ value: "", label: "—" }, { value: "rut", label: "RUT" }, { value: "rot", label: "ROT" }] },
+    { name: "category_id", label: "Kategori (BAS, valfri)", type: "select",
+      value: a.category_id ? String(a.category_id) : "",
+      options: [{ value: "", label: "Okategoriserad" },
+        ...incomeCats.map((c) => ({ value: String(c.id), label: c.name }))] },
+  ];
+}
+
+async function addArticleFlow(incomeCats) {
+  const f = await modal("Ny artikel", [
+    { name: "prefix", label: "Artikelnr-prefix (4 siffror)", value: "1000" },
+    ...articleFields(null, incomeCats),
+  ], "Skapa");
+  if (!f || !f.description) return;
+  await api("POST", `/books/${bid()}/articles`, {
+    prefix: (f.prefix || "").trim(), description: f.description,
+    unit_price_ore: toOre(f.unit_price_kr), unit: f.unit || null,
+    rate_code: f.rate_code, reduction_type: f.reduction_type || null,
+    category_id: f.category_id ? parseInt(f.category_id, 10) : null,
+  });
+  toast("Artikel skapad");
+  renderWorkspace();
+}
+
+async function editArticleFlow(a, incomeCats) {
+  const f = await modal(`Ändra artikel ${a.article_number}`, [
+    { name: "article_number", label: "Artikelnummer", value: a.article_number },
+    ...articleFields(a, incomeCats),
+  ], "Spara");
+  if (!f || !f.description) return;
+  await api("PATCH", `/books/${bid()}/articles/${a.id}`, {
+    article_number: f.article_number || null, description: f.description,
+    unit_price_ore: toOre(f.unit_price_kr), unit: f.unit || null,
+    rate_code: f.rate_code, reduction_type: f.reduction_type || null,
+    category_id: f.category_id ? parseInt(f.category_id, 10) : null,
+  });
+  toast("Artikel uppdaterad");
+  renderWorkspace();
+}
+
 async function addCategoryFlow() {
   const f = await modal("Ny kategori", [
     { name: "name", label: "Namn (t.ex. Försäljning IT-tjänster)" },
@@ -1396,10 +1479,11 @@ async function importBackupFlow() {
 async function invoiceForm(panel, draft) {
   const dp = (draft && draft.payload) || {};   // prefill from a saved draft
   let draftId = draft ? draft.id : null;
-  const [customers, cats, redCfg] = await Promise.all([
+  const [customers, cats, redCfg, articles] = await Promise.all([
     api("GET", `/books/${bid()}/customers`),
     api("GET", `/books/${bid()}/categories`),
     api("GET", `/books/${bid()}/reduction-config`),
+    api("GET", `/books/${bid()}/articles`),
   ]);
   const incomeCats = cats.filter((c) => c.kind === "income");
   if (customers.length === 0 || incomeCats.length === 0) {
@@ -1430,7 +1514,7 @@ async function invoiceForm(panel, draft) {
     getYear: () => parseInt((invDate.value || "").slice(0, 4), 10) || new Date().getFullYear(),
     initialRecipients: dp.recipients || [],
   });
-  const lines = lineItemsEditor(incomeCats, () => recips.recompute(), dp.lines || []);
+  const lines = lineItemsEditor(incomeCats, () => recips.recompute(), dp.lines || [], articles);
   customer.onchange = () => recips.reloadPeople();
   invDate.onchange = () => recips.refreshCaps();
 
@@ -1504,12 +1588,18 @@ async function invoiceForm(panel, draft) {
   }
 }
 
-function lineItemsEditor(incomeCats, onChange, initialLines) {
+function lineItemsEditor(incomeCats, onChange, initialLines, articles) {
   const rowsBox = el("div", {});
   const cats = incomeCats || [];
+  const arts = articles || [];
   const fire = () => { if (onChange) onChange(); };
   function addRow(v) {                                  // v = optional prefill (draft)
     v = v || {};
+    // Article picker: choose an existing article (fills the row; price stays editable).
+    const pick = el("select", {},
+      el("option", { value: "" }, "— välj artikel —"),
+      ...arts.map((a) => el("option", { value: a.id }, `${a.article_number} ${a.description}`)));
+    let articleId = v.article_id || null;
     const desc = el("input", { type: "text", placeholder: "Beskrivning", value: v.description || "" });
     const cat = el("select", {},
       el("option", { value: "" }, "(standard)"),
@@ -1522,7 +1612,6 @@ function lineItemsEditor(incomeCats, onChange, initialLines) {
     const price = el("input", { type: "text", value: priceVal, style: "width:96px", oninput: fire });
     const rate = el("select", { onchange: fire }, ...RATE_OPTIONS.map((r) => el("option", { value: r }, rateLabel(r))));
     if (v.rate_code) rate.value = v.rate_code;
-    // Husavdrag per line: none / RUT / ROT.
     const red = el("select", { onchange: fire },
       el("option", { value: "" }, "—"),
       el("option", { value: "rut" }, "RUT"),
@@ -1532,18 +1621,56 @@ function lineItemsEditor(incomeCats, onChange, initialLines) {
       const c = cats.find((x) => String(x.id) === cat.value);
       if (c && c.default_rate_code) rate.value = c.default_rate_code;
     };
-    const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end" },
-      wrap("Beskrivning", desc), wrap("Kategori (BAS)", cat), wrap("Antal", qty), wrap("Enhet", unit),
-      wrap("À-pris ex moms", price), wrap("Moms", rate), wrap("Husavdrag", red),
+    // Picking an article prefills everything (price included — still editable).
+    pick.onchange = () => {
+      const a = arts.find((x) => String(x.id) === pick.value);
+      if (!a) { articleId = null; return; }
+      articleId = a.id;
+      desc.value = a.description || "";
+      price.value = a.unit_price_ore != null ? toKr(a.unit_price_ore) : price.value;
+      if (a.unit) unit.value = a.unit;
+      if (a.rate_code) rate.value = a.rate_code;
+      red.value = a.reduction_type || "";
+      cat.value = a.category_id ? String(a.category_id) : "";
+      fire();
+    };
+    // Typing a fresh description detaches the row from a picked article.
+    desc.oninput = () => { articleId = null; pick.value = ""; };
+    // Save this row's current values to the catalog as a new article.
+    const saveBtn = el("button", { class: "btn small ghost", type: "button", title: "Spara som artikel",
+      onclick: () => guard(() => saveRowAsArticle(row)) }, "★");
+    const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end;flex-wrap:wrap" },
+      wrap("Artikel", pick), wrap("Beskrivning", desc), wrap("Kategori (BAS)", cat),
+      wrap("Antal", qty), wrap("Enhet", unit), wrap("À-pris ex moms", price),
+      wrap("Moms", rate), wrap("Husavdrag", red), saveBtn,
       el("button", { class: "btn small ghost", onclick: (e) => { e.target.closest(".row").remove(); fire(); } }, "✕"));
+    row._desc = desc; row._cat = cat; row._unit = unit; row._price = price; row._rate = rate; row._red = red;
     row._get = () => ({
       description: desc.value.trim(),
       category_id: cat.value ? parseInt(cat.value, 10) : null,
       quantity_centi: Math.round(parseFloat((qty.value || "0").replace(",", ".")) * 100),
       unit: unit.value || null, unit_price_ore: toOre(price.value),
-      rate_code: rate.value, reduction_type: red.value || null,
+      rate_code: rate.value, reduction_type: red.value || null, article_id: articleId,
     });
     rowsBox.appendChild(row);
+  }
+  async function saveRowAsArticle(row) {
+    if (!row._desc.value.trim()) { toast("Fyll i beskrivning först", true); return; }
+    const f = await modal("Spara som artikel", [
+      { name: "prefix", label: "Artikelnr-prefix (4 siffror)", value: "1000" },
+    ], "Spara");
+    if (!f || !(f.prefix || "").trim()) return;
+    const a = await api("POST", `/books/${bid()}/articles`, {
+      prefix: f.prefix.trim(), description: row._desc.value.trim(),
+      unit_price_ore: toOre(row._price.value), unit: row._unit.value || null,
+      rate_code: row._rate.value, reduction_type: row._red.value || null,
+      category_id: row._cat.value ? parseInt(row._cat.value, 10) : null,
+    });
+    arts.push({ id: a.id, article_number: a.article_number, description: row._desc.value.trim(),
+      unit_price_ore: toOre(row._price.value), unit: row._unit.value || null,
+      rate_code: row._rate.value, reduction_type: row._red.value || null,
+      category_id: row._cat.value ? parseInt(row._cat.value, 10) : null });
+    toast(`Artikel ${a.article_number} sparad`);
   }
   if (initialLines && initialLines.length) initialLines.forEach(addRow); else addRow();
   const element = el("div", {}, rowsBox,

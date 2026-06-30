@@ -205,6 +205,27 @@ class PaymentMethodUpdateReq(BaseModel):
     active: Optional[int] = None
 
 
+class ArticleReq(BaseModel):
+    description: str
+    prefix: str                   # the user-chosen 4-digit article-number prefix
+    unit_price_ore: int = 0
+    rate_code: str = "25"
+    reduction_type: Optional[str] = None
+    category_id: Optional[int] = None
+    unit: Optional[str] = None
+
+
+class ArticleUpdateReq(BaseModel):
+    article_number: Optional[str] = None
+    description: Optional[str] = None
+    unit: Optional[str] = None
+    unit_price_ore: Optional[int] = None
+    rate_code: Optional[str] = None
+    reduction_type: Optional[str] = None
+    category_id: Optional[int] = None
+    active: Optional[int] = None
+
+
 class InvoiceLineReq(BaseModel):
     description: str
     quantity_centi: int           # quantity * 100 (1.50 -> 150)
@@ -214,6 +235,7 @@ class InvoiceLineReq(BaseModel):
     unit: Optional[str] = None
     reduction_type: Optional[str] = None   # 'rut' | 'rot' | None (husavdrag kind)
     rut_eligible: bool = False             # back-compat: True == reduction_type 'rut'
+    article_id: Optional[int] = None       # catalog article this line came from
 
 
 class RutRecipientReq(BaseModel):

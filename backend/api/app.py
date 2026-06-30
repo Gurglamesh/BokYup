@@ -176,6 +176,24 @@ def _build_router():
     def list_accounts(book_id: str, request: Request):
         return fac(request).h_list_accounts({"book_id": book_id}, {}, {})
 
+    # ---- article catalog ----
+    @r.get("/books/{book_id}/articles")
+    def list_articles(book_id: str, request: Request):
+        return fac(request).h_list_articles({"book_id": book_id}, {}, {})
+
+    @r.post("/books/{book_id}/articles", status_code=201)
+    def create_article(book_id: str, body: sc.ArticleReq, request: Request):
+        return fac(request).h_create_article({"book_id": book_id}, body.model_dump(), {})
+
+    @r.patch("/books/{book_id}/articles/{article_id}")
+    def update_article(book_id: str, article_id: int, body: sc.ArticleUpdateReq, request: Request):
+        return fac(request).h_update_article(
+            {"book_id": book_id, "article_id": article_id}, body.model_dump(), {})
+
+    @r.delete("/books/{book_id}/articles/{article_id}")
+    def delete_article(book_id: str, article_id: int, request: Request):
+        return fac(request).h_delete_article({"book_id": book_id, "article_id": article_id}, {}, {})
+
     @r.post("/books/{book_id}/categories", status_code=201)
     def create_category(book_id: str, body: sc.CategoryReq, request: Request):
         return fac(request).h_create_category({"book_id": book_id}, body.model_dump(), {})

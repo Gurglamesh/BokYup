@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -337,8 +337,27 @@ CREATE TABLE invoice_line (
                        ('25','12','6','0','momsfri','ej_avdragsgill')),
     rut_eligible   INTEGER NOT NULL DEFAULT 0,        -- derived: 1 when reduction_type set
     reduction_type TEXT CHECK (reduction_type IN ('rut','rot')),  -- husavdrag kind (NULL = none)
+    article_id     INTEGER REFERENCES article(id),    -- catalog article this line came from
     ex_moms_ore    INTEGER NOT NULL,                  -- line total ex moms
     moms_ore       INTEGER NOT NULL
+);
+
+-- ----- article catalog: reusable products/services for invoice lines. The number is
+-- xxxx-xxxx (user picks the 4-digit prefix; the suffix is random + unique). Picking an
+-- article prefills a line; the price (and everything else) stays editable on the line.
+CREATE TABLE article (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    article_number TEXT NOT NULL UNIQUE,             -- xxxx-xxxx
+    description    TEXT NOT NULL,
+    unit           TEXT,
+    unit_price_ore INTEGER NOT NULL DEFAULT 0,       -- default à-pris ex moms (editable on use)
+    rate_code      TEXT NOT NULL DEFAULT '25' CHECK (rate_code IN
+                       ('25','12','6','0','momsfri','ej_avdragsgill')),
+    reduction_type TEXT CHECK (reduction_type IN ('rut','rot')),
+    category_id    INTEGER REFERENCES category(id),  -- NULL = uncategorised
+    active         INTEGER NOT NULL DEFAULT 1,
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
 );
 
 -- ----- RUT/ROT recipients: a household can split the skattereduktion across ----
@@ -609,6 +628,22 @@ _MIGRATIONS: dict[int, str] = {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+    """,
+    14: """
+        CREATE TABLE IF NOT EXISTS article (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            article_number TEXT NOT NULL UNIQUE,
+            description TEXT NOT NULL,
+            unit TEXT,
+            unit_price_ore INTEGER NOT NULL DEFAULT 0,
+            rate_code TEXT NOT NULL DEFAULT '25',
+            reduction_type TEXT,
+            category_id INTEGER,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        ALTER TABLE invoice_line ADD COLUMN article_id INTEGER;
     """,
 }
 

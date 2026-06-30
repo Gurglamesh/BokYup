@@ -223,6 +223,25 @@ class AppFacade:
         ops = self._ops(p["book_id"])
         return ops.delete_category(int(p["category_id"]))
 
+    # ---- article catalog ----
+    def h_list_articles(self, p, b, q):
+        return self._ops(p["book_id"]).list_articles()
+
+    def h_create_article(self, p, b, q):
+        return self._ops(p["book_id"]).create_article(
+            b["description"], b["prefix"], unit_price_ore=b.get("unit_price_ore", 0),
+            rate_code=b.get("rate_code", "25"), reduction_type=b.get("reduction_type"),
+            category_id=b.get("category_id"), unit=b.get("unit"))
+
+    def h_update_article(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        ops.update_article(int(p["article_id"]), **_clean(b))
+        return {"id": int(p["article_id"])}
+
+    def h_delete_article(self, p, b, q):
+        self._ops(p["book_id"]).delete_article(int(p["article_id"]))
+        return {"deleted": True}
+
     # ---- reference: customers ----
     def h_list_customers(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -542,6 +561,10 @@ _route("POST", "/books/{book_id}/recovery-key", "h_add_recovery_key", 201)
 
 _route("GET", "/books/{book_id}/categories", "h_list_categories")
 _route("GET", "/books/{book_id}/accounts", "h_list_accounts")
+_route("GET", "/books/{book_id}/articles", "h_list_articles")
+_route("POST", "/books/{book_id}/articles", "h_create_article", 201)
+_route("PATCH", "/books/{book_id}/articles/{article_id}", "h_update_article")
+_route("DELETE", "/books/{book_id}/articles/{article_id}", "h_delete_article")
 _route("POST", "/books/{book_id}/categories", "h_create_category", 201)
 _route("PATCH", "/books/{book_id}/categories/{category_id}", "h_update_category")
 _route("DELETE", "/books/{book_id}/categories/{category_id}", "h_delete_category")

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -244,6 +245,93 @@ class BookOps:
                 self.conn.execute("DELETE FROM account WHERE bas_konto=?", (konto,))
                 account_removed = True
         return {"deleted": True, "bas_konto": konto, "account_removed": account_removed}
+
+    # ==================================================================
+    # Article catalog (reusable invoice line items)
+    # ==================================================================
+
+    def _next_article_number(self, prefix: str) -> str:
+        """Build a unique article number `<prefix>-XXXX` (prefix = 4 digits the user
+        picks; XXXX random). Retries on the rare collision."""
+        if not (isinstance(prefix, str) and prefix.isdigit() and len(prefix) == 4):
+            raise ValueError("Prefixet måste vara exakt 4 siffror")
+        for _ in range(50):
+            number = f"{prefix}-{secrets.randbelow(10000):04d}"
+            if self.conn.execute("SELECT 1 FROM article WHERE article_number=?",
+                                 (number,)).fetchone() is None:
+                return number
+        raise OperationError("Kunde inte skapa ett unikt artikelnummer")
+
+    def create_article(self, description: str, prefix: str, *,
+                       unit_price_ore: int = 0, rate_code: str = "25",
+                       reduction_type: Optional[str] = None,
+                       category_id: Optional[int] = None,
+                       unit: Optional[str] = None) -> dict:
+        """Create a catalog article. `prefix` is the user-chosen 4-digit number prefix."""
+        if not description:
+            raise ValueError("Artikeln behöver en beskrivning")
+        if rate_code not in S.MOMS_RATES:
+            raise ValueError(f"Unknown moms rate {rate_code!r}")
+        if reduction_type not in (None, "rut", "rot"):
+            raise ValueError(f"Unknown reduction_type {reduction_type!r}")
+        if category_id is not None:
+            self._check_category(category_id, "income")
+        number = self._next_article_number(prefix)
+        now = _now()
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO article(article_number, description, unit, unit_price_ore, "
+                "rate_code, reduction_type, category_id, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (number, description, unit, int(unit_price_ore), rate_code, reduction_type,
+                 category_id, now, now))
+        return {"id": cur.lastrowid, "article_number": number}
+
+    def list_articles(self, active_only: bool = False) -> list[dict]:
+        sql = ("SELECT a.id, a.article_number, a.description, a.unit, a.unit_price_ore, "
+               "a.rate_code, a.reduction_type, a.category_id, c.name AS category_name, "
+               "a.active FROM article a LEFT JOIN category c ON c.id = a.category_id ")
+        if active_only:
+            sql += "WHERE a.active = 1 "
+        sql += "ORDER BY a.article_number"
+        return [dict(r) for r in self.conn.execute(sql).fetchall()]
+
+    def update_article(self, article_id: int, **fields) -> None:
+        """Edit an article (e.g. categorise it, change price/moms, rename). Does not
+        touch already-issued invoice lines (they carry their own frozen values)."""
+        if self.conn.execute("SELECT 1 FROM article WHERE id=?", (article_id,)).fetchone() is None:
+            raise KeyError(f"No article {article_id}")
+        if fields.get("rate_code") is not None and fields["rate_code"] not in S.MOMS_RATES:
+            raise ValueError("Unknown moms rate")
+        if fields.get("category_id") is not None:
+            self._check_category(fields["category_id"], "income")
+        if "article_number" in fields and fields["article_number"]:
+            num = fields["article_number"]
+            clash = self.conn.execute(
+                "SELECT 1 FROM article WHERE article_number=? AND id<>?",
+                (num, article_id)).fetchone()
+            if clash:
+                raise InvalidState("Artikelnumret används redan")
+        allowed = {k: fields[k] for k in
+                   ("article_number", "description", "unit", "unit_price_ore", "rate_code",
+                    "reduction_type", "category_id", "active") if k in fields}
+        if "active" in allowed and allowed["active"] is not None:
+            allowed["active"] = int(allowed["active"])
+        allowed["updated_at"] = _now()
+        sets, params = _build_update(allowed)
+        if sets:
+            with self.conn:
+                self.conn.execute(f"UPDATE article SET {sets} WHERE id=?", (*params, article_id))
+
+    def delete_article(self, article_id: int) -> None:
+        """Delete a catalog article. Issued invoice lines keep their frozen values; any
+        line that referenced it just loses the (informational) link."""
+        if self.conn.execute("SELECT 1 FROM article WHERE id=?", (article_id,)).fetchone() is None:
+            raise KeyError(f"No article {article_id}")
+        with self.conn:
+            self.conn.execute("UPDATE invoice_line SET article_id=NULL WHERE article_id=?",
+                              (article_id,))
+            self.conn.execute("DELETE FROM article WHERE id=?", (article_id,))
 
     def create_customer(self, type: str, **fields) -> int:
         """
@@ -936,6 +1024,7 @@ class BookOps:
                 "quantity_centi": qty_centi, "unit": ln.get("unit"),
                 "unit_price_ore": unit_price_ore, "rate_code": rate_code,
                 "reduction_type": reduction_type, "rut_eligible": 1 if reduction_type else 0,
+                "article_id": ln.get("article_id"),
                 "ex_moms_ore": ex, "moms_ore": moms,
             })
             agg[(line_cat, rate_code)] = agg.get((line_cat, rate_code), 0) + ex
@@ -1032,10 +1121,11 @@ class BookOps:
                 self.conn.execute(
                     "INSERT INTO invoice_line(invoice_id, line_no, description, category_id, "
                     "quantity_centi, unit, unit_price_ore, rate_code, rut_eligible, reduction_type, "
-                    "ex_moms_ore, moms_ore) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "article_id, ex_moms_ore, moms_ore) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (invoice_id, cl["line_no"], cl["description"], cl["category_id"],
                      cl["quantity_centi"], cl["unit"], cl["unit_price_ore"], cl["rate_code"],
-                     cl["rut_eligible"], cl["reduction_type"], cl["ex_moms_ore"], cl["moms_ore"]))
+                     cl["rut_eligible"], cl["reduction_type"], cl["article_id"],
+                     cl["ex_moms_ore"], cl["moms_ore"]))
             for r in clean_recipients:
                 self.conn.execute(
                     "INSERT INTO rut_recipient(invoice_id, customer_id, first_name, last_name, "
