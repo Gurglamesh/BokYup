@@ -185,6 +185,11 @@ def _build_router():
         return fac(request).h_update_category(
             {"book_id": book_id, "category_id": category_id}, body.model_dump(), {})
 
+    @r.delete("/books/{book_id}/categories/{category_id}")
+    def delete_category(book_id: str, category_id: int, request: Request):
+        return fac(request).h_delete_category(
+            {"book_id": book_id, "category_id": category_id}, {}, {})
+
     # ---- reference: customers ----
     @r.get("/books/{book_id}/customers")
     def list_customers(book_id: str, request: Request):

@@ -285,6 +285,16 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       and the faktura PDF renders them as separate lines. Invoice creation in the web UI
       is article-by-article with a per-line category picker. **httpx → httpx2** (the
       starlette TestClient dep; deprecation warning gone). All tests pass (237).
+- [x] **Delete/edit unused BAS-konton + activate toggle** (2026-06). A category that
+      has not yet touched the books (no `transaktion`/`moms_line`/`invoice_line` points
+      at it) can be deleted; `BookOps.delete_category` refuses (`InvalidState`→409) a
+      used one (inactivate instead — legal traceability) and cleans up the orphaned,
+      never-posted, non-system `account` row. `category_in_use` + a `used` flag on
+      `GET /categories` drive the UI; `DELETE /categories/{id}`. The BAS-konton tab now
+      shows Aktiv/Inaktiv status with Ändra / Inaktivera / Ta bort (delete only when
+      unused); editing a *used* konto no longer lets its BAS number change (it would
+      retroactively remap booked entries in the reports). Remove-book button also added
+      (forget vs. permanent file deletion). All tests pass (247).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
