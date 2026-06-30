@@ -203,6 +203,26 @@ def _build_router():
         return fac(request).h_update_customer(
             {"book_id": book_id, "kundnummer": kundnummer}, body.model_dump(), {})
 
+    # ---- customer household relations (RUT/ROT) ----
+    @r.get("/books/{book_id}/customers/{kundnummer}/relations")
+    def list_customer_relations(book_id: str, kundnummer: int, request: Request):
+        return fac(request).h_list_customer_relations(
+            {"book_id": book_id, "kundnummer": kundnummer}, {}, {})
+
+    @r.post("/books/{book_id}/customers/{kundnummer}/relations", status_code=201)
+    def link_customer(book_id: str, kundnummer: int, body: sc.CustomerRelationReq, request: Request):
+        return fac(request).h_link_customer(
+            {"book_id": book_id, "kundnummer": kundnummer}, body.model_dump(), {})
+
+    @r.delete("/books/{book_id}/customers/{kundnummer}/relations/{other_kundnummer}")
+    def unlink_customer(book_id: str, kundnummer: int, other_kundnummer: int, request: Request):
+        return fac(request).h_unlink_customer(
+            {"book_id": book_id, "kundnummer": kundnummer, "other_kundnummer": other_kundnummer}, {}, {})
+
+    @r.get("/books/{book_id}/reduction-config")
+    def reduction_config(book_id: str, request: Request):
+        return fac(request).h_reduction_config({"book_id": book_id}, {}, {})
+
     # ---- reference: suppliers ----
     @r.get("/books/{book_id}/suppliers")
     def list_suppliers(book_id: str, request: Request):

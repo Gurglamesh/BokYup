@@ -236,6 +236,24 @@ class AppFacade:
         ops.update_customer(int(p["kundnummer"]), **_clean(b))
         return {"kundnummer": int(p["kundnummer"])}
 
+    # ---- customer household relations (for RUT/ROT recipients) ----
+    def h_list_customer_relations(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        return ops.list_related_customers(int(p["kundnummer"]))
+
+    def h_link_customer(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        return ops.link_customers(int(p["kundnummer"]), int(b["other_kundnummer"]))
+
+    def h_unlink_customer(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        ops.unlink_customers(int(p["kundnummer"]), int(p["other_kundnummer"]))
+        return {"unlinked": True}
+
+    def h_reduction_config(self, p, b, q):
+        rut, rot = self._ops(p["book_id"]).reduction_pcts()
+        return {"rut_pct": rut, "rot_pct": rot}
+
     # ---- reference: suppliers ----
     def h_list_suppliers(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -499,9 +517,13 @@ _route("PATCH", "/books/{book_id}/categories/{category_id}", "h_update_category"
 
 _route("GET", "/books/{book_id}/customers", "h_list_customers")
 _route("GET", "/books/{book_id}/customers/{kundnummer}/rut-cap/{year}", "h_rut_cap")
+_route("GET", "/books/{book_id}/customers/{kundnummer}/relations", "h_list_customer_relations")
+_route("POST", "/books/{book_id}/customers/{kundnummer}/relations", "h_link_customer", 201)
+_route("DELETE", "/books/{book_id}/customers/{kundnummer}/relations/{other_kundnummer}", "h_unlink_customer")
 _route("GET", "/books/{book_id}/customers/{kundnummer}", "h_get_customer")
 _route("POST", "/books/{book_id}/customers", "h_create_customer", 201)
 _route("PATCH", "/books/{book_id}/customers/{kundnummer}", "h_update_customer")
+_route("GET", "/books/{book_id}/reduction-config", "h_reduction_config")
 
 _route("GET", "/books/{book_id}/suppliers", "h_list_suppliers")
 _route("POST", "/books/{book_id}/suppliers", "h_create_supplier", 201)

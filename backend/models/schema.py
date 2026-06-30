@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -289,7 +289,8 @@ CREATE TABLE invoice (
     ex_moms_ore              INTEGER NOT NULL DEFAULT 0,
     moms_ore                 INTEGER NOT NULL DEFAULT 0,
     inc_moms_ore             INTEGER NOT NULL DEFAULT 0,
-    rut_total_ore            INTEGER NOT NULL DEFAULT 0,
+    rut_total_ore            INTEGER NOT NULL DEFAULT 0,  -- RUT skattereduktion total
+    rot_total_ore            INTEGER NOT NULL DEFAULT 0,  -- ROT skattereduktion total
     cancelled_at             TEXT,                  -- makulerad (voided before booking)
     credited_at              TEXT,                  -- krediterad (booking reversed)
     credit_verifikation_id   INTEGER REFERENCES verifikation(id),
@@ -323,20 +324,36 @@ CREATE TABLE invoice_line (
     unit_price_ore INTEGER NOT NULL,                  -- ex moms, per unit
     rate_code      TEXT NOT NULL CHECK (rate_code IN
                        ('25','12','6','0','momsfri','ej_avdragsgill')),
-    rut_eligible   INTEGER NOT NULL DEFAULT 0,
+    rut_eligible   INTEGER NOT NULL DEFAULT 0,        -- derived: 1 when reduction_type set
+    reduction_type TEXT CHECK (reduction_type IN ('rut','rot')),  -- husavdrag kind (NULL = none)
     ex_moms_ore    INTEGER NOT NULL,                  -- line total ex moms
     moms_ore       INTEGER NOT NULL
 );
 
--- ----- RUT recipients: a household can split RUT across several people, each ---
--- with their own name + personnummer (encrypted) and share of the skattereduktion.
+-- ----- RUT/ROT recipients: a household can split the skattereduktion across ----
+-- several people, each their own name + personnummer (encrypted), linked customer,
+-- a share percentage, and their resulting RUT and ROT amounts (frozen on the invoice).
 CREATE TABLE rut_recipient (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     invoice_id       INTEGER NOT NULL REFERENCES invoice(id),
+    customer_id      INTEGER REFERENCES customer(kundnummer),  -- the household member
     first_name       TEXT NOT NULL,
     last_name        TEXT NOT NULL,
     personnummer_enc TEXT NOT NULL,
-    rut_amount_ore   INTEGER NOT NULL
+    share_pct_centi  INTEGER NOT NULL DEFAULT 10000,   -- percent * 100 (100.00 % = 10000)
+    rut_amount_ore   INTEGER NOT NULL DEFAULT 0,       -- this person's share of the RUT pot
+    rot_amount_ore   INTEGER NOT NULL DEFAULT 0        -- this person's share of the ROT pot
+);
+
+-- ----- customer relations: symmetric household links between customers. The pair
+-- is stored ordered (customer_a < customer_b) and unique so the link is undirected.
+CREATE TABLE customer_relation (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_a  INTEGER NOT NULL REFERENCES customer(kundnummer),
+    customer_b  INTEGER NOT NULL REFERENCES customer(kundnummer),
+    created_at  TEXT NOT NULL,
+    CHECK (customer_a < customer_b),
+    UNIQUE (customer_a, customer_b)
 );
 
 -- ----- indexes ------------------------------------------------------------
@@ -404,6 +421,10 @@ END;
 # RUT/ROT amount is taken as user input.)
 _DEFAULT_CONFIG = {
     "rut_rot_cap_ore_per_customer_year": "7500000",  # 75 000 kr (verified 2026-06)
+    # Skattereduktion percentages on labour cost INCLUDING moms (rules change ->
+    # config). RUT 50 %, ROT 30 % (verified 2026-06 against Skatteverket).
+    "rut_reduction_pct": "50",
+    "rot_reduction_pct": "30",
     # Bookkeeping method for invoices (per book): 'kontantmetod' (book at payment +
     # year-end accruals) or 'fakturametod' (book kundfordran/income/moms at issue,
     # then bank/kundfordran at payment). Default kontantmetod.
@@ -544,6 +565,23 @@ _MIGRATIONS: dict[int, str] = {
         ALTER TABLE category ADD COLUMN default_rate_code TEXT;
         ALTER TABLE moms_line ADD COLUMN category_id INTEGER;
         ALTER TABLE invoice_line ADD COLUMN category_id INTEGER;
+    """,
+    10: """
+        ALTER TABLE invoice ADD COLUMN rot_total_ore INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE invoice_line ADD COLUMN reduction_type TEXT;
+        ALTER TABLE rut_recipient ADD COLUMN customer_id INTEGER;
+        ALTER TABLE rut_recipient ADD COLUMN share_pct_centi INTEGER NOT NULL DEFAULT 10000;
+        ALTER TABLE rut_recipient ADD COLUMN rot_amount_ore INTEGER NOT NULL DEFAULT 0;
+        INSERT OR IGNORE INTO config(key, value) VALUES ('rut_reduction_pct', '50');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('rot_reduction_pct', '30');
+        CREATE TABLE IF NOT EXISTS customer_relation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_a INTEGER NOT NULL REFERENCES customer(kundnummer),
+            customer_b INTEGER NOT NULL REFERENCES customer(kundnummer),
+            created_at TEXT NOT NULL,
+            CHECK (customer_a < customer_b),
+            UNIQUE (customer_a, customer_b)
+        );
     """,
 }
 

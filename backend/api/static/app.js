@@ -429,12 +429,16 @@ const SECTION_RENDERERS = {
   async customers(panel) {
     const list = await api("GET", `/books/${bid()}/customers`);
     panel.appendChild(headerWithAdd("Kunder", "+ Ny kund", () => guard(addCustomerFlow)));
+    const actions = (c) => el("span", { style: "display:inline-flex;gap:4px" },
+      editBtn(() => guard(() => editCustomerFlow(c.kundnummer))),
+      c.type === "private"
+        ? el("button", { class: "btn small ghost", onclick: () => guard(() => householdFlow(c)) }, "Hushåll")
+        : null);
     panel.appendChild(simpleTable(
       ["Nr", "Typ", "Namn", "Org/Pers", "E-post", ""],
       list.map((c) => [c.kundnummer, c.type,
         c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim(),
-        c.org_nr || "", c.email || "",
-        editBtn(() => guard(() => editCustomerFlow(c.kundnummer)))]),
+        c.org_nr || "", c.email || "", actions(c)]),
     ));
   },
 
@@ -831,7 +835,8 @@ const SECTION_RENDERERS = {
       { class: "btn small " + cls, style: "margin-left:4px", onclick: () => guard(fn) }, label);
     const rows = list.map((iv) => {
       const [cls, label] = STATE[iv.state] || STATE.pending;
-      const isRut = iv.rut_total_ore > 0;
+      // RUT and ROT invoices both carry a husavdrag receivable -> full Skatteverket flow.
+      const isRut = (iv.rut_total_ore > 0) || (iv.rot_total_ore > 0);
       const owed = iv.outstanding_ore < 0 ? -iv.outstanding_ore : 0;   // we owe the customer
       const actions = el("td", { class: "num" },
         el("button", { class: "btn small ghost", onclick: () => guard(() => invoicePdf(iv.id, iv.invoice_number)) }, "PDF"));
@@ -886,9 +891,24 @@ const SECTION_RENDERERS = {
 // Moms-lines editor — one row per momssats (a receipt can mix 6/12/25 %)
 // ---------------------------------------------------------------------------
 const RATE_OPTIONS = ["25", "12", "6", "0", "momsfri", "ej_avdragsgill"];
+const RATE_PCT = { "25": 0.25, "12": 0.12, "6": 0.06 };   // 0/momsfri/ej_avdragsgill -> 0
 function rateLabel(r) {
   if (!r) return "—";
   return (r === "momsfri" || r === "ej_avdragsgill") ? r : r + "%";
+}
+
+// RUT/ROT pots (in ören) from the article lines: skattereduktion = labour cost INCL
+// moms × the reduction percentage. Whole eligible line counts as labour.
+function potsFromLines(lines, rutPct, rotPct) {
+  let rut = 0, rot = 0;
+  for (const ln of lines) {
+    if (!ln.reduction_type) continue;
+    const ex = Math.round((ln.quantity_centi || 0) * (ln.unit_price_ore || 0) / 100);
+    const inc = ex + Math.round(ex * (RATE_PCT[ln.rate_code] || 0));
+    const red = Math.round(inc * (ln.reduction_type === "rut" ? rutPct : rotPct) / 100);
+    if (ln.reduction_type === "rut") rut += red; else rot += red;
+  }
+  return { rut, rot };
 }
 function momsLinesEditor() {
   const rowsBox = el("div", {});
@@ -1143,6 +1163,54 @@ async function addCategoryFlow() {
 
 // ----- edit flows (reference data is freely editable; issued invoices keep their
 // snapshot, so editing the live row never rewrites history) -----
+// Manage a customer's household links (related customers for RUT/ROT recipients).
+async function householdFlow(c) {
+  const name = `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer);
+  const [related, all] = await Promise.all([
+    api("GET", `/books/${bid()}/customers/${c.kundnummer}/relations`),
+    api("GET", `/books/${bid()}/customers`),
+  ]);
+  const body = $("#modal-body");
+  $("#modal-title").textContent = `Hushåll – ${name}`;
+  body.innerHTML = "";
+  body.appendChild(el("p", { class: "muted" }, "Kopplade hushållsmedlemmar:"));
+  const listBox = el("div", {});
+  body.appendChild(listBox);
+  const render = (rels) => {
+    listBox.innerHTML = "";
+    if (rels.length === 0) listBox.appendChild(el("p", { class: "muted" }, "Inga kopplingar ännu."));
+    for (const r of rels) {
+      const rn = `${r.first_name || ""} ${r.last_name || ""}`.trim() || r.company_name || ("Kund " + r.kundnummer);
+      listBox.appendChild(el("div", { class: "row", style: "align-items:center;gap:8px" },
+        el("span", {}, rn),
+        el("button", { class: "btn small ghost danger", onclick: () => guard(async () => {
+          await api("DELETE", `/books/${bid()}/customers/${c.kundnummer}/relations/${r.kundnummer}`);
+          render(await api("GET", `/books/${bid()}/customers/${c.kundnummer}/relations`));
+        }) }, "Ta bort")));
+    }
+  };
+  render(related);
+  // add an existing customer as a household member
+  const candidates = all.filter((x) => x.kundnummer !== c.kundnummer);
+  const pick = el("select", {}, el("option", { value: "" }, "— välj kund —"),
+    ...candidates.map((x) => el("option", { value: x.kundnummer },
+      x.company_name || `${x.first_name || ""} ${x.last_name || ""}`.trim() || ("Kund " + x.kundnummer))));
+  body.appendChild(el("div", { class: "row", style: "margin-top:12px;align-items:flex-end;gap:8px" },
+    wrap("Koppla befintlig kund", pick),
+    el("button", { class: "btn small", onclick: () => guard(async () => {
+      if (!pick.value) return;
+      await api("POST", `/books/${bid()}/customers/${c.kundnummer}/relations`,
+                { other_kundnummer: parseInt(pick.value, 10) });
+      render(await api("GET", `/books/${bid()}/customers/${c.kundnummer}/relations`));
+    }) }, "Koppla")));
+  $("#modal-ok").textContent = "Stäng";
+  $("#modal-backdrop").classList.remove("hidden");
+  await new Promise((resolve) => {
+    $("#modal-ok").onclick = () => { $("#modal-backdrop").classList.add("hidden"); resolve(); };
+    $("#modal-cancel").onclick = () => { $("#modal-backdrop").classList.add("hidden"); resolve(); };
+  });
+}
+
 async function editCustomerFlow(kundnummer) {
   const c = await api("GET", `/books/${bid()}/customers/${kundnummer}`);
   const isPrivate = c.type === "private";
@@ -1263,9 +1331,10 @@ async function importBackupFlow() {
 // Invoices (faktura)
 // ---------------------------------------------------------------------------
 async function invoiceForm(panel) {
-  const [customers, cats] = await Promise.all([
+  const [customers, cats, redCfg] = await Promise.all([
     api("GET", `/books/${bid()}/customers`),
     api("GET", `/books/${bid()}/categories`),
+    api("GET", `/books/${bid()}/reduction-config`),
   ]);
   const incomeCats = cats.filter((c) => c.kind === "income");
   if (customers.length === 0 || incomeCats.length === 0) {
@@ -1277,7 +1346,6 @@ async function invoiceForm(panel) {
 
   const customer = el("select", {}, ...customers.map((c) => el("option", { value: c.kundnummer },
     c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer))));
-  // Optional default category for rows that don't set their own (blank = pick per row).
   const cat = el("select", {},
     el("option", { value: "" }, "— välj per rad —"),
     ...incomeCats.map((c) => el("option", { value: c.id }, c.name)));
@@ -1289,8 +1357,12 @@ async function invoiceForm(panel) {
   const terms = el("input", { type: "text", value: "30 dagar netto" });
   const yourRef = el("input", { type: "text" });
   const note = el("input", { type: "text" });
-  const lines = lineItemsEditor(incomeCats);
-  const recips = recipientsEditor();
+  const recips = recipientsEditor({
+    rutPct: redCfg.rut_pct, rotPct: redCfg.rot_pct,
+    getLines: () => lines.get(), getInvoiceCustomerId: () => parseInt(customer.value, 10),
+  });
+  const lines = lineItemsEditor(incomeCats, () => recips.recompute());
+  customer.onchange = () => recips.reloadPeople();
 
   panel.appendChild(el("div", { class: "row" },
     wrap("Kund", customer), wrap("Standardkategori (BAS, valfri)", cat)));
@@ -1299,19 +1371,22 @@ async function invoiceForm(panel) {
     wrap("Leveransdatum (valfritt)", delivery)));
   panel.appendChild(el("h3", { style: "margin-top:18px" }, "Artikelrader"));
   panel.appendChild(el("p", { class: "muted" },
-    "Varje rad bokförs på sin egen kategori (BAS-konto). Lämna radens kategori tom för "
-    + "att använda standardkategorin ovan."));
+    "Varje rad bokförs på sin egen kategori (BAS-konto). Markera RUT eller ROT på de "
+    + "arbetsrader som är husavdragsberättigade (hela radens belopp räknas som arbete)."));
   panel.appendChild(lines.element);
-  panel.appendChild(el("h3", { style: "margin-top:18px" }, "RUT-mottagare (hushåll, valfritt)"));
+  panel.appendChild(el("h3", { style: "margin-top:18px" }, "RUT/ROT-mottagare (hushåll)"));
   panel.appendChild(el("p", { class: "muted" },
-    "Lägg till en rad per person som delar på RUT-avdraget — namn, personnummer och "
-    + "personens del av skattereduktionen."));
+    `Skattereduktionen (RUT ${redCfg.rut_pct} %, ROT ${redCfg.rot_pct} % på arbete inkl. moms) `
+    + "bildar en pott som mottagarna delar på. Välj fakturakunden eller en hushållsmedlem, "
+    + "ange personnummer och andel (%). Beloppen räknas ut nedan."));
   panel.appendChild(recips.element);
   panel.appendChild(el("div", { class: "row", style: "margin-top:14px" },
     wrap("Betalningsvillkor", terms), wrap("Er referens", yourRef), wrap("Notering", note)));
   panel.appendChild(el("div", { style: "margin-top:16px" },
     el("button", { class: "btn brand", onclick: () => guard(submit) }, "Skapa faktura"),
     el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => { state.section = "invoices"; renderWorkspace(); } }, "Avbryt")));
+
+  await recips.reloadPeople();
 
   async function submit() {
     const lineData = lines.get();
@@ -1332,34 +1407,38 @@ async function invoiceForm(panel) {
   }
 }
 
-function lineItemsEditor(incomeCats) {
+function lineItemsEditor(incomeCats, onChange) {
   const rowsBox = el("div", {});
   const cats = incomeCats || [];
+  const fire = () => { if (onChange) onChange(); };
   function addRow() {
     const desc = el("input", { type: "text", placeholder: "Beskrivning" });
     const cat = el("select", {},
       el("option", { value: "" }, "(standard)"),
       ...cats.map((c) => el("option", { value: c.id }, c.name)));
-    const qty = el("input", { type: "text", value: "1", style: "width:64px" });
+    const qty = el("input", { type: "text", value: "1", style: "width:64px", oninput: fire });
     const unit = el("input", { type: "text", value: "st", style: "width:54px" });
-    const price = el("input", { type: "text", value: "0,00", style: "width:96px" });
-    const rate = el("select", {}, ...RATE_OPTIONS.map((r) => el("option", { value: r }, rateLabel(r))));
-    const rut = el("input", { type: "checkbox" });
-    // Picking a category pre-fills the moms rate from that category's default.
+    const price = el("input", { type: "text", value: "0,00", style: "width:96px", oninput: fire });
+    const rate = el("select", { onchange: fire }, ...RATE_OPTIONS.map((r) => el("option", { value: r }, rateLabel(r))));
+    // Husavdrag per line: none / RUT / ROT.
+    const red = el("select", { onchange: fire },
+      el("option", { value: "" }, "—"),
+      el("option", { value: "rut" }, "RUT"),
+      el("option", { value: "rot" }, "ROT"));
     cat.onchange = () => {
       const c = cats.find((x) => String(x.id) === cat.value);
       if (c && c.default_rate_code) rate.value = c.default_rate_code;
     };
     const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end" },
       wrap("Beskrivning", desc), wrap("Kategori (BAS)", cat), wrap("Antal", qty), wrap("Enhet", unit),
-      wrap("À-pris ex moms", price), wrap("Moms", rate), wrap("RUT", rut),
-      el("button", { class: "btn small ghost", onclick: (e) => e.target.closest(".row").remove() }, "✕"));
+      wrap("À-pris ex moms", price), wrap("Moms", rate), wrap("Husavdrag", red),
+      el("button", { class: "btn small ghost", onclick: (e) => { e.target.closest(".row").remove(); fire(); } }, "✕"));
     row._get = () => ({
       description: desc.value.trim(),
       category_id: cat.value ? parseInt(cat.value, 10) : null,
       quantity_centi: Math.round(parseFloat((qty.value || "0").replace(",", ".")) * 100),
       unit: unit.value || null, unit_price_ore: toOre(price.value),
-      rate_code: rate.value, rut_eligible: rut.checked,
+      rate_code: rate.value, reduction_type: red.value || null,
     });
     rowsBox.appendChild(row);
   }
@@ -1369,28 +1448,109 @@ function lineItemsEditor(incomeCats) {
   return { element, get: () => [...rowsBox.children].map((r) => r._get()).filter((l) => l.description) };
 }
 
-function recipientsEditor() {
+// Recipient editor: pick the invoice customer or a linked household member (or add a
+// new person, which creates a customer + household link), enter personnummer + share %,
+// and see each person's RUT/ROT kronor computed live from the article pots.
+function recipientsEditor(opts) {
+  const { rutPct, rotPct, getLines, getInvoiceCustomerId } = opts;
   const rowsBox = el("div", {});
-  function addRow() {
-    const fn = el("input", { type: "text", placeholder: "Förnamn" });
-    const ln = el("input", { type: "text", placeholder: "Efternamn" });
-    const pnr = el("input", { type: "text", placeholder: "ÅÅMMDD-XXXX" });
-    const amt = el("input", { type: "text", value: "0,00", style: "width:96px" });
-    const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end" },
-      wrap("Förnamn", fn), wrap("Efternamn", ln), wrap("Personnummer", pnr),
-      wrap("Skattereduktion (kr)", amt),
-      el("button", { class: "btn small ghost", onclick: (e) => e.target.closest(".row").remove() }, "✕"));
-    row._get = () => ({
-      first_name: fn.value.trim(), last_name: ln.value.trim(),
-      personnummer: pnr.value.trim(), rut_amount_ore: toOre(amt.value),
-    });
-    rowsBox.appendChild(row);
+  const potInfo = el("p", { class: "muted" }, "Pott: —");
+  let people = [];   // [{kundnummer, name}]
+
+  function peopleOptions(selected) {
+    const opts = [el("option", { value: "" }, "— välj person —"),
+      ...people.map((p) => el("option", { value: p.kundnummer }, p.name))];
+    const sel = el("select", {}, ...opts);
+    if (selected != null) sel.value = String(selected);
+    return sel;
   }
-  const element = el("div", {}, rowsBox,
-    el("button", { class: "btn small ghost", onclick: () => addRow() }, "+ Mottagare"));
+
+  function addRow(presetId) {
+    const who = peopleOptions(presetId);
+    const pnr = el("input", { type: "text", placeholder: "ÅÅMMDD-XXXX", style: "width:120px" });
+    const share = el("input", { type: "text", value: "100", style: "width:60px", oninput: recompute });
+    const out = el("span", { class: "muted", style: "align-self:center" }, "—");
+    who.onchange = recompute;
+    const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end" },
+      wrap("Person", who), wrap("Personnummer", pnr), wrap("Andel %", share),
+      wrap("Belopp", out),
+      el("button", { class: "btn small ghost", onclick: (e) => { e.target.closest(".row").remove(); recompute(); } }, "✕"));
+    row._who = who; row._pnr = pnr; row._share = share; row._out = out;
+    rowsBox.appendChild(row);
+    recompute();
+  }
+
+  function recompute() {
+    const pots = potsFromLines(getLines ? getLines() : [], rutPct, rotPct);
+    potInfo.textContent = `Pott — RUT: ${toKr(pots.rut)} kr, ROT: ${toKr(pots.rot)} kr`;
+    for (const row of rowsBox.children) {
+      const pct = parseFloat((row._share.value || "0").replace(",", ".")) || 0;
+      const rut = Math.round(pots.rut * pct / 100);
+      const rot = Math.round(pots.rot * pct / 100);
+      const parts = [];
+      if (pots.rut) parts.push(`RUT ${toKr(rut)}`);
+      if (pots.rot) parts.push(`ROT ${toKr(rot)}`);
+      row._out.textContent = parts.length ? parts.join(" · ") + " kr" : "—";
+    }
+  }
+
+  async function reloadPeople() {
+    const cid = getInvoiceCustomerId();
+    people = [];
+    if (cid) {
+      try {
+        const me = await api("GET", `/books/${bid()}/customers/${cid}`);
+        const nm = `${me.first_name || ""} ${me.last_name || ""}`.trim() || me.company_name || ("Kund " + cid);
+        people.push({ kundnummer: cid, name: nm + " (fakturakund)" });
+        const rel = await api("GET", `/books/${bid()}/customers/${cid}/relations`);
+        for (const r of rel) {
+          people.push({ kundnummer: r.kundnummer,
+            name: `${r.first_name || ""} ${r.last_name || ""}`.trim() || r.company_name || ("Kund " + r.kundnummer) });
+        }
+      } catch (e) { /* ignore */ }
+    }
+    // repopulate existing rows' selects, keeping selection if still present
+    for (const row of rowsBox.children) {
+      const prev = row._who.value;
+      const fresh = peopleOptions(prev);
+      fresh.onchange = recompute;
+      row._who.replaceWith(fresh);
+      row._who = fresh;
+    }
+    recompute();
+  }
+
+  async function addNewPerson() {
+    const cid = getInvoiceCustomerId();
+    const f = await modal("Ny hushållsmedlem (skapas som kund och kopplas)", [
+      { name: "first_name", label: "Förnamn" },
+      { name: "last_name", label: "Efternamn" },
+      { name: "personnummer", label: "Personnummer" },
+    ], "Skapa & koppla");
+    if (!f || !f.first_name || !f.last_name) return;
+    const created = await api("POST", `/books/${bid()}/customers`, {
+      type: "private", first_name: f.first_name, last_name: f.last_name,
+      personnummer: f.personnummer || null,
+    });
+    if (cid && created.kundnummer !== cid) {
+      await api("POST", `/books/${bid()}/customers/${cid}/relations`, { other_kundnummer: created.kundnummer });
+    }
+    await reloadPeople();
+    addRow(created.kundnummer);
+  }
+
+  const element = el("div", {}, potInfo, rowsBox,
+    el("button", { class: "btn small ghost", onclick: () => addRow() }, "+ Mottagare"),
+    el("button", { class: "btn small ghost", style: "margin-left:6px",
+      onclick: () => guard(addNewPerson) }, "+ Ny person"));
+
   return {
-    element,
-    get: () => [...rowsBox.children].map((r) => r._get()).filter((x) => x.first_name && x.personnummer),
+    element, reloadPeople, recompute,
+    get: () => [...rowsBox.children].map((row) => ({
+      customer_id: row._who.value ? parseInt(row._who.value, 10) : null,
+      personnummer: row._pnr.value.trim() || null,
+      share_pct: parseFloat((row._share.value || "0").replace(",", ".")) || 0,
+    })).filter((r) => r.customer_id || r.personnummer),
   };
 }
 

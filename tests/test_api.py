@@ -461,18 +461,45 @@ class TestInvoices:
 
     def test_invoice_with_rut_household_split(self, client, book):
         cat, kid = self._setup(client, book)
+        # ex 1 000 000 @ 25% -> inc 1 250 000; RUT pot = 50% incl moms = 625 000.
         inv = client.post(f"/books/{book}/invoices", json={
             "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
             "due_date": "2026-03-31",
             "lines": [{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 1000000,
-                       "rate_code": "25", "rut_eligible": True}],
+                       "rate_code": "25", "reduction_type": "rut"}],
             "recipients": [{"first_name": "Anna", "last_name": "Svensson",
-                            "personnummer": "811218-9876", "rut_amount_ore": 150000},
+                            "personnummer": "811218-9876", "share_pct": 60},
                            {"first_name": "Björn", "last_name": "Svensson",
-                            "personnummer": "19811218-9876", "rut_amount_ore": 100000}]}).json()
-        assert inv["rut_total_ore"] == 250000
+                            "personnummer": "19811218-9876", "share_pct": 40}]}).json()
+        assert inv["rut_total_ore"] == 625000
         got = client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()
         assert len(got["recipients"]) == 2
+        assert got["recipients"][0]["rut_amount_ore"] == 375000
+
+    def test_invoice_rot_and_household_relations(self, client, book):
+        cat, kid = self._setup(client, book)
+        # add a household member and link them
+        bjorn = client.post(f"/books/{book}/customers", json={
+            "type": "private", "first_name": "Björn", "last_name": "Svensson"}).json()["kundnummer"]
+        rel = client.post(f"/books/{book}/customers/{kid}/relations",
+                          json={"other_kundnummer": bjorn})
+        assert rel.status_code == 201
+        rels = client.get(f"/books/{book}/customers/{kid}/relations").json()
+        assert any(r["kundnummer"] == bjorn for r in rels)
+        # ROT invoice with the linked member as recipient (personnummer saved on them)
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "Snickeri", "quantity_centi": 100, "unit_price_ore": 1000000,
+                       "rate_code": "25", "reduction_type": "rot"}],
+            "recipients": [{"customer_id": bjorn, "personnummer": "19811218-9876",
+                            "share_pct": 100}]}).json()
+        assert inv["rot_total_ore"] == 375000        # ROT 30% incl moms
+        # personnummer got saved onto Björn's customer record
+        assert client.get(f"/books/{book}/customers/{bjorn}").json()["personnummer"] == "8112189876"
+        # unlink works
+        assert client.delete(f"/books/{book}/customers/{kid}/relations/{bjorn}").status_code == 200
+        assert client.get(f"/books/{book}/customers/{kid}/relations").json() == []
 
     def test_invoice_pdf_download(self, client, book):
         cat, kid = self._setup(client, book)
