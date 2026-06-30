@@ -1069,6 +1069,70 @@ class BookOps:
                 "rut_total_ore": rut_total, "rot_total_ore": rot_total,
                 "husavdrag_ore": husavdrag, "cap_warnings": cap_warnings}
 
+    # ---- invoice drafts (unissued, editable; books nothing until create_invoice) ----
+
+    def save_draft(self, payload: dict, draft_id: Optional[int] = None) -> dict:
+        """Create or update an invoice draft. The full form payload is stored
+        encrypted (it may contain recipient personnummer). No number is assigned and
+        nothing is booked. Returns the draft id + timestamp."""
+        enc = self.session.encrypt_text(json.dumps(payload, default=str))
+        cid = payload.get("customer_id")
+        now = _now()
+        with self.conn:
+            if draft_id is not None:
+                if self.conn.execute("SELECT 1 FROM invoice_draft WHERE id=?",
+                                     (draft_id,)).fetchone() is None:
+                    raise KeyError(f"No invoice draft {draft_id}")
+                self.conn.execute(
+                    "UPDATE invoice_draft SET customer_id=?, payload_enc=?, updated_at=? WHERE id=?",
+                    (cid, enc, now, draft_id))
+            else:
+                cur = self.conn.execute(
+                    "INSERT INTO invoice_draft(customer_id, payload_enc, created_at, updated_at) "
+                    "VALUES (?,?,?,?)", (cid, enc, now, now))
+                draft_id = cur.lastrowid
+        return {"id": draft_id, "updated_at": now}
+
+    def list_drafts(self) -> list[dict]:
+        """List drafts with a best-effort summary (line count + estimated inc total)."""
+        out = []
+        for r in self.conn.execute(
+                "SELECT id, customer_id, payload_enc, updated_at FROM invoice_draft "
+                "ORDER BY updated_at DESC").fetchall():
+            try:
+                payload = json.loads(self.session.decrypt_text(r["payload_enc"]))
+            except Exception:
+                payload = {}
+            lines = payload.get("lines") or []
+            total = 0
+            for ln in lines:
+                try:
+                    ex = round(int(ln.get("quantity_centi", 0)) * int(ln.get("unit_price_ore", 0)) / 100)
+                    rc = ln.get("rate_code")
+                    _, _, inc = (compute_moms_figures(ex, rc, inclusive=False)
+                                 if rc in S.MOMS_RATES else (ex, 0, ex))
+                    total += inc
+                except Exception:
+                    pass
+            out.append({"id": r["id"], "customer_id": r["customer_id"],
+                        "updated_at": r["updated_at"], "line_count": len(lines),
+                        "total_ore": total})
+        return out
+
+    def get_draft(self, draft_id: int) -> dict:
+        """Return the decrypted form payload of a draft (to reload into the editor)."""
+        row = self.conn.execute(
+            "SELECT id, payload_enc, updated_at FROM invoice_draft WHERE id=?",
+            (draft_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No invoice draft {draft_id}")
+        return {"id": row["id"], "updated_at": row["updated_at"],
+                "payload": json.loads(self.session.decrypt_text(row["payload_enc"]))}
+
+    def delete_draft(self, draft_id: int) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM invoice_draft WHERE id=?", (draft_id,))
+
     def _invoice_balances(self, invoice_id: int) -> dict:
         """
         Derive an invoice's running settlement from the event subledger.

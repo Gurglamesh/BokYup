@@ -250,6 +250,11 @@ class CreditInvoiceReq(BaseModel):
     date: Optional[str] = None
 
 
+class InvoiceDraftReq(BaseModel):
+    # The whole (possibly incomplete) invoice form payload, saved to continue later.
+    payload: dict
+
+
 class CreateInvoiceReq(BaseModel):
     customer_id: int
     category_id: Optional[int] = None    # fallback account; lines may each set their own
