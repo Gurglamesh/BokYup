@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -310,6 +310,17 @@ CREATE TABLE invoice_event (
     credit_note_number INTEGER,              -- kreditfaktura number (credit events; shares the faktura series)
     note            TEXT,
     created_at      TEXT NOT NULL
+);
+
+-- ----- invoice drafts: an unissued, editable faktura saved to continue later. The
+-- whole form payload is stored encrypted (it may carry recipient personnummer); a
+-- draft has NO number and books nothing until it is issued via create_invoice.
+CREATE TABLE invoice_draft (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id INTEGER,                          -- for the list view (nullable while editing)
+    payload_enc TEXT NOT NULL,                    -- AES-256-GCM(DEK) JSON of the form inputs
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
 );
 
 -- ----- invoice line items (articles) -------------------------------------
@@ -589,6 +600,15 @@ _MIGRATIONS: dict[int, str] = {
     """,
     12: """
         INSERT OR IGNORE INTO config(key, value) VALUES ('rot_cap_ore_per_customer_year', '5000000');
+    """,
+    13: """
+        CREATE TABLE IF NOT EXISTS invoice_draft (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER,
+            payload_enc TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
     """,
 }
 

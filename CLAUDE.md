@@ -345,6 +345,16 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       is flagged even when the combined total is under 75 000; `create_invoice`
       `cap_warnings` + the recipient editor's "kvar i år" note + the issue toast cover
       both caps. Tests pass (260).
+- [x] **Invoice drafts + recipient personnummer prefill (schema v13, 2026-06).** An
+      unissued faktura can be saved and continued later: `invoice_draft` stores the whole
+      form payload **encrypted** (DEK; it may carry recipient personnummer) with NO
+      number and nothing booked. `save_draft`/`list_drafts`/`get_draft`/`delete_draft`;
+      API `GET/POST/PUT/DELETE /invoice-drafts[/{id}]`. UI: "Spara utkast" on the faktura
+      form, an "Utkast" list (Fortsätt/Ta bort) in the Fakturor tab, prefill the editor
+      (lines + recipients) from a draft, and drop the draft when the invoice is issued.
+      Also: the recipient editor **prefills personnummer from the picked customer's
+      kundkort** when it is already stored (backend `_resolve_recipient` already falls
+      back to the customer's pnr). Tests pass (262).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

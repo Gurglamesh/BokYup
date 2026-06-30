@@ -390,6 +390,28 @@ def _build_router():
     def list_invoices(book_id: str, request: Request):
         return fac(request).h_list_invoices({"book_id": book_id}, {}, {})
 
+    # ---- invoice drafts ----
+    @r.get("/books/{book_id}/invoice-drafts")
+    def list_drafts(book_id: str, request: Request):
+        return fac(request).h_list_drafts({"book_id": book_id}, {}, {})
+
+    @r.post("/books/{book_id}/invoice-drafts", status_code=201)
+    def create_draft(book_id: str, body: sc.InvoiceDraftReq, request: Request):
+        return fac(request).h_create_draft({"book_id": book_id}, body.model_dump(), {})
+
+    @r.get("/books/{book_id}/invoice-drafts/{draft_id}")
+    def get_draft(book_id: str, draft_id: int, request: Request):
+        return fac(request).h_get_draft({"book_id": book_id, "draft_id": draft_id}, {}, {})
+
+    @r.put("/books/{book_id}/invoice-drafts/{draft_id}")
+    def update_draft(book_id: str, draft_id: int, body: sc.InvoiceDraftReq, request: Request):
+        return fac(request).h_update_draft(
+            {"book_id": book_id, "draft_id": draft_id}, body.model_dump(), {})
+
+    @r.delete("/books/{book_id}/invoice-drafts/{draft_id}")
+    def delete_draft(book_id: str, draft_id: int, request: Request):
+        return fac(request).h_delete_draft({"book_id": book_id, "draft_id": draft_id}, {}, {})
+
     @r.get("/books/{book_id}/invoices/{invoice_id}")
     def get_invoice(book_id: str, invoice_id: int, request: Request):
         return fac(request).h_get_invoice({"book_id": book_id, "invoice_id": invoice_id}, {}, {})

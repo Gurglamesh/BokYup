@@ -455,6 +455,23 @@ class AppFacade:
     def h_list_invoices(self, p, b, q):
         return self._ops(p["book_id"]).list_invoices()
 
+    # ---- invoice drafts ----
+    def h_list_drafts(self, p, b, q):
+        return self._ops(p["book_id"]).list_drafts()
+
+    def h_create_draft(self, p, b, q):
+        return self._ops(p["book_id"]).save_draft(b["payload"])
+
+    def h_get_draft(self, p, b, q):
+        return self._ops(p["book_id"]).get_draft(int(p["draft_id"]))
+
+    def h_update_draft(self, p, b, q):
+        return self._ops(p["book_id"]).save_draft(b["payload"], draft_id=int(p["draft_id"]))
+
+    def h_delete_draft(self, p, b, q):
+        self._ops(p["book_id"]).delete_draft(int(p["draft_id"]))
+        return {"deleted": True}
+
     def h_get_invoice(self, p, b, q):
         return self._ops(p["book_id"]).get_invoice(int(p["invoice_id"]))
 
@@ -574,6 +591,11 @@ _route("DELETE", "/books/{book_id}/logo", "h_delete_logo")
 _route("GET", "/books/{book_id}/payment-methods", "h_list_payment_methods")
 _route("POST", "/books/{book_id}/payment-methods", "h_create_payment_method", 201)
 _route("PATCH", "/books/{book_id}/payment-methods/{payment_method_id}", "h_update_payment_method")
+_route("GET", "/books/{book_id}/invoice-drafts", "h_list_drafts")
+_route("POST", "/books/{book_id}/invoice-drafts", "h_create_draft", 201)
+_route("GET", "/books/{book_id}/invoice-drafts/{draft_id}", "h_get_draft")
+_route("PUT", "/books/{book_id}/invoice-drafts/{draft_id}", "h_update_draft")
+_route("DELETE", "/books/{book_id}/invoice-drafts/{draft_id}", "h_delete_draft")
 _route("POST", "/books/{book_id}/invoices", "h_create_invoice", 201)
 _route("GET", "/books/{book_id}/invoices", "h_list_invoices")
 _route("GET", "/books/{book_id}/invoices/{invoice_id}/pdf", "h_invoice_pdf")

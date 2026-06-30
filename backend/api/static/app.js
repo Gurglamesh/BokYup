@@ -824,13 +824,37 @@ const SECTION_RENDERERS = {
 
   // ----- invoices (faktura): list + create with line items & RUT recipients -----
   async invoices(panel) {
-    const list = await api("GET", `/books/${bid()}/invoices`);
+    const [list, drafts] = await Promise.all([
+      api("GET", `/books/${bid()}/invoices`),
+      api("GET", `/books/${bid()}/invoice-drafts`),
+    ]);
     panel.appendChild(headerWithAdd("Fakturor", "+ Ny faktura", () => guard(() => invoiceForm(panel))));
+
+    // Drafts: unissued invoices saved to continue later.
+    if (drafts.length) {
+      panel.appendChild(el("h3", { style: "margin-top:14px" }, "Utkast"));
+      panel.appendChild(simpleTable(
+        ["Sparat", "Rader", "Summa", ""],
+        drafts.map((d) => [d.updated_at ? d.updated_at.slice(0, 16).replace("T", " ") : "",
+          d.line_count, toKr(d.total_ore || 0) + " kr",
+          el("span", { style: "display:inline-flex;gap:4px" },
+            el("button", { class: "btn small", onclick: () => guard(async () => {
+              const full = await api("GET", `/books/${bid()}/invoice-drafts/${d.id}`);
+              invoiceForm(panel, full);
+            }) }, "Fortsätt"),
+            el("button", { class: "btn small ghost danger", onclick: () => guard(async () => {
+              await api("DELETE", `/books/${bid()}/invoice-drafts/${d.id}`);
+              toast("Utkast borttaget"); renderWorkspace();
+            }) }, "Ta bort"))]),
+      ));
+    }
+
     if (list.length === 0) {
       panel.appendChild(el("p", { class: "muted", style: "margin-top:14px" },
         "Inga fakturor ännu. Ställ in företagsuppgifter och betalsätt under Inställningar."));
       return;
     }
+    panel.appendChild(el("h3", { style: "margin-top:18px" }, "Fakturor"));
     const STATE = {
       paid: ["paid", "Betald"], pending: ["pending", "Obetald"],
       partial: ["pending", "Delbetald"],
@@ -1369,7 +1393,9 @@ async function importBackupFlow() {
 // ---------------------------------------------------------------------------
 // Invoices (faktura)
 // ---------------------------------------------------------------------------
-async function invoiceForm(panel) {
+async function invoiceForm(panel, draft) {
+  const dp = (draft && draft.payload) || {};   // prefill from a saved draft
+  let draftId = draft ? draft.id : null;
   const [customers, cats, redCfg] = await Promise.all([
     api("GET", `/books/${bid()}/customers`),
     api("GET", `/books/${bid()}/categories`),
@@ -1381,27 +1407,30 @@ async function invoiceForm(panel) {
     return;
   }
   panel.innerHTML = "";
-  panel.appendChild(el("h2", {}, "Ny faktura"));
+  panel.appendChild(el("h2", {}, draftId ? `Utkast (forts.)` : "Ny faktura"));
 
   const customer = el("select", {}, ...customers.map((c) => el("option", { value: c.kundnummer },
     c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer))));
+  if (dp.customer_id) customer.value = String(dp.customer_id);
   const cat = el("select", {},
     el("option", { value: "" }, "— välj per rad —"),
     ...incomeCats.map((c) => el("option", { value: c.id }, c.name)));
+  if (dp.category_id) cat.value = String(dp.category_id);
   const today = new Date().toISOString().slice(0, 10);
   const due = new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
-  const invDate = el("input", { type: "date", value: today });
-  const dueDate = el("input", { type: "date", value: due });
-  const delivery = el("input", { type: "date", value: "" });
-  const terms = el("input", { type: "text", value: "30 dagar netto" });
-  const yourRef = el("input", { type: "text" });
-  const note = el("input", { type: "text" });
+  const invDate = el("input", { type: "date", value: dp.invoice_date || today });
+  const dueDate = el("input", { type: "date", value: dp.due_date || due });
+  const delivery = el("input", { type: "date", value: dp.delivery_date || "" });
+  const terms = el("input", { type: "text", value: dp.payment_terms || "30 dagar netto" });
+  const yourRef = el("input", { type: "text", value: dp.your_reference || "" });
+  const note = el("input", { type: "text", value: dp.note || "" });
   const recips = recipientsEditor({
     rutPct: redCfg.rut_pct, rotPct: redCfg.rot_pct,
     getLines: () => lines.get(), getInvoiceCustomerId: () => parseInt(customer.value, 10),
     getYear: () => parseInt((invDate.value || "").slice(0, 4), 10) || new Date().getFullYear(),
+    initialRecipients: dp.recipients || [],
   });
-  const lines = lineItemsEditor(incomeCats, () => recips.recompute());
+  const lines = lineItemsEditor(incomeCats, () => recips.recompute(), dp.lines || []);
   customer.onchange = () => recips.reloadPeople();
   invDate.onchange = () => recips.refreshCaps();
 
@@ -1425,22 +1454,39 @@ async function invoiceForm(panel) {
     wrap("Betalningsvillkor", terms), wrap("Er referens", yourRef), wrap("Notering", note)));
   panel.appendChild(el("div", { style: "margin-top:16px" },
     el("button", { class: "btn brand", onclick: () => guard(submit) }, "Skapa faktura"),
+    el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(saveDraft) }, "Spara utkast"),
     el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => { state.section = "invoices"; renderWorkspace(); } }, "Avbryt")));
 
   await recips.reloadPeople();
 
-  async function submit() {
-    const lineData = lines.get();
-    if (lineData.length === 0) { toast("Lägg till minst en artikelrad", true); return; }
-    const body = {
-      customer_id: parseInt(customer.value, 10),
+  // Collect the current form state (may be incomplete — that's fine for a draft).
+  function collectBody() {
+    return {
+      customer_id: parseInt(customer.value, 10) || null,
       category_id: cat.value ? parseInt(cat.value, 10) : null,
       invoice_date: invDate.value, due_date: dueDate.value,
       delivery_date: delivery.value || null, payment_terms: terms.value || null,
       your_reference: yourRef.value || null, note: note.value || null,
-      lines: lineData, recipients: recips.get(),
+      lines: lines.get(), recipients: recips.get(),
     };
+  }
+
+  async function saveDraft() {
+    const payload = collectBody();
+    if (draftId) {
+      await api("PUT", `/books/${bid()}/invoice-drafts/${draftId}`, { payload });
+    } else {
+      const res = await api("POST", `/books/${bid()}/invoice-drafts`, { payload });
+      draftId = res.id;
+    }
+    toast("Utkast sparat");
+  }
+
+  async function submit() {
+    const body = collectBody();
+    if ((body.lines || []).length === 0) { toast("Lägg till minst en artikelrad", true); return; }
     const res = await api("POST", `/books/${bid()}/invoices`, body);
+    if (draftId) { try { await api("DELETE", `/books/${bid()}/invoice-drafts/${draftId}`); } catch (e) { /* ignore */ } }
     toast(`Faktura ${res.invoice_number} skapad`);
     for (const w of res.cap_warnings || []) {
       if (w.over_cap || w.near_cap) {
@@ -1458,24 +1504,30 @@ async function invoiceForm(panel) {
   }
 }
 
-function lineItemsEditor(incomeCats, onChange) {
+function lineItemsEditor(incomeCats, onChange, initialLines) {
   const rowsBox = el("div", {});
   const cats = incomeCats || [];
   const fire = () => { if (onChange) onChange(); };
-  function addRow() {
-    const desc = el("input", { type: "text", placeholder: "Beskrivning" });
+  function addRow(v) {                                  // v = optional prefill (draft)
+    v = v || {};
+    const desc = el("input", { type: "text", placeholder: "Beskrivning", value: v.description || "" });
     const cat = el("select", {},
       el("option", { value: "" }, "(standard)"),
       ...cats.map((c) => el("option", { value: c.id }, c.name)));
-    const qty = el("input", { type: "text", value: "1", style: "width:64px", oninput: fire });
-    const unit = el("input", { type: "text", value: "st", style: "width:54px" });
-    const price = el("input", { type: "text", value: "0,00", style: "width:96px", oninput: fire });
+    if (v.category_id) cat.value = String(v.category_id);
+    const qtyVal = v.quantity_centi != null ? String(v.quantity_centi / 100).replace(".", ",") : "1";
+    const qty = el("input", { type: "text", value: qtyVal, style: "width:64px", oninput: fire });
+    const unit = el("input", { type: "text", value: v.unit || "st", style: "width:54px" });
+    const priceVal = v.unit_price_ore != null ? toKr(v.unit_price_ore) : "0,00";
+    const price = el("input", { type: "text", value: priceVal, style: "width:96px", oninput: fire });
     const rate = el("select", { onchange: fire }, ...RATE_OPTIONS.map((r) => el("option", { value: r }, rateLabel(r))));
+    if (v.rate_code) rate.value = v.rate_code;
     // Husavdrag per line: none / RUT / ROT.
     const red = el("select", { onchange: fire },
       el("option", { value: "" }, "—"),
       el("option", { value: "rut" }, "RUT"),
       el("option", { value: "rot" }, "ROT"));
+    if (v.reduction_type) red.value = v.reduction_type;
     cat.onchange = () => {
       const c = cats.find((x) => String(x.id) === cat.value);
       if (c && c.default_rate_code) rate.value = c.default_rate_code;
@@ -1493,7 +1545,7 @@ function lineItemsEditor(incomeCats, onChange) {
     });
     rowsBox.appendChild(row);
   }
-  addRow();
+  if (initialLines && initialLines.length) initialLines.forEach(addRow); else addRow();
   const element = el("div", {}, rowsBox,
     el("button", { class: "btn small ghost", onclick: () => addRow() }, "+ Rad"));
   return { element, get: () => [...rowsBox.children].map((r) => r._get()).filter((l) => l.description) };
@@ -1504,10 +1556,13 @@ function lineItemsEditor(incomeCats, onChange) {
 // and see each person's RUT/ROT kronor computed live from the article pots.
 function recipientsEditor(opts) {
   const { rutPct, rotPct, getLines, getInvoiceCustomerId, getYear } = opts;
+  const initialRecipients = opts.initialRecipients || [];
   const rowsBox = el("div", {});
   const potInfo = el("p", { class: "muted" }, "Pott: —");
   let people = [];                 // [{kundnummer, name}]
+  let seeded = false;              // initial (draft) recipients added once
   const capCache = new Map();      // `${cid}:${year}` -> cap status
+  const custCache = new Map();     // kundnummer -> customer (for personnummer prefill)
 
   function peopleOptions(selected) {
     const opts = [el("option", { value: "" }, "— välj person —"),
@@ -1517,15 +1572,32 @@ function recipientsEditor(opts) {
     return sel;
   }
 
-  function onWhoChange(row) {
-    return () => { recompute(); refreshCaps(); };
+  // When a customer is picked, prefill the personnummer from their kundkort if it is
+  // already stored (so it does not need re-entering) and the field is still empty.
+  async function prefillPnr(row) {
+    const cid = row._who.value;
+    if (!cid || row._pnr.value.trim()) return;
+    let cust = custCache.get(cid);
+    if (!cust) {
+      try { cust = await api("GET", `/books/${bid()}/customers/${cid}`); custCache.set(cid, cust); }
+      catch (e) { return; }
+    }
+    if (cust && cust.personnummer) row._pnr.value = cust.personnummer;
   }
 
-  function addRow(presetId) {
-    const who = peopleOptions(presetId);
-    const pnr = el("input", { type: "text", placeholder: "ÅÅMMDD-XXXX", style: "width:120px" });
-    const rutShare = el("input", { type: "text", value: "100", style: "width:56px", oninput: recompute });
-    const rotShare = el("input", { type: "text", value: "100", style: "width:56px", oninput: recompute });
+  function onWhoChange(row) {
+    return () => { recompute(); refreshCaps(); prefillPnr(row); };
+  }
+
+  function addRow(v) {
+    v = v || {};
+    const who = peopleOptions(v.customer_id);
+    const pnr = el("input", { type: "text", placeholder: "ÅÅMMDD-XXXX", style: "width:120px",
+      value: v.personnummer || "" });
+    const rutShare = el("input", { type: "text", value: v.rut_share_pct != null ? String(v.rut_share_pct) : "100",
+      style: "width:56px", oninput: recompute });
+    const rotShare = el("input", { type: "text", value: v.rot_share_pct != null ? String(v.rot_share_pct) : "100",
+      style: "width:56px", oninput: recompute });
     const out = el("span", { class: "muted", style: "align-self:center" }, "—");
     const cap = el("span", { class: "muted", style: "align-self:center;font-size:12px" }, "");
     const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end" },
@@ -1535,6 +1607,7 @@ function recipientsEditor(opts) {
     row._who = who; row._pnr = pnr; row._rut = rutShare; row._rot = rotShare; row._out = out; row._cap = cap;
     who.onchange = onWhoChange(row);
     rowsBox.appendChild(row);
+    if (v.customer_id) prefillPnr(row);
     recompute(); refreshCaps();
   }
 
@@ -1603,6 +1676,11 @@ function recipientsEditor(opts) {
             name: `${r.first_name || ""} ${r.last_name || ""}`.trim() || r.company_name || ("Kund " + r.kundnummer) });
         }
       } catch (e) { /* ignore */ }
+    }
+    // Seed draft recipients once, after the people list is first available.
+    if (!seeded && initialRecipients.length) {
+      seeded = true;
+      initialRecipients.forEach(addRow);
     }
     // repopulate existing rows' selects, keeping selection if still present
     for (const row of rowsBox.children) {

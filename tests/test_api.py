@@ -529,6 +529,42 @@ class TestInvoices:
         assert pdf.headers["content-type"] == "application/pdf"
         assert pdf.content[:4] == b"%PDF"
 
+    def test_invoice_draft_save_continue_finalize(self, client, book):
+        cat, kid = self._setup(client, book)
+        payload = {"customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+                   "due_date": "2026-03-31",
+                   "lines": [{"description": "Konsult", "quantity_centi": 100,
+                              "unit_price_ore": 100000, "rate_code": "25"}]}
+        # save
+        d = client.post(f"/books/{book}/invoice-drafts", json={"payload": payload})
+        assert d.status_code == 201
+        did = d.json()["id"]
+        lst = client.get(f"/books/{book}/invoice-drafts").json()
+        assert len(lst) == 1 and lst[0]["line_count"] == 1 and lst[0]["total_ore"] == 125000
+        # continue: payload round-trips (incl. it being stored encrypted at rest)
+        full = client.get(f"/books/{book}/invoice-drafts/{did}").json()
+        assert full["payload"]["lines"][0]["description"] == "Konsult"
+        # update
+        client.put(f"/books/{book}/invoice-drafts/{did}",
+                   json={"payload": {**payload, "note": "klar snart"}})
+        assert client.get(f"/books/{book}/invoice-drafts/{did}").json()["payload"]["note"] == "klar snart"
+        # finalize: issue the invoice, then drop the draft
+        inv = client.post(f"/books/{book}/invoices", json=payload).json()
+        assert inv["invoice_number"] == 1
+        client.delete(f"/books/{book}/invoice-drafts/{did}")
+        assert client.get(f"/books/{book}/invoice-drafts").json() == []
+
+    def test_draft_payload_encrypted_at_rest(self, client, book, tmp_path):
+        cat, kid = self._setup(client, book)
+        client.post(f"/books/{book}/invoice-drafts", json={"payload": {
+            "customer_id": kid, "recipients": [{"personnummer": "811218-9876"}], "lines": []}})
+        # the raw DB must not contain the personnummer in cleartext
+        import sqlite3, glob
+        dbfile = glob.glob(str(tmp_path / "**" / "*.db"), recursive=True)[0]
+        raw = sqlite3.connect(dbfile).execute(
+            "SELECT payload_enc FROM invoice_draft").fetchone()[0]
+        assert "811218-9876" not in raw
+
 
 class TestLogo:
     def _b64png(self):
