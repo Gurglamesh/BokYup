@@ -1855,34 +1855,56 @@ function recipientsEditor(opts) {
   };
 }
 
-// Download/preview an invoice PDF (HTTP link on desktop, Blob from base64 on phone).
-async function invoicePdf(invoiceId, number) {
-  const path = `/books/${bid()}/invoices/${invoiceId}/pdf`;
-  const fname = `faktura-${number || invoiceId}.pdf`;
+// Show a PDF in an in-app viewer. This avoids relying on the native window's
+// download/new-window handling (pywebview blocks <a download target=_blank> by
+// default): the PDF renders inline in an <iframe>. Desktop points the iframe at the
+// same-origin endpoint (WebView2/browsers render PDFs inline); the phone build (no
+// HTTP) builds a blob from the base64 the native bridge returns.
+async function showPdf(path, fname) {
+  let src, revoke = null;
   if (window.__BOKYUP_NATIVE__) {
     const r = await api("GET", path);                 // { raw, base64, media_type }
     const bytes = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0));
-    const url = URL.createObjectURL(new Blob([bytes], { type: r.media_type }));
-    const a = el("a", { href: url, download: fname }); document.body.appendChild(a); a.click(); a.remove();
-    return;
+    src = URL.createObjectURL(new Blob([bytes], { type: r.media_type || "application/pdf" }));
+    revoke = src;
+  } else {
+    src = API + path;                                 // same-origin; rendered inline
   }
-  const a = el("a", { href: path, download: fname, target: "_blank" });
-  document.body.appendChild(a); a.click(); a.remove();
+  $("#modal-title").textContent = fname;
+  const body = $("#modal-body");
+  body.innerHTML = "";
+  body.appendChild(el("iframe", { src, title: fname,
+    style: "width:100%;height:68vh;border:1px solid var(--border,#ccc);border-radius:6px;background:#fff" }));
+  body.appendChild(el("div", { style: "margin-top:8px" },
+    el("a", { href: src, download: fname, class: "btn small ghost" }, "Ladda ner")));
+  // Widen the modal for the document and restore afterwards.
+  const dialog = $("#modal-backdrop .modal");
+  const prevWidth = dialog ? dialog.style.width : "";
+  if (dialog) dialog.style.width = "min(900px, 94vw)";
+  $("#modal-cancel").style.display = "none";
+  $("#modal-ok").textContent = "Stäng";
+  $("#modal-backdrop").classList.remove("hidden");
+  await new Promise((resolve) => {
+    const close = () => {
+      $("#modal-backdrop").classList.add("hidden");
+      $("#modal-cancel").style.display = "";
+      if (dialog) dialog.style.width = prevWidth;
+      if (revoke) URL.revokeObjectURL(revoke);
+      $("#modal-ok").onclick = null; $("#modal-cancel").onclick = null;
+      resolve();
+    };
+    $("#modal-ok").onclick = close;
+    $("#modal-cancel").onclick = close;
+  });
 }
 
-// Download/preview a numbered kreditfaktura (credit note) PDF.
+async function invoicePdf(invoiceId, number) {
+  await showPdf(`/books/${bid()}/invoices/${invoiceId}/pdf`, `faktura-${number || invoiceId}.pdf`);
+}
+
 async function creditNotePdf(invoiceId, eventId, number) {
-  const path = `/books/${bid()}/invoices/${invoiceId}/credit-notes/${eventId}/pdf`;
-  const fname = `kreditfaktura-${number || eventId}.pdf`;
-  if (window.__BOKYUP_NATIVE__) {
-    const r = await api("GET", path);
-    const bytes = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0));
-    const url = URL.createObjectURL(new Blob([bytes], { type: r.media_type }));
-    const a = el("a", { href: url, download: fname }); document.body.appendChild(a); a.click(); a.remove();
-    return;
-  }
-  const a = el("a", { href: path, download: fname, target: "_blank" });
-  document.body.appendChild(a); a.click(); a.remove();
+  await showPdf(`/books/${bid()}/invoices/${invoiceId}/credit-notes/${eventId}/pdf`,
+                `kreditfaktura-${number || eventId}.pdf`);
 }
 
 // Makulera (void) an unbooked invoice — keeps the number, nothing was booked.
