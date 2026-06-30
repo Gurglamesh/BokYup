@@ -64,7 +64,7 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         from PIL import Image
         iw, ih = Image.open(io.BytesIO(logo_png)).size
         ratio = (iw / ih) if ih else 1
-        w = 45.0
+        w = 55.0
         h = w / ratio
         if h > 24:
             h = 24.0
