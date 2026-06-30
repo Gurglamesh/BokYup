@@ -248,6 +248,29 @@ class TestRegistry:
         db_path = Path(record.db_path)
         mgr.remove_from_registry(record.id)
         assert db_path.exists()
+        assert Path(record.key_path).exists()
+
+    def test_remove_with_delete_files_purges_everything(self, book_and_session):
+        from backend.db import bundle
+        mgr, record, session = book_and_session
+        db_path = Path(record.db_path)
+        # Drop a receipt photo so the <db>.photos/ dir exists and must be purged too.
+        photos = bundle._photos_dir(db_path)
+        photos.mkdir(parents=True, exist_ok=True)
+        (photos / "x.bin").write_bytes(b"ciphertext")
+        assert db_path.exists() and Path(record.key_path).exists()
+
+        res = mgr.remove_from_registry(record.id, delete_files=True)
+
+        assert res["files_deleted"] is True
+        assert not db_path.exists()
+        assert not Path(record.key_path).exists()
+        assert not photos.exists()
+        assert len(mgr.list_books()) == 0
+
+    def test_remove_unknown_book_raises(self, mgr: DatabaseManager):
+        with pytest.raises(KeyError):
+            mgr.remove_from_registry("no-such-id", delete_files=True)
 
     def test_rename_book(self, book_and_session):
         mgr, record, _ = book_and_session

@@ -395,15 +395,43 @@ class DatabaseManager:
         self._save_registry()
         return record
 
-    def remove_from_registry(self, book_id: str) -> None:
+    def remove_from_registry(self, book_id: str, delete_files: bool = False) -> dict:
         """
-        Remove a book from the registry. Does NOT delete the database files.
-        Locks the session first if it is open.
+        Remove a book from the registry. Locks the session first if it is open.
+
+        By default the encrypted files are LEFT on disk (a book is a 7-year legal
+        archive — forgetting it from the list is reversible by re-opening the file).
+        Pass `delete_files=True` to ALSO permanently delete everything bound to the
+        book: the `.db`, its `.key` envelope, any SQLite `-wal`/`-shm` sidecars, and
+        the `<db>.photos/` directory of encrypted receipts/logos. This is irreversible.
+
+        Returns a summary dict including the list of deleted paths (if any).
         """
+        record = self._registry.get(book_id)
+        if record is None:
+            raise KeyError(f"No book {book_id}")
         self.lock_book(book_id)
         self._sessions.pop(book_id, None)
+
+        deleted: list[str] = []
+        if delete_files:
+            from backend.db import bundle  # local import avoids a circular dependency
+            db_path = Path(record.db_path)
+            targets = [db_path, Path(record.key_path),
+                       Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")]
+            for f in targets:
+                if f.exists():
+                    f.unlink()
+                    deleted.append(str(f))
+            photos = bundle._photos_dir(db_path)
+            if photos.exists():
+                import shutil
+                shutil.rmtree(photos)
+                deleted.append(str(photos))
+
         self._registry.pop(book_id, None)
         self._save_registry()
+        return {"book_id": book_id, "files_deleted": delete_files, "deleted_paths": deleted}
 
     def rename_book(self, book_id: str, new_name: str) -> None:
         """Update the display name of a registered book."""

@@ -147,8 +147,9 @@ def _build_router():
         return fac(request).h_rename({"book_id": book_id}, body.model_dump(), {})
 
     @r.delete("/books/{book_id}")
-    def remove(book_id: str, request: Request):
-        return fac(request).h_remove({"book_id": book_id}, {}, {})
+    def remove(book_id: str, request: Request, delete_files: bool = False):
+        return fac(request).h_remove(
+            {"book_id": book_id}, {}, {"delete_files": delete_files})
 
     @r.post("/books/{book_id}/export")
     def export_book(book_id: str, body: sc.ExportReq, request: Request):

@@ -176,6 +176,42 @@ async function newBookFlow() {
   toast("Bok skapad och öppnad");
 }
 
+async function removeBookFlow(b) {
+  // Step 1: choose how far the removal goes. Default is the safe option.
+  const f = await modal(`Ta bort "${b.display_name}"`, [
+    { name: "mode", label: "Vad vill du göra?", type: "select", value: "forget",
+      options: [
+        { value: "forget", label: "Ta bort ur listan (behåll filerna)" },
+        { value: "purge", label: "Radera alla filer permanent (kan inte ångras)" },
+      ] },
+  ], "Fortsätt");
+  if (!f) return;
+
+  let deleteFiles = false;
+  if (f.mode === "purge") {
+    // Step 2: irreversible — require typing the book's name to confirm.
+    const c = await modal(
+      `Radera ALLT för "${b.display_name}"? Databasen, nyckeln och alla kvitton/foton `
+      + `raderas permanent och kan inte återställas.`,
+      [{ name: "confirm", label: `Skriv bokens namn (${b.display_name}) för att bekräfta` }],
+      "Radera permanent");
+    if (!c) return;
+    if ((c.confirm || "").trim() !== b.display_name) {
+      toast("Namnet stämmer inte — avbröt", true);
+      return;
+    }
+    deleteFiles = true;
+  }
+
+  const res = await api("DELETE", `/books/${b.id}${deleteFiles ? "?delete_files=true" : ""}`);
+  if (state.activeBook && state.activeBook.id === b.id) state.activeBook = null;
+  await loadBooks();
+  renderWorkspace();
+  toast(deleteFiles
+    ? `"${b.display_name}" raderad (${(res.deleted_paths || []).length} filer)`
+    : `"${b.display_name}" borttagen ur listan`);
+}
+
 async function openBook(b) {
   // Try a no-op call to see if it is already unlocked; otherwise prompt.
   try {
@@ -223,6 +259,8 @@ function renderHome() {
             el("h4", {}, b.display_name),
             el("p", { class: "muted" }, b.last_opened ? ("Senast: " + b.last_opened.slice(0, 10)) : "Aldrig öppnad"),
             el("button", { class: "btn small", onclick: () => guard(() => openBook(b)) }, "Öppna"),
+            el("button", { class: "btn small ghost danger", style: "margin-left:6px",
+              onclick: () => guard(() => removeBookFlow(b)) }, "Ta bort"),
           ))),
   ));
 }

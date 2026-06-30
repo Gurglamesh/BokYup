@@ -77,6 +77,26 @@ class TestBooksLifecycle:
         names = [b["display_name"] for b in client.get("/books").json()]
         assert "Renamed AB" in names
 
+    def test_remove_keeps_files_by_default(self, client, tmp_path):
+        db = tmp_path / "keep.db"
+        bid = client.post("/books", json={"display_name": "Keep", "db_path": str(db),
+                                          "passphrase": "pw"}).json()["id"]
+        resp = client.delete(f"/books/{bid}")
+        assert resp.status_code == 200 and resp.json()["files_deleted"] is False
+        assert client.get("/books").json() == [] or all(
+            b["id"] != bid for b in client.get("/books").json())
+        assert db.exists() and (tmp_path / "keep.db.key").exists()   # files untouched
+
+    def test_remove_with_delete_files_purges(self, client, tmp_path):
+        from pathlib import Path
+        db = tmp_path / "purge.db"
+        bid = client.post("/books", json={"display_name": "Purge", "db_path": str(db),
+                                          "passphrase": "pw"}).json()["id"]
+        resp = client.delete(f"/books/{bid}?delete_files=true")
+        assert resp.status_code == 200 and resp.json()["files_deleted"] is True
+        assert not db.exists() and not Path(str(db) + ".key").exists()
+        assert all(b["id"] != bid for b in client.get("/books").json())
+
 
 # ---------------------------------------------------------------------------
 # Auto-lock

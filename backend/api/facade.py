@@ -154,8 +154,13 @@ class AppFacade:
         return {"book_id": p["book_id"], "display_name": b["display_name"]}
 
     def h_remove(self, p, b, q):
-        self.manager.remove_from_registry(p["book_id"])
-        return {"book_id": p["book_id"], "removed": True}
+        # delete_files may arrive as a query param (?delete_files=true) or in the body.
+        flag = q.get("delete_files") if q else None
+        if flag is None:
+            flag = (b or {}).get("delete_files")
+        delete_files = str(flag).lower() in ("1", "true", "yes") if flag is not None else False
+        res = self.manager.remove_from_registry(p["book_id"], delete_files=delete_files)
+        return {"book_id": p["book_id"], "removed": True, **res}
 
     def h_export_book(self, p, b, q):
         out = self.manager.export_book(p["book_id"], b["out_path"])
