@@ -384,16 +384,26 @@ class BookOps:
             raise ValueError("Varje mottagare behöver för- och efternamn")
         if not pnr or not S.is_valid_personnummer(pnr):
             raise ValueError("Mottagare har ogiltigt personnummer")
-        share = r.get("share_pct")
-        if share is None:
-            share = 100 if single else None
-        if share is None:
-            raise ValueError("Ange andel (%) för varje mottagare")
-        share_centi = int(round(float(share) * 100))
-        if share_centi <= 0:
-            raise ValueError("Andelen måste vara större än 0 %")
+        # Separate RUT and ROT shares; `share_pct` is the shared fallback for both
+        # (and the default 100 % for a single recipient).
+        base = r.get("share_pct")
+        if base is None and single:
+            base = 100
+        # A present-but-None key (e.g. from Pydantic) must fall back to `base`, so
+        # coalesce explicitly rather than relying on dict.get's default.
+        rut_share = r.get("rut_share_pct")
+        rot_share = r.get("rot_share_pct")
+        if rut_share is None:
+            rut_share = base
+        if rot_share is None:
+            rot_share = base
+        centi = lambda v: int(round(float(v) * 100)) if v is not None else 0
+        rut_centi, rot_centi = centi(rut_share), centi(rot_share)
+        if rut_centi <= 0 and rot_centi <= 0:
+            raise ValueError("Ange en andel (%) större än 0 för varje mottagare")
         return {"customer_id": cid, "first_name": first, "last_name": last,
-                "personnummer": S.normalize_personnummer(pnr), "share_pct_centi": share_centi}
+                "personnummer": S.normalize_personnummer(pnr),
+                "rut_share_centi": rut_centi, "rot_share_centi": rot_centi}
 
     def _save_recipient_customer(self, rc: dict, invoice_customer_id: int) -> None:
         """Persist personnummer onto the recipient's customer (if missing) and ensure a
@@ -616,6 +626,26 @@ class BookOps:
             "over_cap": used > cap,
             # warn when within 10 % of the cap (CLAUDE.md: warn as customer approaches)
             "near_cap": used >= cap * 0.9,
+        }
+
+    def husavdrag_cap_status(self, customer_id: int, year: int) -> dict:
+        """Per-recipient RUT+ROT skattereduktion used in `year` vs the per-person cap.
+
+        Sums this customer's RUT and ROT amounts across the year's (non-cancelled)
+        invoice recipients — the per-person view that matters for the combined
+        75 000 kr/person/year cap. (Plain non-invoice RUT incomes are tracked
+        separately by rut_cap_status on the income customer.)"""
+        cap = int(self._config("rut_rot_cap_ore_per_customer_year"))
+        used = self.conn.execute(
+            "SELECT COALESCE(SUM(rr.rut_amount_ore + rr.rot_amount_ore), 0) "
+            "FROM rut_recipient rr JOIN invoice i ON i.id = rr.invoice_id "
+            "WHERE rr.customer_id=? AND substr(i.invoice_date,1,4)=? AND i.cancelled_at IS NULL",
+            (customer_id, str(year))).fetchone()[0]
+        remaining = cap - used
+        return {
+            "customer_id": customer_id, "year": year,
+            "cap_ore": cap, "used_ore": used, "remaining_ore": remaining,
+            "over_cap": used > cap, "near_cap": used >= cap * 0.9,
         }
 
     # ==================================================================
@@ -930,15 +960,21 @@ class BookOps:
                 raise ValueError("RUT/ROT-mottagare gäller endast privatpersoner")
             resolved = [self._resolve_recipient(r, customer_id, single=len(recipients) == 1)
                         for r in recipients]
-            total_pct = sum(rc["share_pct_centi"] for rc in resolved)
-            if total_pct > 10000:
-                raise ValueError("Mottagarnas andelar överstiger 100 %")
-            cum = 0
+            # Each pot is split by its OWN share sequence (RUT and ROT may differ per
+            # person); cumulative rounding keeps each pot öre-exact. Validate the share
+            # sum only for a pot that actually carries money.
+            if rut_pot and sum(rc["rut_share_centi"] for rc in resolved) > 10000:
+                raise ValueError("RUT-andelarna överstiger 100 %")
+            if rot_pot and sum(rc["rot_share_centi"] for rc in resolved) > 10000:
+                raise ValueError("ROT-andelarna överstiger 100 %")
+            cum_rut = cum_rot = 0
             for rc in resolved:
-                before, after = cum, cum + rc["share_pct_centi"]
-                rut_amt = round(rut_pot * after / 10000) - round(rut_pot * before / 10000)
-                rot_amt = round(rot_pot * after / 10000) - round(rot_pot * before / 10000)
-                cum = after
+                br, ar = cum_rut, cum_rut + rc["rut_share_centi"]
+                cum_rut = ar
+                rut_amt = round(rut_pot * ar / 10000) - round(rut_pot * br / 10000)
+                bo, ao = cum_rot, cum_rot + rc["rot_share_centi"]
+                cum_rot = ao
+                rot_amt = round(rot_pot * ao / 10000) - round(rot_pot * bo / 10000)
                 rut_total += rut_amt
                 rot_total += rot_amt
                 rc["rut_amount_ore"], rc["rot_amount_ore"] = rut_amt, rot_amt
@@ -996,16 +1032,32 @@ class BookOps:
             for r in clean_recipients:
                 self.conn.execute(
                     "INSERT INTO rut_recipient(invoice_id, customer_id, first_name, last_name, "
-                    "personnummer_enc, share_pct_centi, rut_amount_ore, rot_amount_ore) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
+                    "personnummer_enc, share_pct_centi, rot_share_pct_centi, rut_amount_ore, "
+                    "rot_amount_ore) VALUES (?,?,?,?,?,?,?,?,?)",
                     (invoice_id, r["customer_id"], r["first_name"], r["last_name"],
-                     self.session.encrypt_text(r["personnummer"]), r["share_pct_centi"],
-                     r["rut_amount_ore"], r["rot_amount_ore"]))
+                     self.session.encrypt_text(r["personnummer"]), r["rut_share_centi"],
+                     r["rot_share_centi"], r["rut_amount_ore"], r["rot_amount_ore"]))
+
+        # Non-blocking per-recipient annual cap warnings (Skatteverket reduces the
+        # actual payout; we only flag it). Computed AFTER insert so usage includes this
+        # invoice; deduped per recipient customer.
+        cap_warnings = []
+        year = int(invoice_date[:4])
+        for cid in {rc["customer_id"] for rc in clean_recipients if rc["customer_id"]}:
+            status = self.husavdrag_cap_status(cid, year)
+            if status["over_cap"] or status["near_cap"]:
+                cust = self.get_customer(cid)
+                cap_warnings.append({
+                    "customer_id": cid,
+                    "name": f"{cust.get('first_name', '')} {cust.get('last_name', '')}".strip(),
+                    "used_ore": status["used_ore"], "cap_ore": status["cap_ore"],
+                    "over_cap": status["over_cap"],
+                })
 
         return {"invoice_id": invoice_id, "invoice_number": number, "transaktion_id": tid,
                 "ex_moms_ore": ex_total, "moms_ore": moms_total, "inc_moms_ore": inc_total,
                 "rut_total_ore": rut_total, "rot_total_ore": rot_total,
-                "husavdrag_ore": husavdrag}
+                "husavdrag_ore": husavdrag, "cap_warnings": cap_warnings}
 
     def _invoice_balances(self, invoice_id: int) -> dict:
         """
@@ -1100,12 +1152,15 @@ class BookOps:
             "customer_id": r["customer_id"],
             "first_name": r["first_name"], "last_name": r["last_name"],
             "personnummer": self.session.decrypt_text(r["personnummer_enc"]),
-            "share_pct": r["share_pct_centi"] / 100,
+            "share_pct": r["share_pct_centi"] / 100,                    # RUT share (legacy key)
+            "rut_share_pct": r["share_pct_centi"] / 100,
+            "rot_share_pct": (r["rot_share_pct_centi"] if r["rot_share_pct_centi"] is not None
+                              else r["share_pct_centi"]) / 100,
             "rut_amount_ore": r["rut_amount_ore"], "rot_amount_ore": r["rot_amount_ore"],
         } for r in self.conn.execute(
             "SELECT customer_id, first_name, last_name, personnummer_enc, share_pct_centi, "
-            "rut_amount_ore, rot_amount_ore FROM rut_recipient WHERE invoice_id=? ORDER BY id",
-            (invoice_id,)).fetchall()]
+            "rot_share_pct_centi, rut_amount_ore, rot_amount_ore FROM rut_recipient "
+            "WHERE invoice_id=? ORDER BY id", (invoice_id,)).fetchall()]
         return inv
 
     def cancel_invoice(self, invoice_id: int) -> dict:

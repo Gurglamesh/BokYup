@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -340,7 +340,8 @@ CREATE TABLE rut_recipient (
     first_name       TEXT NOT NULL,
     last_name        TEXT NOT NULL,
     personnummer_enc TEXT NOT NULL,
-    share_pct_centi  INTEGER NOT NULL DEFAULT 10000,   -- percent * 100 (100.00 % = 10000)
+    share_pct_centi  INTEGER NOT NULL DEFAULT 10000,   -- RUT share, percent * 100 (100 % = 10000)
+    rot_share_pct_centi INTEGER,                       -- ROT share (NULL = same as RUT share)
     rut_amount_ore   INTEGER NOT NULL DEFAULT 0,       -- this person's share of the RUT pot
     rot_amount_ore   INTEGER NOT NULL DEFAULT 0        -- this person's share of the ROT pot
 );
@@ -582,6 +583,9 @@ _MIGRATIONS: dict[int, str] = {
             CHECK (customer_a < customer_b),
             UNIQUE (customer_a, customer_b)
         );
+    """,
+    11: """
+        ALTER TABLE rut_recipient ADD COLUMN rot_share_pct_centi INTEGER;
     """,
 }
 

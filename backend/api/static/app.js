@@ -1399,9 +1399,11 @@ async function invoiceForm(panel) {
   const recips = recipientsEditor({
     rutPct: redCfg.rut_pct, rotPct: redCfg.rot_pct,
     getLines: () => lines.get(), getInvoiceCustomerId: () => parseInt(customer.value, 10),
+    getYear: () => parseInt((invDate.value || "").slice(0, 4), 10) || new Date().getFullYear(),
   });
   const lines = lineItemsEditor(incomeCats, () => recips.recompute());
   customer.onchange = () => recips.reloadPeople();
+  invDate.onchange = () => recips.refreshCaps();
 
   panel.appendChild(el("div", { class: "row" },
     wrap("Kund", customer), wrap("Standardkategori (BAS, valfri)", cat)));
@@ -1440,6 +1442,10 @@ async function invoiceForm(panel) {
     };
     const res = await api("POST", `/books/${bid()}/invoices`, body);
     toast(`Faktura ${res.invoice_number} skapad`);
+    for (const w of res.cap_warnings || []) {
+      toast(`OBS: ${w.name} ${w.over_cap ? "har överskridit" : "närmar sig"} `
+        + `husavdragstaket i år (${toKr(w.used_ore)}/${toKr(w.cap_ore)} kr)`, true);
+    }
     state.section = "invoices";
     renderWorkspace();
     invoicePdf(res.invoice_id, res.invoice_number);
@@ -1491,10 +1497,11 @@ function lineItemsEditor(incomeCats, onChange) {
 // new person, which creates a customer + household link), enter personnummer + share %,
 // and see each person's RUT/ROT kronor computed live from the article pots.
 function recipientsEditor(opts) {
-  const { rutPct, rotPct, getLines, getInvoiceCustomerId } = opts;
+  const { rutPct, rotPct, getLines, getInvoiceCustomerId, getYear } = opts;
   const rowsBox = el("div", {});
   const potInfo = el("p", { class: "muted" }, "Pott: —");
-  let people = [];   // [{kundnummer, name}]
+  let people = [];                 // [{kundnummer, name}]
+  const capCache = new Map();      // `${cid}:${year}` -> cap status
 
   function peopleOptions(selected) {
     const opts = [el("option", { value: "" }, "— välj person —"),
@@ -1504,38 +1511,76 @@ function recipientsEditor(opts) {
     return sel;
   }
 
+  function onWhoChange(row) {
+    return () => { recompute(); refreshCaps(); };
+  }
+
   function addRow(presetId) {
     const who = peopleOptions(presetId);
     const pnr = el("input", { type: "text", placeholder: "ÅÅMMDD-XXXX", style: "width:120px" });
-    const share = el("input", { type: "text", value: "100", style: "width:60px", oninput: recompute });
+    const rutShare = el("input", { type: "text", value: "100", style: "width:56px", oninput: recompute });
+    const rotShare = el("input", { type: "text", value: "100", style: "width:56px", oninput: recompute });
     const out = el("span", { class: "muted", style: "align-self:center" }, "—");
-    who.onchange = recompute;
+    const cap = el("span", { class: "muted", style: "align-self:center;font-size:12px" }, "");
     const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end" },
-      wrap("Person", who), wrap("Personnummer", pnr), wrap("Andel %", share),
-      wrap("Belopp", out),
+      wrap("Person", who), wrap("Personnummer", pnr),
+      wrap("RUT %", rutShare), wrap("ROT %", rotShare), wrap("Belopp", out), wrap("Tak", cap),
       el("button", { class: "btn small ghost", onclick: (e) => { e.target.closest(".row").remove(); recompute(); } }, "✕"));
-    row._who = who; row._pnr = pnr; row._share = share; row._out = out;
+    row._who = who; row._pnr = pnr; row._rut = rutShare; row._rot = rotShare; row._out = out; row._cap = cap;
+    who.onchange = onWhoChange(row);
     rowsBox.appendChild(row);
-    recompute();
+    recompute(); refreshCaps();
+  }
+
+  function rowAmount(row, pots) {
+    const rp = parseFloat((row._rut.value || "0").replace(",", ".")) || 0;
+    const op = parseFloat((row._rot.value || "0").replace(",", ".")) || 0;
+    return { rut: Math.round(pots.rut * rp / 100), rot: Math.round(pots.rot * op / 100) };
   }
 
   function recompute() {
     const pots = potsFromLines(getLines ? getLines() : [], rutPct, rotPct);
     potInfo.textContent = `Pott — RUT: ${toKr(pots.rut)} kr, ROT: ${toKr(pots.rot)} kr`;
     for (const row of rowsBox.children) {
-      const pct = parseFloat((row._share.value || "0").replace(",", ".")) || 0;
-      const rut = Math.round(pots.rut * pct / 100);
-      const rot = Math.round(pots.rot * pct / 100);
+      const a = rowAmount(row, pots);
       const parts = [];
-      if (pots.rut) parts.push(`RUT ${toKr(rut)}`);
-      if (pots.rot) parts.push(`ROT ${toKr(rot)}`);
+      if (pots.rut) parts.push(`RUT ${toKr(a.rut)}`);
+      if (pots.rot) parts.push(`ROT ${toKr(a.rot)}`);
       row._out.textContent = parts.length ? parts.join(" · ") + " kr" : "—";
+      updateCapNote(row, a.rut + a.rot);
     }
+  }
+
+  // Per-recipient annual cap note: "Använt i år X / 75 000 — kvar Y", red if this
+  // invoice's amount would exceed the remaining.
+  function updateCapNote(row, thisAmount) {
+    const cid = row._who.value;
+    const year = getYear ? getYear() : new Date().getFullYear();
+    const st = capCache.get(`${cid}:${year}`);
+    if (!cid || !st) { row._cap.textContent = ""; return; }
+    const over = thisAmount > st.remaining_ore || st.over_cap;
+    row._cap.textContent = `kvar ${toKr(st.remaining_ore)} kr`;
+    row._cap.style.color = over ? "var(--danger)" : "";
+    row._cap.title = `Använt i år: ${toKr(st.used_ore)} / ${toKr(st.cap_ore)} kr`;
+  }
+
+  async function refreshCaps() {
+    const year = getYear ? getYear() : new Date().getFullYear();
+    const ids = [...new Set([...rowsBox.children].map((r) => r._who.value).filter(Boolean))];
+    for (const cid of ids) {
+      const key = `${cid}:${year}`;
+      if (!capCache.has(key)) {
+        try { capCache.set(key, await api("GET", `/books/${bid()}/customers/${cid}/husavdrag-cap/${year}`)); }
+        catch (e) { /* ignore */ }
+      }
+    }
+    recompute();
   }
 
   async function reloadPeople() {
     const cid = getInvoiceCustomerId();
     people = [];
+    capCache.clear();
     if (cid) {
       try {
         const me = await api("GET", `/books/${bid()}/customers/${cid}`);
@@ -1552,11 +1597,11 @@ function recipientsEditor(opts) {
     for (const row of rowsBox.children) {
       const prev = row._who.value;
       const fresh = peopleOptions(prev);
-      fresh.onchange = recompute;
+      fresh.onchange = onWhoChange(row);
       row._who.replaceWith(fresh);
       row._who = fresh;
     }
-    recompute();
+    refreshCaps();
   }
 
   async function addNewPerson() {
@@ -1584,11 +1629,12 @@ function recipientsEditor(opts) {
       onclick: () => guard(addNewPerson) }, "+ Ny person"));
 
   return {
-    element, reloadPeople, recompute,
+    element, reloadPeople, recompute, refreshCaps,
     get: () => [...rowsBox.children].map((row) => ({
       customer_id: row._who.value ? parseInt(row._who.value, 10) : null,
       personnummer: row._pnr.value.trim() || null,
-      share_pct: parseFloat((row._share.value || "0").replace(",", ".")) || 0,
+      rut_share_pct: parseFloat((row._rut.value || "0").replace(",", ".")) || 0,
+      rot_share_pct: parseFloat((row._rot.value || "0").replace(",", ".")) || 0,
     })).filter((r) => r.customer_id || r.personnummer),
   };
 }

@@ -263,6 +263,10 @@ class AppFacade:
         rut, rot = self._ops(p["book_id"]).reduction_pcts()
         return {"rut_pct": rut, "rot_pct": rot}
 
+    def h_husavdrag_cap(self, p, b, q):
+        return self._ops(p["book_id"]).husavdrag_cap_status(
+            int(p["kundnummer"]), int(p["year"]))
+
     # ---- reference: suppliers ----
     def h_list_suppliers(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -527,6 +531,7 @@ _route("DELETE", "/books/{book_id}/categories/{category_id}", "h_delete_category
 
 _route("GET", "/books/{book_id}/customers", "h_list_customers")
 _route("GET", "/books/{book_id}/customers/{kundnummer}/rut-cap/{year}", "h_rut_cap")
+_route("GET", "/books/{book_id}/customers/{kundnummer}/husavdrag-cap/{year}", "h_husavdrag_cap")
 _route("GET", "/books/{book_id}/customers/{kundnummer}/relations", "h_list_customer_relations")
 _route("POST", "/books/{book_id}/customers/{kundnummer}/relations", "h_link_customer", 201)
 _route("DELETE", "/books/{book_id}/customers/{kundnummer}/relations/{other_kundnummer}", "h_unlink_customer")

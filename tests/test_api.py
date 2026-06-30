@@ -501,6 +501,22 @@ class TestInvoices:
         assert client.delete(f"/books/{book}/customers/{kid}/relations/{bjorn}").status_code == 200
         assert client.get(f"/books/{book}/customers/{kid}/relations").json() == []
 
+    def test_separate_shares_and_cap_endpoint(self, client, book):
+        cat, kid = self._setup(client, book)
+        member = client.post(f"/books/{book}/customers", json={
+            "type": "private", "first_name": "Mem", "last_name": "M"}).json()["kundnummer"]
+        # big RUT line pushes the member over the 75 000 kr cap; ROT share differs
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 20000000,
+                       "rate_code": "25", "reduction_type": "rut"}],
+            "recipients": [{"customer_id": member, "personnummer": "19811218-9876",
+                            "rut_share_pct": 100, "rot_share_pct": 0}]}).json()
+        assert any(w["over_cap"] for w in inv["cap_warnings"])
+        cap = client.get(f"/books/{book}/customers/{member}/husavdrag-cap/2026").json()
+        assert cap["used_ore"] == 12500000 and cap["over_cap"] is True
+
     def test_invoice_pdf_download(self, client, book):
         cat, kid = self._setup(client, book)
         inv = client.post(f"/books/{book}/invoices", json={
