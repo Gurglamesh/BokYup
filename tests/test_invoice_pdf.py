@@ -70,10 +70,27 @@ def test_render_rut_household_split(ops):
     inv = ops.create_invoice(
         customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
         lines=[{"description": "Hemstädning", "quantity_centi": 100, "unit_price_ore": 1000000,
-                "rate_code": "25", "rut_eligible": True}],
+                "rate_code": "25", "reduction_type": "rut"}],
         recipients=[{"first_name": "Anna", "last_name": "Svensson",
-                     "personnummer": "811218-9876", "rut_amount_ore": 150000},
+                     "personnummer": "811218-9876", "share_pct": 60},
                     {"first_name": "Björn", "last_name": "Svensson",
-                     "personnummer": "19811218-9876", "rut_amount_ore": 100000}])
+                     "personnummer": "19811218-9876", "share_pct": 40}])
+    pdf = render_invoice_pdf(ops.get_invoice(inv["invoice_id"]))
+    assert pdf[:4] == b"%PDF" and len(pdf) > 800
+
+
+def test_render_rot_reduction(ops):
+    ops.set_company(name="Bygg AB", org_nr="556677-8899")
+    cat = ops.create_category("Snickeri", "income", 3001)
+    kid = ops.create_customer("private", first_name="Per", last_name="Berg",
+                              personnummer="811218-9876")
+    inv = ops.create_invoice(
+        customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+        lines=[{"description": "Snickeriarbete", "quantity_centi": 100, "unit_price_ore": 1000000,
+                "rate_code": "25", "reduction_type": "rot"}],
+        recipients=[{"first_name": "Per", "last_name": "Berg",
+                     "personnummer": "811218-9876", "share_pct": 100}])
+    # ROT 30% incl moms on 1 250 000 = 375 000
+    assert inv["rot_total_ore"] == 375000
     pdf = render_invoice_pdf(ops.get_invoice(inv["invoice_id"]))
     assert pdf[:4] == b"%PDF" and len(pdf) > 800

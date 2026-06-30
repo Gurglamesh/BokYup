@@ -100,15 +100,29 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
 - Moms states (not just on/off): **25% / 12% / 6% / 0% / momsfri / ej avdragsgill**.
 - Per company/supplier: editable default moms rate (defaults to 25% before editing).
 
-## RUT (private customers only)
+## RUT / ROT (husavdrag — private customers only)
 
 - Lifecycle state machine: **pending → customer paid → Skatteverket paid**.
-  RUT fields/buttons only appear for income flagged with a RUT amount.
+  RUT/ROT fields/buttons only appear for income carrying a husavdrag amount.
 - Track the date Skatteverket pays separately from the customer payment date
   (they land in different months in the books).
 - RUT cap is per customer per year and shared with ROT — make the cap a CONFIG value,
   not hardcoded (rules change). Warn as a customer approaches the cap.
-- RUT requires the customer's personnummer (so storing it is necessary & legitimate).
+- RUT/ROT requires the customer's personnummer (so storing it is necessary & legitimate).
+- **Per-line RUT/ROT + household split (2026-06, schema v10).** Each invoice article
+  line is marked `reduction_type` = RUT / ROT / none; the eligible lines' **labour cost
+  INCL moms × the config percentage** (`rut_reduction_pct` 50 %, `rot_reduction_pct`
+  30 %) form **two separate pots** (the whole eligible line counts as labour — material
+  goes on its own non-eligible lines). **Recipients** are household members who split
+  each pot by a **share %** (cumulative öre-exact rounding); per-person RUT and ROT
+  amounts are frozen on the invoice (`rut_recipient.rut_amount_ore`/`rot_amount_ore`/
+  `share_pct_centi`). A recipient is a **customer** (`rut_recipient.customer_id`) linked
+  to the invoice customer via a symmetric **`customer_relation`** (household) — auto-
+  created on invoice issue, manageable in the Kunder tab, and the recipient's
+  personnummer is saved onto their customer record. The booking treats
+  `husavdrag = rut_total + rot_total` as the 1513 receivable (customer pays
+  inc − husavdrag); the RUT/ROT lifecycle (register_payment + Skatteverket) is unchanged.
+  Customers need only first+last name; personnummer is added when used as a recipient.
 
 ## Customers
 
@@ -294,7 +308,20 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       shows Aktiv/Inaktiv status with Ändra / Inaktivera / Ta bort (delete only when
       unused); editing a *used* konto no longer lets its BAS number change (it would
       retroactively remap booked entries in the reports). Remove-book button also added
-      (forget vs. permanent file deletion). All tests pass (247).
+      (forget-from-list vs. permanent file deletion behind a typed confirmation;
+      `DELETE /books/{id}?delete_files=`).
+- [x] **Per-line RUT/ROT + household recipients** (schema v10, 2026-06). Each invoice
+      line is marked RUT/ROT/none; eligible lines' labour-incl-moms × config pct
+      (`rut_reduction_pct` 50, `rot_reduction_pct` 30) form two separate pots that
+      recipients split by share % (öre-exact). Recipients are customers linked via a
+      symmetric `customer_relation` (household) — auto-linked on issue, managed in the
+      Kunder tab ("Hushåll"), personnummer saved onto the member. `rut_recipient` gained
+      `customer_id`/`share_pct_centi`/`rot_amount_ore`; `invoice.rot_total_ore`,
+      `invoice_line.reduction_type`. Booking uses husavdrag = rut+rot on 1513. PDF shows
+      RUT+ROT pots, per-recipient RUT/ROT boxes, RUT/ROT-tagged lines. API:
+      `/customers/{id}/relations` (link/list/unlink), `/reduction-config`. UI: per-line
+      RUT/ROT selector + recipient editor with the invoice customer / linked members /
+      "+ Ny person", live per-recipient kr from the pots. All tests pass (249).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

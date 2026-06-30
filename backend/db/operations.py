@@ -328,6 +328,83 @@ class BookOps:
         d["personnummer"] = self.session.decrypt_text(enc) if enc else None
         return d
 
+    # ---- household relations (symmetric customer links, for RUT/ROT) ----------
+
+    def link_customers(self, a: int, b: int) -> dict:
+        """Create a symmetric household link between two customers (idempotent)."""
+        a, b = int(a), int(b)
+        if a == b:
+            raise ValueError("Kan inte koppla en kund till sig själv")
+        for k in (a, b):
+            if self.conn.execute("SELECT 1 FROM customer WHERE kundnummer=?", (k,)).fetchone() is None:
+                raise KeyError(f"No customer {k}")
+        lo, hi = (a, b) if a < b else (b, a)
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO customer_relation(customer_a, customer_b, created_at) "
+                "VALUES (?,?,?)", (lo, hi, _now()))
+        return {"customer_a": lo, "customer_b": hi}
+
+    def unlink_customers(self, a: int, b: int) -> None:
+        a, b = int(a), int(b)
+        lo, hi = (a, b) if a < b else (b, a)
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM customer_relation WHERE customer_a=? AND customer_b=?", (lo, hi))
+
+    def list_related_customers(self, kundnummer: int) -> list[dict]:
+        """Customers linked to `kundnummer` (household members), name + kundnummer."""
+        rows = self.conn.execute(
+            "SELECT c.kundnummer, c.type, c.first_name, c.last_name, c.company_name "
+            "FROM customer_relation r "
+            "JOIN customer c ON c.kundnummer = CASE WHEN r.customer_a=? THEN r.customer_b "
+            "ELSE r.customer_a END "
+            "WHERE r.customer_a=? OR r.customer_b=? ORDER BY c.kundnummer",
+            (kundnummer, kundnummer, kundnummer)).fetchall()
+        return [dict(r) for r in rows]
+
+    def reduction_pcts(self) -> tuple[int, int]:
+        """(rut_pct, rot_pct) skattereduktion percentages from config."""
+        return int(self._config("rut_reduction_pct")), int(self._config("rot_reduction_pct"))
+
+    def _resolve_recipient(self, r: dict, invoice_customer_id: int, single: bool) -> dict:
+        """Normalise a recipient: resolve its linked customer + name + personnummer and
+        its share percentage (centi). Personnummer may come from the request or the
+        linked customer record."""
+        cid = r.get("customer_id")
+        pnr = r.get("personnummer")
+        first, last = r.get("first_name"), r.get("last_name")
+        if cid:
+            cust = self.get_customer(int(cid))
+            first = first or cust.get("first_name")
+            last = last or cust.get("last_name")
+            pnr = pnr or cust.get("personnummer")
+            cid = int(cid)
+        if not first or not last:
+            raise ValueError("Varje mottagare behöver för- och efternamn")
+        if not pnr or not S.is_valid_personnummer(pnr):
+            raise ValueError("Mottagare har ogiltigt personnummer")
+        share = r.get("share_pct")
+        if share is None:
+            share = 100 if single else None
+        if share is None:
+            raise ValueError("Ange andel (%) för varje mottagare")
+        share_centi = int(round(float(share) * 100))
+        if share_centi <= 0:
+            raise ValueError("Andelen måste vara större än 0 %")
+        return {"customer_id": cid, "first_name": first, "last_name": last,
+                "personnummer": S.normalize_personnummer(pnr), "share_pct_centi": share_centi}
+
+    def _save_recipient_customer(self, rc: dict, invoice_customer_id: int) -> None:
+        """Persist personnummer onto the recipient's customer (if missing) and ensure a
+        household link to the invoice customer."""
+        cid = rc["customer_id"]
+        cust = self.get_customer(cid)
+        if not cust.get("personnummer"):
+            self.update_customer(cid, personnummer=rc["personnummer"])
+        if cid != int(invoice_customer_id):
+            self.link_customers(invoice_customer_id, cid)
+
     def create_supplier(self, name: str, default_moms_rate: str = S.DEFAULT_MOMS_RATE,
                         org_nr: Optional[str] = None, address: Optional[str] = None) -> int:
         if default_moms_rate not in S.MOMS_RATES:
@@ -810,11 +887,18 @@ class BookOps:
             unit_price_ore = int(ln["unit_price_ore"])
             ex = round(qty_centi * unit_price_ore / 100)
             _, moms, _ = compute_moms_figures(ex, rate_code, inclusive=False)
+            # reduction_type: 'rut' | 'rot' | None (back-compat: a bare rut_eligible
+            # flag from older callers means RUT).
+            reduction_type = ln.get("reduction_type")
+            if reduction_type is None and ln.get("rut_eligible"):
+                reduction_type = "rut"
+            if reduction_type not in (None, "rut", "rot"):
+                raise ValueError(f"Unknown reduction_type {reduction_type!r}")
             computed.append({
                 "line_no": i, "description": ln["description"], "category_id": line_cat,
                 "quantity_centi": qty_centi, "unit": ln.get("unit"),
                 "unit_price_ore": unit_price_ore, "rate_code": rate_code,
-                "rut_eligible": 1 if ln.get("rut_eligible") else 0,
+                "reduction_type": reduction_type, "rut_eligible": 1 if reduction_type else 0,
                 "ex_moms_ore": ex, "moms_ore": moms,
             })
             agg[(line_cat, rate_code)] = agg.get((line_cat, rate_code), 0) + ex
@@ -824,37 +908,67 @@ class BookOps:
         # since per-line category_id on the moms_lines drives the actual income split).
         fallback_category = category_id or computed[0]["category_id"]
 
-        # 2) RUT recipients (household split) — validate name + personnummer.
-        rut_total = 0
-        clean_recipients = []
-        for r in recipients:
-            if not r.get("first_name") or not r.get("last_name"):
-                raise ValueError("Each RUT recipient needs a first and last name")
-            if not S.is_valid_personnummer(r["personnummer"]):
-                raise ValueError("RUT recipient has an invalid personnummer")
-            amount = int(r["rut_amount_ore"])
-            rut_total += amount
-            clean_recipients.append({
-                "first_name": r["first_name"], "last_name": r["last_name"],
-                "personnummer": S.normalize_personnummer(r["personnummer"]),
-                "rut_amount_ore": amount,
-            })
+        # 2) RUT/ROT pots from the eligible lines: skattereduktion = labour cost INCL
+        #    moms × the config percentage (RUT 50 %, ROT 30 %). The whole eligible line
+        #    counts as labour (material goes on its own non-eligible lines).
+        rut_pct, rot_pct = self.reduction_pcts()
+        rut_pot = sum(round((cl["ex_moms_ore"] + cl["moms_ore"]) * rut_pct / 100)
+                      for cl in computed if cl["reduction_type"] == "rut")
+        rot_pot = sum(round((cl["ex_moms_ore"] + cl["moms_ore"]) * rot_pct / 100)
+                      for cl in computed if cl["reduction_type"] == "rot")
+        has_reduction = bool(rut_pot or rot_pot)
+        if has_reduction and customer["type"] != "private":
+            raise ValueError("RUT/ROT gäller endast privatpersoner")
 
-        # 3) Underlying pending income (snapshot + moms_lines + rut_claim + reports).
+        # 3) Recipients split each pot by their share %. Cumulative rounding keeps the
+        #    per-person amounts öre-exact against the pot. Recipient customers get the
+        #    personnummer saved and a household link to the invoice customer.
+        rut_total = rot_total = 0
+        clean_recipients = []
+        if recipients:
+            if customer["type"] != "private":
+                raise ValueError("RUT/ROT-mottagare gäller endast privatpersoner")
+            resolved = [self._resolve_recipient(r, customer_id, single=len(recipients) == 1)
+                        for r in recipients]
+            total_pct = sum(rc["share_pct_centi"] for rc in resolved)
+            if total_pct > 10000:
+                raise ValueError("Mottagarnas andelar överstiger 100 %")
+            cum = 0
+            for rc in resolved:
+                before, after = cum, cum + rc["share_pct_centi"]
+                rut_amt = round(rut_pot * after / 10000) - round(rut_pot * before / 10000)
+                rot_amt = round(rot_pot * after / 10000) - round(rot_pot * before / 10000)
+                cum = after
+                rut_total += rut_amt
+                rot_total += rot_amt
+                rc["rut_amount_ore"], rc["rot_amount_ore"] = rut_amt, rot_amt
+                clean_recipients.append(rc)
+            # Persist the recipient↔customer household links + personnummer (own txns).
+            for rc in clean_recipients:
+                if rc["customer_id"]:
+                    self._save_recipient_customer(rc, customer_id)
+        elif has_reduction:
+            raise ValueError("RUT/ROT-rader kräver minst en mottagare")
+
+        husavdrag = rut_total + rot_total       # total receivable from Skatteverket (1513)
+
+        # 4) Underlying pending income (snapshot + moms_lines + rut_claim + reports).
         income = self.record_income(customer_id, fallback_category, moms_lines, invoice_date,
-                                    rut_amount_ore=rut_total, note=note)
+                                    rut_amount_ore=husavdrag, note=note)
         tid = income["transaktion_id"]
         ex_total, _, inc_total = self._sum_moms(tid)
         moms_total = inc_total - ex_total
 
-        # 3b) Fakturametod: book the invoice NOW (kundfordran/income/moms at issue).
+        # 4b) Fakturametod: book the invoice NOW (kundfordran/income/moms at issue).
         # The transaktion's verifikation becomes this issue posting, so the moms is
         # reported in the invoice's period; payment later only settles the receivable.
         # Kontantmetod leaves it pending (booked when paid + year-end accrual).
         if self.get_accounting_method() == "fakturametod":
-            self._book_invoice_issue(tid, invoice_date, rut_total)
+            self._book_invoice_issue(tid, invoice_date, husavdrag)
 
-        # 4) Frozen snapshots + the sequential invoice number.
+        # 4) Frozen snapshots + the sequential invoice number. Re-fetch the buyer so a
+        # personnummer just saved via a recipient is captured in the snapshot.
+        customer = self.get_customer(customer_id)
         buyer_snapshot_enc = self.session.encrypt_text(json.dumps(customer, default=str))
         seller_snapshot = json.dumps(self.get_company(), default=str)
         pm_snapshot = json.dumps(self.list_payment_methods(active_only=True), default=str)
@@ -865,30 +979,33 @@ class BookOps:
                 "INSERT INTO invoice(invoice_number, customer_id, transaktion_id, invoice_date, "
                 "due_date, delivery_date, payment_terms, buyer_snapshot_enc, seller_snapshot, "
                 "payment_methods_snapshot, our_reference, your_reference, note, ex_moms_ore, "
-                "moms_ore, inc_moms_ore, rut_total_ore, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "moms_ore, inc_moms_ore, rut_total_ore, rot_total_ore, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (number, customer_id, tid, invoice_date, due_date, delivery_date, payment_terms,
                  buyer_snapshot_enc, seller_snapshot, pm_snapshot, our_reference, your_reference,
-                 note, ex_total, moms_total, inc_total, rut_total, _now()))
+                 note, ex_total, moms_total, inc_total, rut_total, rot_total, _now()))
             invoice_id = cur.lastrowid
             for cl in computed:
                 self.conn.execute(
                     "INSERT INTO invoice_line(invoice_id, line_no, description, category_id, "
-                    "quantity_centi, unit, unit_price_ore, rate_code, rut_eligible, ex_moms_ore, "
-                    "moms_ore) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    "quantity_centi, unit, unit_price_ore, rate_code, rut_eligible, reduction_type, "
+                    "ex_moms_ore, moms_ore) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (invoice_id, cl["line_no"], cl["description"], cl["category_id"],
                      cl["quantity_centi"], cl["unit"], cl["unit_price_ore"], cl["rate_code"],
-                     cl["rut_eligible"], cl["ex_moms_ore"], cl["moms_ore"]))
+                     cl["rut_eligible"], cl["reduction_type"], cl["ex_moms_ore"], cl["moms_ore"]))
             for r in clean_recipients:
                 self.conn.execute(
-                    "INSERT INTO rut_recipient(invoice_id, first_name, last_name, "
-                    "personnummer_enc, rut_amount_ore) VALUES (?,?,?,?,?)",
-                    (invoice_id, r["first_name"], r["last_name"],
-                     self.session.encrypt_text(r["personnummer"]), r["rut_amount_ore"]))
+                    "INSERT INTO rut_recipient(invoice_id, customer_id, first_name, last_name, "
+                    "personnummer_enc, share_pct_centi, rut_amount_ore, rot_amount_ore) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (invoice_id, r["customer_id"], r["first_name"], r["last_name"],
+                     self.session.encrypt_text(r["personnummer"]), r["share_pct_centi"],
+                     r["rut_amount_ore"], r["rot_amount_ore"]))
 
         return {"invoice_id": invoice_id, "invoice_number": number, "transaktion_id": tid,
                 "ex_moms_ore": ex_total, "moms_ore": moms_total, "inc_moms_ore": inc_total,
-                "rut_total_ore": rut_total}
+                "rut_total_ore": rut_total, "rot_total_ore": rot_total,
+                "husavdrag_ore": husavdrag}
 
     def _invoice_balances(self, invoice_id: int) -> dict:
         """
@@ -899,8 +1016,8 @@ class BookOps:
         outstanding  = customer_due − paid
         """
         inv = self.conn.execute(
-            "SELECT inc_moms_ore, rut_total_ore, cancelled_at, credited_at, transaktion_id "
-            "FROM invoice WHERE id=?", (invoice_id,)).fetchone()
+            "SELECT inc_moms_ore, rut_total_ore, rot_total_ore, cancelled_at, credited_at, "
+            "transaktion_id FROM invoice WHERE id=?", (invoice_id,)).fetchone()
         ev = {r["kind"]: r["s"] for r in self.conn.execute(
             "SELECT kind, COALESCE(SUM(amount_ore),0) AS s FROM invoice_event "
             "WHERE invoice_id=? GROUP BY kind", (invoice_id,))}
@@ -911,7 +1028,8 @@ class BookOps:
             row = self.conn.execute("SELECT status FROM transaktion WHERE id=?",
                                     (inv["transaktion_id"],)).fetchone()
             tx_status = row["status"] if row else None
-        customer_total = inv["inc_moms_ore"] - inv["rut_total_ore"]
+        husavdrag = inv["rut_total_ore"] + inv["rot_total_ore"]
+        customer_total = inv["inc_moms_ore"] - husavdrag   # what the customer pays
         customer_due = customer_total - credits
         paid = payments - refunds
         # Legacy/RUT path: paid in full via register_payment (no subledger events).
@@ -919,6 +1037,7 @@ class BookOps:
             paid = customer_due
         return {
             "inc_moms_ore": inv["inc_moms_ore"], "rut_total_ore": inv["rut_total_ore"],
+            "rot_total_ore": inv["rot_total_ore"], "husavdrag_ore": husavdrag,
             "customer_total_ore": customer_total, "credited_ore": credits,
             "customer_due_ore": customer_due, "paid_ore": payments - refunds,
             "refunded_ore": refunds,
@@ -941,7 +1060,8 @@ class BookOps:
     def list_invoices(self) -> list[dict]:
         rows = self.conn.execute(
             "SELECT id, invoice_number, invoice_date, due_date, customer_id, transaktion_id, "
-            "inc_moms_ore, rut_total_ore FROM invoice ORDER BY invoice_number").fetchall()
+            "inc_moms_ore, rut_total_ore, rot_total_ore FROM invoice ORDER BY invoice_number"
+            ).fetchall()
         out = []
         for r in rows:
             d = dict(r)
@@ -973,16 +1093,19 @@ class BookOps:
         inv["lines"] = [dict(r) for r in self.conn.execute(
             "SELECT il.line_no, il.description, il.category_id, c.name AS category_name, "
             "c.bas_konto AS category_bas_konto, il.quantity_centi, il.unit, il.unit_price_ore, "
-            "il.rate_code, il.rut_eligible, il.ex_moms_ore, il.moms_ore FROM invoice_line il "
-            "LEFT JOIN category c ON c.id = il.category_id WHERE il.invoice_id=? "
-            "ORDER BY il.line_no", (invoice_id,)).fetchall()]
+            "il.rate_code, il.rut_eligible, il.reduction_type, il.ex_moms_ore, il.moms_ore "
+            "FROM invoice_line il LEFT JOIN category c ON c.id = il.category_id "
+            "WHERE il.invoice_id=? ORDER BY il.line_no", (invoice_id,)).fetchall()]
         inv["recipients"] = [{
+            "customer_id": r["customer_id"],
             "first_name": r["first_name"], "last_name": r["last_name"],
             "personnummer": self.session.decrypt_text(r["personnummer_enc"]),
-            "rut_amount_ore": r["rut_amount_ore"],
+            "share_pct": r["share_pct_centi"] / 100,
+            "rut_amount_ore": r["rut_amount_ore"], "rot_amount_ore": r["rot_amount_ore"],
         } for r in self.conn.execute(
-            "SELECT first_name, last_name, personnummer_enc, rut_amount_ore "
-            "FROM rut_recipient WHERE invoice_id=? ORDER BY id", (invoice_id,)).fetchall()]
+            "SELECT customer_id, first_name, last_name, personnummer_enc, share_pct_centi, "
+            "rut_amount_ore, rot_amount_ore FROM rut_recipient WHERE invoice_id=? ORDER BY id",
+            (invoice_id,)).fetchall()]
         return inv
 
     def cancel_invoice(self, invoice_id: int) -> dict:
@@ -1030,8 +1153,8 @@ class BookOps:
         RUT invoices use the full register_payment + Skatteverket flow instead.
         """
         inv, bal = self._require_open_invoice(invoice_id)
-        if inv["rut_total_ore"]:
-            raise InvalidState("RUT invoices: use the full payment + Skatteverket flow")
+        if inv["rut_total_ore"] or inv["rot_total_ore"]:
+            raise InvalidState("RUT/ROT invoices: use the full payment + Skatteverket flow")
         amount = bal["outstanding_ore"] if amount_ore is None else int(amount_ore)
         if amount <= 0:
             raise ValueError("Payment amount must be > 0")
@@ -1061,8 +1184,8 @@ class BookOps:
                        date: Optional[str] = None, note: Optional[str] = None) -> dict:
         """Pay money back to the customer (full or partial) — the reverse of a payment."""
         inv, bal = self._require_open_invoice(invoice_id)
-        if inv["rut_total_ore"]:
-            raise InvalidState("RUT invoices: refunds not supported via the subledger")
+        if inv["rut_total_ore"] or inv["rot_total_ore"]:
+            raise InvalidState("RUT/ROT invoices: refunds not supported via the subledger")
         amount = int(amount_ore)
         if amount <= 0:
             raise ValueError("Refund amount must be > 0")
@@ -1097,9 +1220,9 @@ class BookOps:
         then pays out. A fully credited invoice is flagged krediterad.
         """
         inv, bal = self._require_open_invoice(invoice_id)
-        if inv["rut_total_ore"]:
-            raise InvalidState("RUT invoices: partial credit not supported; use makulera/full flow")
-        billable = inv["inc_moms_ore"] - inv["rut_total_ore"] - bal["credited_ore"]
+        if inv["rut_total_ore"] or inv["rot_total_ore"]:
+            raise InvalidState("RUT/ROT invoices: partial credit not supported; use makulera/full flow")
+        billable = inv["inc_moms_ore"] - inv["rut_total_ore"] - inv["rot_total_ore"] - bal["credited_ore"]
         amount = billable if amount_ore is None else int(amount_ore)
         if amount <= 0:
             raise ValueError("Credit amount must be > 0")
@@ -1130,7 +1253,8 @@ class BookOps:
             credit_note_number = self._next_invoice_number()
             ev_id = self._record_invoice_event(invoice_id, "credit", amount, date, vid, reason,
                                                credit_note_number)
-            fully = bal["credited_ore"] + amount >= inv["inc_moms_ore"] - inv["rut_total_ore"]
+            fully = (bal["credited_ore"] + amount
+                     >= inv["inc_moms_ore"] - inv["rut_total_ore"] - inv["rot_total_ore"])
             if fully:
                 self.conn.execute(
                     "UPDATE invoice SET credited_at=?, credit_verifikation_id=? WHERE id=?",
@@ -1189,7 +1313,7 @@ class BookOps:
     def _require_open_invoice(self, invoice_id: int) -> tuple:
         inv = self.conn.execute(
             "SELECT id, invoice_number, transaktion_id, inc_moms_ore, rut_total_ore, "
-            "cancelled_at FROM invoice WHERE id=?", (invoice_id,)).fetchone()
+            "rot_total_ore, cancelled_at FROM invoice WHERE id=?", (invoice_id,)).fetchone()
         if inv is None:
             raise KeyError(f"No invoice {invoice_id}")
         if inv["cancelled_at"]:

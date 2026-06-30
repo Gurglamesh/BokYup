@@ -142,7 +142,10 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     pdf.set_font("Helvetica", "", 9)
     for ln in lines:
         qty = f"{_qty(ln['quantity_centi'])} {ln.get('unit') or ''}".strip()
-        cells = [(ln["description"], 0.40, "L"), (qty, 0.10, "R"),
+        desc = ln["description"]
+        if ln.get("reduction_type"):
+            desc += f"  ({ln['reduction_type'].upper()})"     # mark RUT/ROT eligible lines
+        cells = [(desc, 0.40, "L"), (qty, 0.10, "R"),
                  (_kr(ln["unit_price_ore"]), 0.16, "R"),
                  (_RATE_LABEL.get(ln["rate_code"], ln["rate_code"]), 0.12, "R"),
                  (_kr(ln["ex_moms_ore"]), 0.22, "R")]
@@ -166,22 +169,50 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     _kv(pdf, rx, ty, rw, "Summa moms", _kr(invoice["moms_ore"])); ty += 6
     _kv(pdf, rx, ty, rw, "Summa inkl. moms", _kr(invoice["inc_moms_ore"]), bold=True); ty += 8
 
-    # ---- RUT / household tax reduction --------------------------------------
+    # ---- RUT / ROT household tax reduction (two separate pots) ----------------
     rut_total = invoice.get("rut_total_ore", 0)
-    if rut_total:
+    rot_total = invoice.get("rot_total_ore", 0)
+    husavdrag = rut_total + rot_total
+    if husavdrag:
+        title = "Husarbete - skattereduktion"
+        if rut_total and rot_total:
+            title += " (RUT + ROT)"
+        elif rut_total:
+            title += " (RUT)"
+        else:
+            title += " (ROT)"
         pdf.set_font("Helvetica", "B", 10)
-        pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 6, _s("Husarbete (RUT) - skattereduktion"))
+        pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 6, _s(title))
         ty += 7
+        # Column header for the recipient boxes.
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_xy(pdf.l_margin, ty)
+        pdf.cell(W * 0.52, 6, _s("Mottagare (personnr)"), border=1)
+        pdf.cell(W * 0.10, 6, _s("Andel"), border=1, align="R")
+        if rut_total:
+            pdf.cell(W * 0.19, 6, _s("RUT"), border=1, align="R")
+        if rot_total:
+            pdf.cell(W * 0.19, 6, _s("ROT"), border=1, align="R")
+        ty += 6
         pdf.set_font("Helvetica", "", 9)
         for r in recipients:
-            box = (f"{r['first_name']} {r['last_name']}   "
-                   f"Personnr: {r['personnummer']}")
+            box = f"{r['first_name']} {r['last_name']}  ({r['personnummer']})"
+            share = r.get("share_pct")
             pdf.set_xy(pdf.l_margin, ty)
-            pdf.cell(W * 0.70, 7, _s(box), border=1)
-            pdf.cell(W * 0.30, 7, _s(_kr(r["rut_amount_ore"])), border=1, align="R")
+            pdf.cell(W * 0.52, 7, _s(box), border=1)
+            pdf.cell(W * 0.10, 7, _s(f"{share:g} %" if share is not None else ""),
+                     border=1, align="R")
+            if rut_total:
+                pdf.cell(W * 0.19, 7, _s(_kr(r.get("rut_amount_ore", 0))), border=1, align="R")
+            if rot_total:
+                pdf.cell(W * 0.19, 7, _s(_kr(r.get("rot_amount_ore", 0))), border=1, align="R")
             ty += 7
-        _kv(pdf, rx, ty + 2, rw, "Begärd skattereduktion", _kr(rut_total)); ty += 8
-        _kv(pdf, rx, ty, rw, "Att betala", _kr(invoice["inc_moms_ore"] - rut_total), bold=True)
+        ty += 2
+        if rut_total:
+            _kv(pdf, rx, ty, rw, "Begärd skattereduktion RUT", _kr(rut_total)); ty += 6
+        if rot_total:
+            _kv(pdf, rx, ty, rw, "Begärd skattereduktion ROT", _kr(rot_total)); ty += 6
+        _kv(pdf, rx, ty, rw, "Att betala", _kr(invoice["inc_moms_ore"] - husavdrag), bold=True)
         ty += 8
     else:
         pay_label = "Att återfå" if is_credit else "Att betala"

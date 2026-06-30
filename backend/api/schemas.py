@@ -212,14 +212,22 @@ class InvoiceLineReq(BaseModel):
     rate_code: str
     category_id: Optional[int] = None   # income account this line books to
     unit: Optional[str] = None
-    rut_eligible: bool = False
+    reduction_type: Optional[str] = None   # 'rut' | 'rot' | None (husavdrag kind)
+    rut_eligible: bool = False             # back-compat: True == reduction_type 'rut'
 
 
 class RutRecipientReq(BaseModel):
-    first_name: str
-    last_name: str
-    personnummer: str
-    rut_amount_ore: int           # this person's share of the skattereduktion
+    # A recipient is a household member; identify by an existing customer_id and/or
+    # name + personnummer. share_pct is their slice of each RUT/ROT pot.
+    customer_id: Optional[int] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    personnummer: Optional[str] = None
+    share_pct: Optional[float] = None
+
+
+class CustomerRelationReq(BaseModel):
+    other_kundnummer: int         # the customer to link this one to (household)
 
 
 class PayInvoiceReq(BaseModel):

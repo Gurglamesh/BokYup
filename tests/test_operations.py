@@ -503,19 +503,22 @@ class TestInvoices:
 
     def test_rut_split_across_household(self, ops):
         cat, kid = self._setup(ops)
+        # ex 1 000 000 @ 25% -> inc 1 250 000; RUT pot = 50% incl moms = 625 000.
         inv = ops.create_invoice(
             customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
             lines=[{"description": "Städning", "quantity_centi": 100, "unit_price_ore": 1000000,
-                    "rate_code": "25", "rut_eligible": True}],
+                    "rate_code": "25", "reduction_type": "rut"}],
             recipients=[{"first_name": "Anna", "last_name": "Svensson",
-                         "personnummer": "811218-9876", "rut_amount_ore": 150000},
+                         "personnummer": "811218-9876", "share_pct": 60},
                         {"first_name": "Björn", "last_name": "Svensson",
-                         "personnummer": "19811218-9876", "rut_amount_ore": 100000}])
-        assert inv["rut_total_ore"] == 250000
+                         "personnummer": "19811218-9876", "share_pct": 40}])
+        assert inv["rut_total_ore"] == 625000
         got = ops.get_invoice(inv["invoice_id"])
         assert len(got["recipients"]) == 2
         assert got["recipients"][0]["personnummer"] == "8112189876"   # normalized + decrypted
-        assert sum(r["rut_amount_ore"] for r in got["recipients"]) == 250000
+        assert got["recipients"][0]["rut_amount_ore"] == 375000        # 60 %
+        assert got["recipients"][1]["rut_amount_ore"] == 250000        # 40 %
+        assert sum(r["rut_amount_ore"] for r in got["recipients"]) == 625000
 
     def test_invoice_rejects_bad_recipient_personnummer(self, ops):
         cat, kid = self._setup(ops)
@@ -527,6 +530,91 @@ class TestInvoices:
                                recipients=[{"first_name": "A", "last_name": "B",
                                             "personnummer": "811218-9875",  # bad Luhn
                                             "rut_amount_ore": 100}])
+
+    def test_mixed_rut_and_rot_pots(self, ops):
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 1000000,
+                    "rate_code": "25", "reduction_type": "rut"},          # inc 1 250 000 -> RUT 625 000
+                   {"description": "Snickeri", "quantity_centi": 100, "unit_price_ore": 1000000,
+                    "rate_code": "25", "reduction_type": "rot"},          # inc 1 250 000 -> ROT 375 000
+                   {"description": "Material", "quantity_centi": 100, "unit_price_ore": 200000,
+                    "rate_code": "25"}],                                  # no reduction
+            recipients=[{"first_name": "Anna", "last_name": "Svensson",
+                         "personnummer": "811218-9876", "share_pct": 100}])
+        assert inv["rut_total_ore"] == 625000
+        assert inv["rot_total_ore"] == 375000
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["recipients"][0]["rut_amount_ore"] == 625000
+        assert got["recipients"][0]["rot_amount_ore"] == 375000
+        # customer pays inc - husavdrag
+        assert got["customer_total_ore"] == got["inc_moms_ore"] - 1000000
+
+    def test_recipients_required_for_reduction_lines(self, ops):
+        cat, kid = self._setup(ops)
+        with pytest.raises(ValueError):
+            ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                               due_date="2026-03-31",
+                               lines=[{"description": "Städ", "quantity_centi": 100,
+                                       "unit_price_ore": 1000, "rate_code": "25",
+                                       "reduction_type": "rut"}])
+
+    def test_shares_over_100_rejected(self, ops):
+        cat, kid = self._setup(ops)
+        with pytest.raises(ValueError):
+            ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                               due_date="2026-03-31",
+                               lines=[{"description": "Städ", "quantity_centi": 100,
+                                       "unit_price_ore": 1000, "rate_code": "25",
+                                       "reduction_type": "rut"}],
+                               recipients=[{"first_name": "A", "last_name": "B",
+                                            "personnummer": "811218-9876", "share_pct": 60},
+                                           {"first_name": "C", "last_name": "D",
+                                            "personnummer": "19811218-9876", "share_pct": 60}])
+
+
+class TestHouseholdRelations:
+    def _two(self, ops):
+        a = ops.create_customer("private", first_name="A", last_name="B")
+        b = ops.create_customer("private", first_name="C", last_name="D")
+        return a, b
+
+    def test_link_list_unlink(self, ops):
+        a, b = self._two(ops)
+        ops.link_customers(a, b)
+        ops.link_customers(b, a)                       # idempotent, order-independent
+        rel_a = ops.list_related_customers(a)
+        assert [r["kundnummer"] for r in rel_a] == [b]
+        assert ops.list_related_customers(b)[0]["kundnummer"] == a
+        ops.unlink_customers(a, b)
+        assert ops.list_related_customers(a) == []
+
+    def test_cannot_link_self(self, ops):
+        a, _ = self._two(ops)
+        with pytest.raises(ValueError):
+            ops.link_customers(a, a)
+
+    def test_recipient_customer_gets_pnr_and_link(self, ops):
+        cat = ops.create_category("Tjänst", "income", 3001)
+        head = ops.create_customer("private", first_name="Head", last_name="H",
+                                   personnummer="811218-9876")
+        member = ops.create_customer("private", first_name="Mem", last_name="M")  # no pnr yet
+        ops.create_invoice(
+            customer_id=head, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 100000,
+                    "rate_code": "25", "reduction_type": "rut"}],
+            recipients=[{"customer_id": member, "personnummer": "19811218-9876", "share_pct": 100}])
+        assert ops.get_customer(member)["personnummer"] == "8112189876"   # saved onto customer
+        assert ops.list_related_customers(head)[0]["kundnummer"] == member  # auto-linked
+
+
+class TestInvoicesSnapshot:
+    def _setup(self, ops):
+        cat = ops.create_category("Tjänster", "income", 3001)
+        kid = ops.create_customer("private", first_name="Anna", last_name="Svensson",
+                                  personnummer="811218-9876", address="Storgatan 1, Stockholm")
+        return cat, kid
 
     def test_get_invoice_decrypts_buyer_and_snapshots(self, ops):
         ops.set_company(name="Min Firma AB", org_nr="556677-8899")
@@ -813,14 +901,14 @@ class TestFakturametod:
         inv = ops.create_invoice(
             customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
             lines=[{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 1000000,
-                    "rate_code": "25", "rut_eligible": True}],
+                    "rate_code": "25", "reduction_type": "rut"}],
             recipients=[{"first_name": "A", "last_name": "B", "personnummer": "811218-9876",
-                         "rut_amount_ore": 250000}])
+                         "share_pct": 100}])
         vid = ops.conn.execute("SELECT verifikation_id FROM transaktion WHERE id=?",
                                (inv["transaktion_id"],)).fetchone()["verifikation_id"]
         p = self._postings(ops, vid)
-        # inc 1 250 000; customer owes inc - rut = 1 000 000 on 1510, rut 250 000 on 1513
-        assert p[1510] == 1000000 and p[1513] == 250000
+        # inc 1 250 000; RUT pot 625 000; customer owes inc - rut = 625 000 on 1510, 625 000 on 1513
+        assert p[1510] == 625000 and p[1513] == 625000
 
 
 class TestPartialSettlement:
