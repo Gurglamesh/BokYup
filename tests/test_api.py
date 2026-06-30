@@ -646,6 +646,30 @@ class TestBasKontonAndAddress:
         assert by[1930]["is_system"] and by[1930]["system_label"]
         assert by[3001]["is_system"] is False and by[3001]["category_count"] == 1
 
+    def test_delete_unused_category(self, client, book):
+        cid = client.post(f"/books/{book}/categories",
+                          json={"name": "Oanvänd", "kind": "income", "bas_konto": 3999}).json()["id"]
+        # list flags it as not used
+        cats = client.get(f"/books/{book}/categories").json()
+        assert [c for c in cats if c["id"] == cid][0]["used"] == 0
+        resp = client.delete(f"/books/{book}/categories/{cid}")
+        assert resp.status_code == 200 and resp.json()["deleted"] is True
+        assert all(c["id"] != cid for c in client.get(f"/books/{book}/categories").json())
+
+    def test_delete_used_category_409(self, client, book):
+        cid = client.post(f"/books/{book}/categories",
+                          json={"name": "Använd", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "X AB"}).json()["kundnummer"]
+        client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cid, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "A", "quantity_centi": 100,
+                       "unit_price_ore": 100000, "rate_code": "25"}]})
+        assert [c for c in client.get(f"/books/{book}/categories").json()
+                if c["id"] == cid][0]["used"] == 1
+        assert client.delete(f"/books/{book}/categories/{cid}").status_code == 409
+
     def test_category_carries_default_rate(self, client, book):
         client.post(f"/books/{book}/categories",
                     json={"name": "Varor 12%", "kind": "income", "bas_konto": 3002,
