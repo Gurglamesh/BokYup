@@ -377,6 +377,34 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       Fakturor and opens a fresh invoice form with that customer preselected (via
       `state.pendingInvoiceCustomer` → `newInvoiceForCustomer`). Frontend-only; all 266
       tests pass, live browser smoke-tested.
+- [x] **Import migrates older `.buyn` bundles forward (2026-06).** `bundle.import_` now
+      accepts a bundle whose `schema_version` is *older* than the app: after restoring the
+      db it runs `schema.migrate()` to bring it up to `SCHEMA_VERSION` (migrations are pure
+      DDL, so they run on the restored file without the passphrase/DEK), then the book opens
+      normally with its original passphrase. A *newer* bundle is still refused. The result
+      dict gains `schema_version`. Lets a book backed up on an older build restore on a
+      newer one without manual surgery.
+- [x] **Skatteverket husavdrag payout: manual amount + rounding + partial payout
+      (schema v15, 2026-06).** `register_rut_skatteverket_payment` now takes the amount
+      Skatteverket *actually* paid (`received_ore`, defaults to the claimed husavdrag) and
+      interprets the difference vs the claim: within ±`rut_skv_rounding_tolerance_ore`
+      (config, 0,49 kr) it is **rounding** → the diff books to **3740 Öres- och
+      kronutjämning** (config `account_ores_kronutjamning`) so 1513 clears exactly; a larger
+      underpayment is a **partial payout** (quota/cap-driven) → the remainder is reclassified
+      **1513 → 1510** (now owed by the customer) and a linked **follow-up invoice** documents
+      it. The follow-up carries **no moms** (income+moms were fully booked at the original
+      sale — there is a single moms on the full labour price; Skatteverket's payment is not a
+      taxable supply), is numbered from the **same unbroken faktura series**, links to the
+      original via `invoice.parent_invoice_id` + an editable `relation_note`, and is settled
+      via `pay_invoice` (bank ← 1510, `husavdrag_shortfall_ore` marks it so no income is
+      re-recognised; credit/refund refused). `mode` (auto|rounding|partial) lets the user
+      confirm/override — a >tolerance underpayment **requires** an explicit `partial` so a
+      quota shortfall is never silently swallowed as rounding. `skatteverket_payment_preview`
+      + API `POST …/rut/{id}/skatteverket-preview` classify the amount (exact|rounding|
+      partial|overpaid) so the UI can confirm before booking; `rut_claim` gained
+      `skatteverket_received_ore`/`shortfall_invoice_id`. UI `rutSkvPayFlow`: amount field →
+      preview → 3740 rounding note or a partial-confirmation dialog with editable reference
+      text (creates + downloads the follow-up). Every verifikation balances. Tests pass (276).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

@@ -325,7 +325,14 @@ class AppFacade:
 
     def h_rut_skatteverket_payment(self, p, b, q):
         ops = self._ops(p["book_id"])
-        return ops.register_rut_skatteverket_payment(int(p["rut_claim_id"]), b["payment_date"])
+        return ops.register_rut_skatteverket_payment(
+            int(p["rut_claim_id"]), b["payment_date"],
+            received_ore=b.get("received_ore"), mode=b.get("mode"),
+            relation_note=b.get("relation_note"))
+
+    def h_skatteverket_preview(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        return ops.skatteverket_payment_preview(int(p["rut_claim_id"]), int(b["received_ore"]))
 
     def h_rut_cap(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -335,7 +342,8 @@ class AppFacade:
         ops = self._ops(p["book_id"])
         return _rows(ops,
                      "SELECT id, transaktion_id, customer_id, rut_amount_ore, state, "
-                     "customer_payment_date, skatteverket_payment_date, claim_year "
+                     "customer_payment_date, skatteverket_payment_date, "
+                     "skatteverket_received_ore, shortfall_invoice_id, claim_year "
                      "FROM rut_claim ORDER BY id")
 
     def h_reverse_verifikation(self, p, b, q):
@@ -588,6 +596,7 @@ _route("POST", "/books/{book_id}/expenses", "h_record_expense", 201)
 _route("POST", "/books/{book_id}/incomes", "h_record_income", 201)
 _route("POST", "/books/{book_id}/transaktioner/{transaktion_id}/pay", "h_register_payment")
 _route("POST", "/books/{book_id}/rut/{rut_claim_id}/skatteverket-payment", "h_rut_skatteverket_payment")
+_route("POST", "/books/{book_id}/rut/{rut_claim_id}/skatteverket-preview", "h_skatteverket_preview")
 _route("GET", "/books/{book_id}/rut-claims", "h_list_rut_claims")
 _route("POST", "/books/{book_id}/verifikationer/{verifikation_id}/reverse", "h_reverse_verifikation", 201)
 _route("POST", "/books/{book_id}/period-locks", "h_lock_period", 201)

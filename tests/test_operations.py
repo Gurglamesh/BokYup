@@ -241,6 +241,95 @@ class TestRUT:
         with pytest.raises(InvalidState):
             ops.register_rut_skatteverket_payment(claim_id, "2026-06-01")
 
+    # ---- Skatteverket payout: manual amount, rounding (3740) + partial payout -----
+
+    def _rut_invoice(self, ops: BookOps, labour_inc=1000000):
+        """A RUT invoice whose customer has paid; returns (invoice_id, claim_id, husavdrag)."""
+        cat = ops.create_category("Städning", "income", 3001, default_rate_code="25")
+        kid = ops.create_customer("private", first_name="Anna", last_name="A",
+                                  personnummer="811218-9876")
+        ex = round(labour_inc / 1.25)
+        inv = ops.create_invoice(
+            customer_id=kid, invoice_date="2026-04-01", due_date="2026-04-30",
+            lines=[{"description": "Städ", "quantity_centi": 100, "unit_price_ore": ex,
+                    "rate_code": "25", "category_id": cat, "reduction_type": "rut"}],
+            recipients=[{"customer_id": kid, "rut_share_pct": 100, "rot_share_pct": 100}])
+        ops.register_payment(inv["transaktion_id"], "2026-04-15")
+        claim_id = ops.conn.execute("SELECT id FROM rut_claim WHERE transaktion_id=?",
+                                    (inv["transaktion_id"],)).fetchone()[0]
+        husavdrag = inv["rut_total_ore"] + inv["rot_total_ore"]
+        return inv["invoice_id"], claim_id, husavdrag
+
+    def test_skatteverket_rounding_booked_to_3740(self, ops: BookOps):
+        _, claim_id, H = self._rut_invoice(ops)
+        sk = ops.register_rut_skatteverket_payment(claim_id, "2026-06-01", received_ore=H - 37)
+        rows = {p["bas_konto"]: p["amount_ore"] for p in _postings(ops, sk["verifikation_id"])}
+        assert _balance(ops, sk["verifikation_id"]) == 0
+        assert sk["interpretation"] == "rounding"
+        assert rows[1930] == H - 37          # actual cash in
+        assert rows[1513] == -H              # receivable fully cleared
+        assert rows[3740] == 37              # the öre diff
+        assert sk["shortfall_invoice_id"] is None
+
+    def test_skatteverket_overpayment_within_tolerance_rounds(self, ops: BookOps):
+        _, claim_id, H = self._rut_invoice(ops)
+        sk = ops.register_rut_skatteverket_payment(claim_id, "2026-06-01", received_ore=H + 20)
+        rows = {p["bas_konto"]: p["amount_ore"] for p in _postings(ops, sk["verifikation_id"])}
+        assert _balance(ops, sk["verifikation_id"]) == 0
+        assert rows[3740] == -20             # other direction
+
+    def test_skatteverket_partial_requires_explicit_confirm(self, ops: BookOps):
+        _, claim_id, H = self._rut_invoice(ops)
+        with pytest.raises(InvalidState):
+            ops.register_rut_skatteverket_payment(claim_id, "2026-06-01", received_ore=H - 50000)
+
+    def test_skatteverket_partial_creates_followup_invoice(self, ops: BookOps):
+        inv_id, claim_id, H = self._rut_invoice(ops)
+        sk = ops.register_rut_skatteverket_payment(
+            claim_id, "2026-06-01", received_ore=H - 50000, mode="partial")
+        rows = {p["bas_konto"]: p["amount_ore"] for p in _postings(ops, sk["verifikation_id"])}
+        assert _balance(ops, sk["verifikation_id"]) == 0
+        assert sk["interpretation"] == "partial"
+        assert rows[1930] == H - 50000       # actual payout
+        assert rows[1513] == -H              # SKV receivable cleared
+        assert rows[1510] == 50000           # remainder now owed by the customer
+        # A linked follow-up invoice documents the shortfall, no moms, same series.
+        fi_id = sk["shortfall_invoice_id"]
+        assert fi_id is not None
+        fi = ops.get_invoice(fi_id)
+        assert fi["parent_invoice_id"] == inv_id
+        assert fi["husavdrag_shortfall_ore"] == 50000
+        assert fi["moms_ore"] == 0
+        assert fi["inc_moms_ore"] == 50000
+        assert str(ops.get_invoice(inv_id)["invoice_number"]) in fi["relation_note"]
+
+    def test_followup_invoice_payment_clears_1510(self, ops: BookOps):
+        _, claim_id, H = self._rut_invoice(ops)
+        sk = ops.register_rut_skatteverket_payment(
+            claim_id, "2026-06-01", received_ore=H - 50000, mode="partial")
+        fi_id = sk["shortfall_invoice_id"]
+        pay = ops.pay_invoice(fi_id, date="2026-07-01")
+        rows = {p["bas_konto"]: p["amount_ore"] for p in _postings(ops, pay["verifikation_id"])}
+        assert _balance(ops, pay["verifikation_id"]) == 0
+        assert rows[1930] == 50000           # customer pays the remainder
+        assert rows[1510] == -50000          # customer receivable cleared, no moms touched
+        assert pay["outstanding_ore"] == 0
+        # Crediting/refunding a husavdrag follow-up is not supported.
+        with pytest.raises(InvalidState):
+            ops.credit_invoice(fi_id)
+
+    def test_skatteverket_overpaid_beyond_tolerance_refused(self, ops: BookOps):
+        _, claim_id, H = self._rut_invoice(ops)
+        with pytest.raises(InvalidState):
+            ops.register_rut_skatteverket_payment(claim_id, "2026-06-01", received_ore=H + 100000)
+
+    def test_skatteverket_preview_interpretations(self, ops: BookOps):
+        _, claim_id, H = self._rut_invoice(ops)
+        assert ops.skatteverket_payment_preview(claim_id, H)["interpretation"] == "exact"
+        assert ops.skatteverket_payment_preview(claim_id, H - 30)["interpretation"] == "rounding"
+        assert ops.skatteverket_payment_preview(claim_id, H - 90000)["interpretation"] == "partial"
+        assert ops.skatteverket_payment_preview(claim_id, H + 90000)["interpretation"] == "overpaid"
+
     def test_cap_status_tracks_usage(self, ops: BookOps):
         cat, kid, res = self._rut_income(ops)
         status = ops.rut_cap_status(kid, 2026)

@@ -109,17 +109,17 @@ def _read_schema_version(db_path: Path) -> int:
 
 
 def _check_schema_compatible(version: int) -> None:
-    if version == S.SCHEMA_VERSION:
-        return
+    """
+    Gate a bundle's schema version on import. A NEWER bundle is refused (this app
+    can't know future tables). An OLDER bundle is fine: it is migrated forward after
+    restore (see `import_` → `schema.migrate`). All migrations are pure DDL, so they
+    run on the restored file without needing the passphrase/DEK.
+    """
     if version > S.SCHEMA_VERSION:
         raise SchemaVersionError(
             f"Bundle schema v{version} is newer than this app (v{S.SCHEMA_VERSION}); "
             "upgrade the application to import it."
         )
-    raise SchemaVersionError(
-        f"Bundle schema v{version} is older than this app (v{S.SCHEMA_VERSION}); "
-        "schema migration is not implemented yet."
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -251,9 +251,21 @@ def import_(bundle_path: str | Path, dest_db_path: str | Path, *,
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(z.read(arc))
 
+    # Bring an older bundle up to the current schema. Migrations are pure DDL (they
+    # never touch encrypted columns), so this runs on the restored file without the
+    # passphrase; the book then opens/unlocks normally with its original passphrase.
+    migrated_to = manifest["schema_version"]
+    if migrated_to < S.SCHEMA_VERSION:
+        conn = sqlite3.connect(str(dest_db))
+        try:
+            migrated_to = S.migrate(conn)
+        finally:
+            conn.close()
+
     return {
         "manifest": manifest,
         "db_path": str(dest_db),
         "key_path": str(dest_key),
         "backup_path": str(backup_path) if backup_path else None,
+        "schema_version": migrated_to,
     }

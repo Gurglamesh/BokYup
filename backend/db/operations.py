@@ -40,7 +40,7 @@ import json
 import secrets
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Optional
@@ -82,6 +82,7 @@ _SYS_ACCOUNT_NAMES = {
     "account_rut_fordran": "Kundfordran husavdrag (RUT/ROT)",
     "account_kundfordran": "Kundfordringar",
     "account_leverantorsskuld": "Leverantörsskulder",
+    "account_ores_kronutjamning": "Öres- och kronutjämning",
 }
 
 _UTG_MOMS_KEY = {
@@ -669,10 +670,53 @@ class BookOps:
                 )
         return {"verifikation_id": vid, "ver_number": number}
 
-    def register_rut_skatteverket_payment(self, rut_claim_id: int, payment_date: str) -> dict:
+    def skatteverket_payment_preview(self, rut_claim_id: int, received_ore: int) -> dict:
         """
-        Book the Skatteverket payout of a RUT claim as its own verifikation
-        (bank ← receivable). The claim must already be 'customer_paid'.
+        Interpret a manually-entered Skatteverket payout WITHOUT booking it, so the UI
+        can confirm/override before committing. Returns the claimed amount, the
+        difference, the rounding tolerance, and the suggested interpretation
+        ('exact' | 'rounding' | 'partial' | 'overpaid').
+        """
+        claim = self.conn.execute(
+            "SELECT rut_amount_ore FROM rut_claim WHERE id=?", (rut_claim_id,)).fetchone()
+        if claim is None:
+            raise KeyError(f"No rut_claim {rut_claim_id}")
+        claimed = claim["rut_amount_ore"]
+        received = int(received_ore)
+        diff = claimed - received                       # >0 underpaid, <0 overpaid
+        tol = int(self._config("rut_skv_rounding_tolerance_ore"))
+        if diff == 0:
+            interp = "exact"
+        elif abs(diff) <= tol:
+            interp = "rounding"
+        elif diff > tol:
+            interp = "partial"
+        else:
+            interp = "overpaid"
+        return {"claimed_ore": claimed, "received_ore": received, "difference_ore": diff,
+                "tolerance_ore": tol, "interpretation": interp}
+
+    def register_rut_skatteverket_payment(self, rut_claim_id: int, payment_date: str,
+                                          received_ore: Optional[int] = None, *,
+                                          mode: Optional[str] = None,
+                                          relation_note: Optional[str] = None) -> dict:
+        """
+        Book the Skatteverket payout of a RUT/ROT claim as its own verifikation. The
+        claim must already be 'customer_paid'.
+
+        `received_ore` is the amount Skatteverket actually paid (defaults to the full
+        claimed amount). Booking depends on how it compares to the claimed amount:
+
+        * exact / within ±tolerance (config `rut_skv_rounding_tolerance_ore`, 0,49 kr):
+          treat the small diff as **rounding** and book it to 3740 Öres- och
+          kronutjämning so the receivable (1513) clears exactly.
+        * a larger underpayment: a **partial** payout — the unpaid remainder is
+          reclassified 1513 → 1510 (now owed by the customer) and a linked follow-up
+          invoice documents it (no moms; income/moms were already booked at the sale).
+
+        `mode` (None=auto, 'rounding', 'partial') lets the caller confirm/override the
+        interpretation. A >tolerance underpayment requires an explicit 'partial' so the
+        app never silently swallows a quota-driven shortfall as rounding.
         """
         claim = self.conn.execute(
             "SELECT * FROM rut_claim WHERE id=?", (rut_claim_id,)
@@ -684,21 +728,98 @@ class BookOps:
                 f"RUT claim must be 'customer_paid' to receive Skatteverket payment "
                 f"(is '{claim['state']}')"
             )
-        rut = claim["rut_amount_ore"]
-        postings = [
-            (self._sys_account("account_bank"), rut, "husavdrag utbetalt"),
-            (self._sys_account("account_rut_fordran"), -rut, "kvitta fordran"),
-        ]
+        claimed = claim["rut_amount_ore"]
+        received = claimed if received_ore is None else int(received_ore)
+        if received < 0:
+            raise ValueError("Mottaget belopp kan inte vara negativt")
+        diff = claimed - received                       # >0 underpaid, <0 overpaid
+        tol = int(self._config("rut_skv_rounding_tolerance_ore"))
+
+        interp = mode
+        if interp is None:
+            if abs(diff) <= tol:
+                interp = "rounding"
+            elif diff > tol:
+                raise InvalidState(
+                    f"Skatteverket betalade {received} öre mot begärda {claimed} öre "
+                    f"(differens {diff} öre > {tol}). Bekräfta delbetalning för att skapa "
+                    "en uppföljningsfaktura till kunden.")
+            else:
+                raise InvalidState(
+                    f"Skatteverket betalade mer än begärt (differens {diff} öre); "
+                    "kontrollera beloppet.")
+        if interp == "rounding" and abs(diff) > tol:
+            raise InvalidState(
+                f"Differensen {diff} öre är för stor för öresavrundning (max {tol}).")
+        if interp == "partial" and diff <= tol:
+            raise InvalidState("Ingen delbetalning: differensen ryms inom avrundningen.")
+
+        bank = self._sys_account("account_bank")
+        fordran = self._sys_account("account_rut_fordran")
+        postings = [(bank, received, "husavdrag utbetalt"),
+                    (fordran, -claimed, "kvitta fordran")]
+        if interp == "rounding":
+            if diff != 0:
+                postings.append((self._sys_account("account_ores_kronutjamning"),
+                                 diff, "öresavrundning"))
+            text = "Husavdrag utbetalt av Skatteverket"
+        else:  # partial: the remainder becomes a receivable on the customer (1510)
+            postings.append((self._sys_account("account_kundfordran"),
+                             diff, "kvarstående fordran kund"))
+            text = "Husavdrag delvis utbetalt av Skatteverket"
+
+        shortfall_invoice_id = None
         with self.conn:
-            vid, number = self._post_verifikation(
-                payment_date, payment_date, "Husavdrag utbetalt av Skatteverket", postings
-            )
+            vid, number = self._post_verifikation(payment_date, payment_date, text, postings)
+            if interp == "partial":
+                shortfall_invoice_id = self._create_husavdrag_shortfall_invoice(
+                    claim, diff, payment_date, relation_note)
             self.conn.execute(
-                "UPDATE rut_claim SET state='skatteverket_paid', "
-                "skatteverket_payment_date=?, skatteverket_verifikation_id=? WHERE id=?",
-                (payment_date, vid, rut_claim_id),
+                "UPDATE rut_claim SET state='skatteverket_paid', skatteverket_payment_date=?, "
+                "skatteverket_verifikation_id=?, skatteverket_received_ore=?, "
+                "shortfall_invoice_id=? WHERE id=?",
+                (payment_date, vid, received, shortfall_invoice_id, rut_claim_id),
             )
-        return {"verifikation_id": vid, "ver_number": number}
+        return {"verifikation_id": vid, "ver_number": number, "interpretation": interp,
+                "claimed_ore": claimed, "received_ore": received, "difference_ore": diff,
+                "shortfall_invoice_id": shortfall_invoice_id}
+
+    def _create_husavdrag_shortfall_invoice(self, claim, shortfall_ore: int,
+                                            date: str, relation_note: Optional[str]) -> int:
+        """
+        Document the unpaid husavdrag remainder as a linked follow-up invoice on the
+        customer. It carries NO moms (income + moms were fully booked at the original
+        sale); the 1510 receivable was already established by the Skatteverket-payment
+        verifikation, so this is the source document for it. Settled later via
+        `pay_invoice` (bank ← 1510). Numbered from the same unbroken faktura series.
+        """
+        parent = self.conn.execute(
+            "SELECT * FROM invoice WHERE transaktion_id=?", (claim["transaktion_id"],)).fetchone()
+        if parent is None:
+            raise OperationError("Hittar inte ursprungsfakturan för husavdraget")
+        parent_number = parent["invoice_number"]
+        note = relation_note or (
+            f"Avser delbetalning av faktura {parent_number} — RUT/ROT-avdrag ej fullt "
+            "utnyttjat av Skatteverket.")
+        due = (datetime.fromisoformat(date) + timedelta(days=30)).date().isoformat()
+        number = self._next_invoice_number()
+        cur = self.conn.execute(
+            "INSERT INTO invoice(invoice_number, customer_id, transaktion_id, invoice_date, "
+            "due_date, buyer_snapshot_enc, seller_snapshot, payment_methods_snapshot, note, "
+            "ex_moms_ore, moms_ore, inc_moms_ore, rut_total_ore, rot_total_ore, "
+            "parent_invoice_id, relation_note, husavdrag_shortfall_ore, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (number, parent["customer_id"], None, date, due, parent["buyer_snapshot_enc"],
+             parent["seller_snapshot"], parent["payment_methods_snapshot"], note,
+             shortfall_ore, 0, shortfall_ore, 0, 0, parent["id"], note, shortfall_ore, _now()))
+        invoice_id = cur.lastrowid
+        self.conn.execute(
+            "INSERT INTO invoice_line(invoice_id, line_no, description, category_id, "
+            "quantity_centi, unit, unit_price_ore, rate_code, rut_eligible, reduction_type, "
+            "article_id, ex_moms_ore, moms_ore) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (invoice_id, 1, note, None, 100, None, shortfall_ore, "momsfri", 0, None, None,
+             shortfall_ore, 0))
+        return invoice_id
 
     def rut_cap_status(self, customer_id: int, year: int) -> dict:
         """Return RUT/ROT cap usage for a customer in a year (cap is config)."""
@@ -1276,7 +1397,8 @@ class BookOps:
     def list_invoices(self) -> list[dict]:
         rows = self.conn.execute(
             "SELECT id, invoice_number, invoice_date, due_date, customer_id, transaktion_id, "
-            "inc_moms_ore, rut_total_ore, rot_total_ore FROM invoice ORDER BY invoice_number"
+            "inc_moms_ore, rut_total_ore, rot_total_ore, parent_invoice_id, "
+            "husavdrag_shortfall_ore, relation_note FROM invoice ORDER BY invoice_number"
             ).fetchall()
         out = []
         for r in rows:
@@ -1384,6 +1506,8 @@ class BookOps:
         RUT invoices use the full register_payment + Skatteverket flow instead.
         """
         inv, bal = self._require_open_invoice(invoice_id)
+        if inv["husavdrag_shortfall_ore"]:
+            return self._pay_husavdrag_shortfall(inv, bal, amount_ore, date)
         if inv["rut_total_ore"] or inv["rot_total_ore"]:
             raise InvalidState("RUT/ROT invoices: use the full payment + Skatteverket flow")
         amount = bal["outstanding_ore"] if amount_ore is None else int(amount_ore)
@@ -1411,10 +1535,32 @@ class BookOps:
         return {"invoice_id": invoice_id, "verifikation_id": vid, "ver_number": num,
                 "amount_ore": amount, "outstanding_ore": self._invoice_balances(invoice_id)["outstanding_ore"]}
 
+    def _pay_husavdrag_shortfall(self, inv, bal, amount_ore, date) -> dict:
+        """Settle a husavdrag follow-up invoice: pure receivable collection (bank ←
+        1510), no income/moms recognition (already booked at the original sale)."""
+        amount = bal["outstanding_ore"] if amount_ore is None else int(amount_ore)
+        if amount <= 0:
+            raise ValueError("Payment amount must be > 0")
+        if amount > bal["outstanding_ore"]:
+            raise InvalidState("Payment exceeds the outstanding amount")
+        date = date or _now()[:10]
+        text = f"Betalning faktura {inv['invoice_number']} (kvarstående husavdrag)"
+        postings = [(self._sys_account("account_bank"), amount, "inbetalning"),
+                    (self._sys_account("account_kundfordran"), -amount, "kvitta kundfordran")]
+        with self.conn:
+            vid, num = self._post_verifikation(date, date, text, postings)
+            self._record_invoice_event(inv["id"], "payment", amount, date, vid)
+            self._sync_invoice_paid(inv["id"], None, date)
+        return {"invoice_id": inv["id"], "verifikation_id": vid, "ver_number": num,
+                "amount_ore": amount,
+                "outstanding_ore": self._invoice_balances(inv["id"])["outstanding_ore"]}
+
     def refund_invoice(self, invoice_id: int, amount_ore: int,
                        date: Optional[str] = None, note: Optional[str] = None) -> dict:
         """Pay money back to the customer (full or partial) — the reverse of a payment."""
         inv, bal = self._require_open_invoice(invoice_id)
+        if inv["husavdrag_shortfall_ore"]:
+            raise InvalidState("Husavdrag-uppföljningsfaktura stöder bara betalning")
         if inv["rut_total_ore"] or inv["rot_total_ore"]:
             raise InvalidState("RUT/ROT invoices: refunds not supported via the subledger")
         amount = int(amount_ore)
@@ -1451,6 +1597,8 @@ class BookOps:
         then pays out. A fully credited invoice is flagged krediterad.
         """
         inv, bal = self._require_open_invoice(invoice_id)
+        if inv["husavdrag_shortfall_ore"]:
+            raise InvalidState("Husavdrag-uppföljningsfaktura stöder bara betalning")
         if inv["rut_total_ore"] or inv["rot_total_ore"]:
             raise InvalidState("RUT/ROT invoices: partial credit not supported; use makulera/full flow")
         billable = inv["inc_moms_ore"] - inv["rut_total_ore"] - inv["rot_total_ore"] - bal["credited_ore"]
@@ -1544,7 +1692,8 @@ class BookOps:
     def _require_open_invoice(self, invoice_id: int) -> tuple:
         inv = self.conn.execute(
             "SELECT id, invoice_number, transaktion_id, inc_moms_ore, rut_total_ore, "
-            "rot_total_ore, cancelled_at FROM invoice WHERE id=?", (invoice_id,)).fetchone()
+            "rot_total_ore, husavdrag_shortfall_ore, cancelled_at FROM invoice WHERE id=?",
+            (invoice_id,)).fetchone()
         if inv is None:
             raise KeyError(f"No invoice {invoice_id}")
         if inv["cancelled_at"]:

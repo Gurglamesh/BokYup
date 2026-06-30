@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -217,6 +217,8 @@ CREATE TABLE rut_claim (
     -- the Skatteverket payment is booked as its OWN verifikation (the customer
     -- payment is booked via transaktion.verifikation_id).
     skatteverket_verifikation_id INTEGER REFERENCES verifikation(id),
+    skatteverket_received_ore INTEGER,  -- actual amount paid out (may differ from claimed)
+    shortfall_invoice_id      INTEGER REFERENCES invoice(id),  -- follow-up if SKV underpaid
     claim_year                INTEGER NOT NULL,  -- for the per-customer/year cap
     created_at                TEXT NOT NULL
 );
@@ -294,6 +296,11 @@ CREATE TABLE invoice (
     cancelled_at             TEXT,                  -- makulerad (voided before booking)
     credited_at              TEXT,                  -- krediterad (booking reversed)
     credit_verifikation_id   INTEGER REFERENCES verifikation(id),
+    -- husavdrag follow-up: when Skatteverket pays less than the claimed RUT/ROT, the
+    -- shortfall becomes a receivable on the customer documented as this linked invoice.
+    parent_invoice_id        INTEGER REFERENCES invoice(id),
+    relation_note            TEXT,                  -- free-text reference to the original
+    husavdrag_shortfall_ore  INTEGER NOT NULL DEFAULT 0,  -- >0 marks a follow-up; settles 1510, no moms
     created_at               TEXT NOT NULL
 );
 
@@ -470,6 +477,11 @@ _DEFAULT_CONFIG = {
     "account_rut_fordran": "1513",          # Kundfordran husavdrag (verified 2026-06)
     "account_kundfordran": "1510",          # Kundfordringar (year-end accrual)
     "account_leverantorsskuld": "2440",     # Leverantörsskulder (year-end accrual)
+    "account_ores_kronutjamning": "3740",   # Öres- och kronutjämning (rounding)
+    # When Skatteverket's husavdrag payout differs from the claimed amount by no more
+    # than this many ören, treat it as pure rounding and book the diff to 3740. A
+    # larger underpayment is a partial payout (a follow-up receivable on the customer).
+    "rut_skv_rounding_tolerance_ore": "49",  # 0,49 kr
 }
 
 
@@ -644,6 +656,15 @@ _MIGRATIONS: dict[int, str] = {
             updated_at TEXT NOT NULL
         );
         ALTER TABLE invoice_line ADD COLUMN article_id INTEGER;
+    """,
+    15: """
+        ALTER TABLE invoice ADD COLUMN parent_invoice_id INTEGER;
+        ALTER TABLE invoice ADD COLUMN relation_note TEXT;
+        ALTER TABLE invoice ADD COLUMN husavdrag_shortfall_ore INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE rut_claim ADD COLUMN skatteverket_received_ore INTEGER;
+        ALTER TABLE rut_claim ADD COLUMN shortfall_invoice_id INTEGER;
+        INSERT OR IGNORE INTO config(key, value) VALUES ('account_ores_kronutjamning', '3740');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('rut_skv_rounding_tolerance_ore', '49');
     """,
 }
 

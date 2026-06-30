@@ -280,8 +280,13 @@ def _build_router():
             {"book_id": book_id, "transaktion_id": transaktion_id}, body.model_dump(), {})
 
     @r.post("/books/{book_id}/rut/{rut_claim_id}/skatteverket-payment")
-    def rut_skatteverket_payment(book_id: str, rut_claim_id: int, body: sc.PaymentReq, request: Request):
+    def rut_skatteverket_payment(book_id: str, rut_claim_id: int, body: sc.SkatteverketPaymentReq, request: Request):
         return fac(request).h_rut_skatteverket_payment(
+            {"book_id": book_id, "rut_claim_id": rut_claim_id}, body.model_dump(), {})
+
+    @r.post("/books/{book_id}/rut/{rut_claim_id}/skatteverket-preview")
+    def rut_skatteverket_preview(book_id: str, rut_claim_id: int, body: sc.SkatteverketPreviewReq, request: Request):
+        return fac(request).h_skatteverket_preview(
             {"book_id": book_id, "rut_claim_id": rut_claim_id}, body.model_dump(), {})
 
     @r.get("/books/{book_id}/customers/{kundnummer}/rut-cap/{year}")

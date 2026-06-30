@@ -613,7 +613,7 @@ const SECTION_RENDERERS = {
       el("td", {}, c.customer_payment_date || "—"),
       el("td", {}, c.skatteverket_payment_date || "—"),
       el("td", { class: "num" }, c.state === "customer_paid"
-        ? el("button", { class: "btn small", onclick: () => guard(() => rutSkvPayFlow(c.id)) }, "Bokför SKV-utbetalning")
+        ? el("button", { class: "btn small", onclick: () => guard(() => rutSkvPayFlow(c.id, c.rut_amount_ore)) }, "Bokför SKV-utbetalning")
         : ""),
     ));
     panel.appendChild(el("table", {},
@@ -926,7 +926,15 @@ const SECTION_RENDERERS = {
           onclick: () => guard(() => creditNotePdf(iv.id, cn.id, cn.credit_note_number)) },
           `Kreditnota ${cn.credit_note_number}`));
       }
-      if (isRut) {
+      if (iv.husavdrag_shortfall_ore > 0) {
+        // Husavdrag follow-up: the customer owes the part Skatteverket didn't pay.
+        // Settles 1510 directly (no moms) — only a plain payment applies.
+        actions.appendChild(el("span", { class: "pill", style: "margin-left:4px",
+          title: iv.relation_note || "" }, "Husavdrag (uppföljning)"));
+        if (iv.state === "pending" || iv.state === "partial") {
+          actions.appendChild(act("Betala", "", () => payInvoiceFlow(iv)));
+        }
+      } else if (isRut) {
         // RUT/ROT invoices: first book the customer payment, then (once that's done)
         // book the Skatteverket husavdrag payout — the button stays here until it lands.
         if (iv.state === "pending") {
@@ -934,7 +942,8 @@ const SECTION_RENDERERS = {
           actions.appendChild(act("Makulera", "ghost danger", () => makuleraInvoiceFlow(iv)));
         } else if (iv.rut_claim_state === "customer_paid" && iv.rut_claim_id) {
           actions.appendChild(act("Bokför husavdrag (Skatteverket)", "",
-            () => rutSkvPayFlow(iv.rut_claim_id)));
+            () => rutSkvPayFlow(iv.rut_claim_id, iv.rut_total_ore + iv.rot_total_ore,
+              `Avser delbetalning av faktura ${iv.invoice_number} — RUT/ROT-avdrag ej fullt utnyttjat av Skatteverket.`)));
         } else if (iv.rut_claim_state === "skatteverket_paid") {
           actions.appendChild(el("span", { class: "pill paid", style: "margin-left:4px" },
             "Husavdrag betalt"));
@@ -1182,13 +1191,55 @@ async function payFlow(txId) {
   renderWorkspace();
 }
 
-async function rutSkvPayFlow(claimId) {
+async function rutSkvPayFlow(claimId, claimedOre, defaultNote) {
+  // Step 1: enter the date + the amount Skatteverket actually paid (defaults to the
+  // claimed husavdrag). The user can override, e.g. when the payout was reduced.
   const f = await modal("Bokför Skatteverkets utbetalning", [
     { name: "payment_date", label: "Utbetalningsdatum", type: "date", value: new Date().toISOString().slice(0, 10) },
-  ], "Bokför");
+    { name: "received", label: "Mottaget belopp (kr)",
+      value: claimedOre != null ? toKr(claimedOre) : "" },
+  ], "Fortsätt");
   if (!f) return;
-  await api("POST", `/books/${bid()}/rut/${claimId}/skatteverket-payment`, { payment_date: f.payment_date });
-  toast("Husavdrag bokfört");
+  const received_ore = f.received === "" ? null : toOre(f.received);
+
+  // Step 2: ask the backend how it reads the amount (rounding vs partial vs overpaid).
+  let interp = "rounding";
+  if (received_ore != null) {
+    const prev = await api("POST", `/books/${bid()}/rut/${claimId}/skatteverket-preview`,
+      { received_ore });
+    interp = prev.interpretation;
+    if (interp === "overpaid") {
+      toast(`Skatteverket betalade mer än begärt (${toKr(-prev.difference_ore)} kr över). `
+        + "Kontrollera beloppet.", true);
+      return;
+    }
+    if (interp === "partial") {
+      // A quota/cap-driven shortfall: the remainder becomes a receivable on the
+      // customer, documented as a linked follow-up invoice. Confirm + let the user
+      // edit the reference text (blank = standard text referencing the original).
+      const shortfall = prev.difference_ore;
+      const c = await modal(
+        `Skatteverket betalade ${toKr(prev.received_ore)} kr av begärda ${toKr(prev.claimed_ore)} kr `
+        + `(${toKr(shortfall)} kr mindre). Detta ser ut som en delbetalning (utnyttjat tak/kvot). `
+        + "En uppföljningsfaktura skapas till kunden på mellanskillnaden.",
+        [{ name: "relation_note", label: "Text på uppföljningsfakturan (valfri)",
+           value: defaultNote || "" }],
+        "Skapa uppföljningsfaktura");
+      if (!c) return;
+      const res = await api("POST", `/books/${bid()}/rut/${claimId}/skatteverket-payment`,
+        { payment_date: f.payment_date, received_ore, mode: "partial",
+          relation_note: c.relation_note || null });
+      toast(`Husavdrag delbetalt. Uppföljningsfaktura skapad (${toKr(shortfall)} kr till kunden).`);
+      renderWorkspace();
+      if (res.shortfall_invoice_id) invoicePdf(res.shortfall_invoice_id);
+      return;
+    }
+  }
+  // exact or within öresavrundning -> book straight (diff, if any, lands on 3740).
+  await api("POST", `/books/${bid()}/rut/${claimId}/skatteverket-payment`,
+    { payment_date: f.payment_date, received_ore });
+  toast(interp === "rounding" && received_ore != null
+    ? "Husavdrag bokfört (öresavrundning mot 3740)." : "Husavdrag bokfört.");
   renderWorkspace();
 }
 

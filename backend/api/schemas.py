@@ -157,6 +157,17 @@ class PaymentReq(BaseModel):
     payment_date: str
 
 
+class SkatteverketPaymentReq(BaseModel):
+    payment_date: str
+    received_ore: Optional[int] = None          # actual amount Skatteverket paid out
+    mode: Optional[str] = None                  # None=auto | 'rounding' | 'partial'
+    relation_note: Optional[str] = None         # custom reference text on the follow-up
+
+
+class SkatteverketPreviewReq(BaseModel):
+    received_ore: int
+
+
 class ReverseReq(BaseModel):
     reason: str
     reg_date: Optional[str] = None

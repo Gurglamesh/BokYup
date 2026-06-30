@@ -577,6 +577,42 @@ class TestInvoices:
                     json={"payment_date": "2026-04-15"})
         assert row()["rut_claim_state"] == "skatteverket_paid"
 
+    def test_skatteverket_partial_payout_creates_followup_via_api(self, client, book):
+        cat, kid = self._setup(client, book)
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 1000000,
+                       "rate_code": "25", "reduction_type": "rut"}],
+            "recipients": [{"customer_id": kid, "share_pct": 100}]}).json()
+        tid = inv["transaktion_id"]
+        client.post(f"/books/{book}/transaktioner/{tid}/pay", json={"payment_date": "2026-03-10"})
+        claim_id = [x for x in client.get(f"/books/{book}/invoices").json()
+                    if x["id"] == inv["invoice_id"]][0]["rut_claim_id"]
+        H = inv["rut_total_ore"] + inv["rot_total_ore"]
+
+        # preview flags the big underpayment as a partial payout
+        prev = client.post(f"/books/{book}/rut/{claim_id}/skatteverket-preview",
+                           json={"received_ore": H - 50000})
+        assert prev.json()["interpretation"] == "partial"
+        # without an explicit mode the backend refuses (so the UI must confirm)
+        refused = client.post(f"/books/{book}/rut/{claim_id}/skatteverket-payment",
+                              json={"payment_date": "2026-04-15", "received_ore": H - 50000})
+        assert refused.status_code == 409
+        # confirmed -> a linked follow-up invoice appears with no moms
+        ok = client.post(f"/books/{book}/rut/{claim_id}/skatteverket-payment",
+                         json={"payment_date": "2026-04-15", "received_ore": H - 50000,
+                               "mode": "partial"}).json()
+        fid = ok["shortfall_invoice_id"]
+        assert fid is not None
+        followup = [x for x in client.get(f"/books/{book}/invoices").json() if x["id"] == fid][0]
+        assert followup["husavdrag_shortfall_ore"] == 50000
+        assert followup["parent_invoice_id"] == inv["invoice_id"]
+        # and it is payable (settles the customer receivable)
+        paid = client.post(f"/books/{book}/invoices/{fid}/pay", json={"date": "2026-05-01"})
+        assert paid.status_code == 201
+        assert paid.json()["outstanding_ore"] == 0
+
     def test_draft_payload_encrypted_at_rest(self, client, book, tmp_path):
         cat, kid = self._setup(client, book)
         client.post(f"/books/{book}/invoice-drafts", json={"payload": {

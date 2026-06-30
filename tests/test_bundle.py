@@ -203,3 +203,36 @@ class TestSafety:
         _rewrite_zip_entry(out, "manifest.json", json.dumps(m).encode())
         with pytest.raises(bundle.SchemaVersionError):
             bundle.import_(out, tmp_path / "willnot.db")
+
+    def test_older_schema_migrated_forward_on_import(self, tmp_path):
+        import sqlite3
+
+        mgr, record, session = _make_book(tmp_path)
+        _seed_data(session)
+        # Simulate a book exported by an older app version: drop a table that a later
+        # migration introduces and roll PRAGMA user_version back to before it.
+        conn = session.connection()
+        conn.execute("DROP TABLE IF EXISTS article")
+        conn.execute("PRAGMA user_version = 13")
+        conn.commit()
+
+        out = mgr.export_book(record.id, tmp_path / "old.buyn")
+        assert bundle.read_manifest(out)["schema_version"] == 13
+
+        dest = tmp_path / "restored.db"
+        result = bundle.import_(out, dest)
+        # Import brought it up to date and recreated the missing table.
+        assert result["schema_version"] == S.SCHEMA_VERSION
+        rconn = sqlite3.connect(str(dest))
+        try:
+            assert rconn.execute("PRAGMA user_version").fetchone()[0] == S.SCHEMA_VERSION
+            assert rconn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='article'"
+            ).fetchone() is not None
+        finally:
+            rconn.close()
+
+        # And the restored book still opens + unlocks with the original passphrase.
+        restored = mgr.import_book(out, tmp_path / "restored2.db", display_name="R2")
+        s2 = mgr.open_book(restored.id, "pw")
+        assert s2.connection().execute("SELECT COUNT(*) FROM verifikation").fetchone()[0] >= 1
