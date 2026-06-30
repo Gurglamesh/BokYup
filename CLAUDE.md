@@ -264,6 +264,27 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       (KREDITFAKTURA title, "Avser faktura" reference, "Att återfå"). API GET
       /invoices/{id}/credit-notes/{event_id}/pdf; `list_invoices` exposes
       `credit_notes[]` and Fakturor UI shows a "Kreditnota N" download per credit.
+- [x] **Per-line invoice categories + split booking, BAS-konto view, structured
+      customer address** (schema v9, 2026-06). Each **invoice article line** now carries
+      its own income category (`invoice_line.category_id`); booking splits the income
+      across those categories' BAS-konton. The split is carried on
+      `moms_line.category_id` (NULL → the transaktion's category, so plain
+      income/expense is unchanged) and threaded through every booking path:
+      register_payment, `_book_invoice_issue` (fakturametod), kontant recognition
+      (`_recognition_slice` now per line; `_income_splits`/`_group_income`/`_group_moms`
+      helpers), credit/kreditnota, and `_clone_transaktion_for_report`. The **result
+      report** groups by `COALESCE(moms_line.category_id, transaktion.category_id)` so a
+      multi-category invoice splits across konton (momsdeklaration unchanged — moms is
+      per-rate). `create_invoice.category_id` is now an optional per-invoice fallback.
+      **Categories carry a `default_rate_code`** (e.g. "Försäljning IT-tjänster, 25 %");
+      the line editor pre-fills moms from it. The UI tab "Kategorier" became
+      **"BAS-konton"**: it lists the user categories *and* the engine's system konton
+      (bank/moms/fordringar) via `GET /accounts` + `BookOps.system_accounts()`.
+      **Customers gained a structured address** (street/zip_code/city/country, country
+      defaults to Sverige); the legacy single-line `address` is composed from the parts
+      and the faktura PDF renders them as separate lines. Invoice creation in the web UI
+      is article-by-article with a per-line category picker. **httpx → httpx2** (the
+      starlette TestClient dep; deprecation warning gone). All tests pass (237).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

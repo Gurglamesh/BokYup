@@ -21,6 +21,9 @@ def result_report(conn: sqlite3.Connection, period_start: str, period_end: str) 
     """
     Profit/loss for [period_start, period_end] (inclusive). All amounts integer ören.
     """
+    # Income/expense is attributed to each moms_line's own category when set (so a
+    # multi-category invoice splits across BAS-konton), falling back to the
+    # transaktion's category for plain entries.
     rows = conn.execute(
         """
         SELECT t.direction         AS direction,
@@ -32,9 +35,9 @@ def result_report(conn: sqlite3.Connection, period_start: str, period_end: str) 
         FROM moms_line m
         JOIN transaktion t  ON t.id = m.transaktion_id
         JOIN verifikation v ON v.id = t.verifikation_id
-        LEFT JOIN category c ON c.id = t.category_id
+        LEFT JOIN category c ON c.id = COALESCE(m.category_id, t.category_id)
         WHERE v.posted = 1 AND v.ver_date BETWEEN ? AND ?
-        GROUP BY t.direction, c.id
+        GROUP BY t.direction, COALESCE(m.category_id, t.category_id)
         ORDER BY c.bas_konto
         """,
         (period_start, period_end),

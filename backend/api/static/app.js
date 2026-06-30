@@ -236,7 +236,7 @@ const SECTIONS = [
   ["invoices", "Fakturor"],
   ["customers", "Kunder"],
   ["suppliers", "Leverantörer"],
-  ["categories", "Kategorier"],
+  ["categories", "BAS-konton"],
   ["rut", "RUT"],
   ["verifikat", "Verifikat"],
   ["reports", "Rapporter"],
@@ -411,14 +411,35 @@ const SECTION_RENDERERS = {
     ));
   },
 
-  // ----- categories -----
+  // ----- BAS-konton (categories + the system accounts the engine books to) -----
   async categories(panel) {
-    const list = await api("GET", `/books/${bid()}/categories`);
-    panel.appendChild(headerWithAdd("Kategorier", "+ Ny kategori", () => guard(addCategoryFlow)));
+    const [list, accounts] = await Promise.all([
+      api("GET", `/books/${bid()}/categories`),
+      api("GET", `/books/${bid()}/accounts`),
+    ]);
+    panel.appendChild(headerWithAdd("BAS-konton", "+ Ny kategori", () => guard(addCategoryFlow)));
+
+    // User categories (each a name + BAS-konto + default moms).
+    panel.appendChild(el("h3", { style: "margin-top:8px" }, "Kategorier"));
+    if (list.length === 0) {
+      panel.appendChild(el("p", { class: "muted" }, "Inga kategorier ännu."));
+    } else {
+      panel.appendChild(simpleTable(
+        ["Namn", "Typ", "BAS-konto", "Standardmoms", ""],
+        list.map((c) => [c.name, c.kind === "income" ? "Inkomst" : "Utgift", c.bas_konto,
+          rateLabel(c.default_rate_code), editBtn(() => guard(() => editCategoryFlow(c)))]),
+      ));
+    }
+
+    // System BAS-konton used by the booking engine (bank, moms, fordringar, …).
+    panel.appendChild(el("h3", { style: "margin-top:22px" }, "Systemkonton"));
+    panel.appendChild(el("p", { class: "muted" },
+      "Konton som bokföringen använder automatiskt (bank, moms, kundfordringar m.m.). "
+      + "Visas här för insyn."));
+    const sys = accounts.filter((a) => a.is_system);
     panel.appendChild(simpleTable(
-      ["Namn", "Typ", "BAS-konto", ""],
-      list.map((c) => [c.name, c.kind === "income" ? "Inkomst" : "Utgift", c.bas_konto,
-        editBtn(() => guard(() => editCategoryFlow(c)))]),
+      ["BAS-konto", "Benämning", "Roll"],
+      sys.map((a) => [a.bas_konto, a.name, a.system_label || "—"]),
     ));
   },
 
@@ -827,6 +848,10 @@ const SECTION_RENDERERS = {
 // Moms-lines editor — one row per momssats (a receipt can mix 6/12/25 %)
 // ---------------------------------------------------------------------------
 const RATE_OPTIONS = ["25", "12", "6", "0", "momsfri", "ej_avdragsgill"];
+function rateLabel(r) {
+  if (!r) return "—";
+  return (r === "momsfri" || r === "ej_avdragsgill") ? r : r + "%";
+}
 function momsLinesEditor() {
   const rowsBox = el("div", {});
   const element = el("div", {});
@@ -1025,14 +1050,19 @@ async function addCustomerFlow() {
     { name: "company_name", label: "Företagsnamn (företag)" },
     { name: "org_nr", label: "Org.nr (företag)" },
     { name: "vat_nr", label: "Momsreg.nr (företag/EU)" },
-    { name: "address", label: "Faktureringsadress" },
+    { name: "street", label: "Gatuadress" },
+    { name: "zip_code", label: "Postnummer" },
+    { name: "city", label: "Ort" },
+    { name: "country", label: "Land", value: "Sverige" },
     { name: "shipping_address", label: "Leveransadress (om annan)" },
     { name: "email", label: "E-post" },
+    { name: "phone", label: "Telefon" },
   ], "Spara");
   if (!f) return;
   const body = { type: f.type };
   for (const k of ["first_name", "last_name", "personnummer", "company_name", "org_nr",
-                   "vat_nr", "address", "shipping_address", "email"]) {
+                   "vat_nr", "street", "zip_code", "city", "country", "shipping_address",
+                   "email", "phone"]) {
     if (f[k]) body[k] = f[k];
   }
   await api("POST", `/books/${bid()}/customers`, body);
@@ -1057,14 +1087,17 @@ async function addSupplierFlow() {
 
 async function addCategoryFlow() {
   const f = await modal("Ny kategori", [
-    { name: "name", label: "Namn" },
+    { name: "name", label: "Namn (t.ex. Försäljning IT-tjänster)" },
     { name: "kind", label: "Typ", type: "select", value: "expense",
       options: [{ value: "income", label: "Inkomst" }, { value: "expense", label: "Utgift" }] },
     { name: "bas_konto", label: "BAS-konto (t.ex. 3001 eller 5460)" },
+    { name: "default_rate_code", label: "Standardmoms", type: "select", value: "25",
+      options: RATE_OPTIONS.map((r) => ({ value: r, label: rateLabel(r) })) },
   ], "Spara");
   if (!f || !f.name || !f.bas_konto) return;
   await api("POST", `/books/${bid()}/categories`, {
     name: f.name, kind: f.kind, bas_konto: parseInt(f.bas_konto, 10),
+    default_rate_code: f.default_rate_code || null,
   });
   toast("Kategori sparad");
   renderWorkspace();
@@ -1082,7 +1115,10 @@ async function editCustomerFlow(kundnummer) {
     : [{ name: "company_name", label: "Företagsnamn", value: c.company_name || "" },
        { name: "org_nr", label: "Org.nr", value: c.org_nr || "" },
        { name: "vat_nr", label: "Momsreg.nr", value: c.vat_nr || "" }];
-  fields.push({ name: "address", label: "Faktureringsadress", value: c.address || "" });
+  fields.push({ name: "street", label: "Gatuadress", value: c.street || "" });
+  fields.push({ name: "zip_code", label: "Postnummer", value: c.zip_code || "" });
+  fields.push({ name: "city", label: "Ort", value: c.city || "" });
+  fields.push({ name: "country", label: "Land", value: c.country || "Sverige" });
   fields.push({ name: "shipping_address", label: "Leveransadress (om annan)", value: c.shipping_address || "" });
   fields.push({ name: "email", label: "E-post", value: c.email || "" });
   fields.push({ name: "phone", label: "Telefon", value: c.phone || "" });
@@ -1110,10 +1146,14 @@ async function editCategoryFlow(c) {
   const f = await modal(`Ändra kategori`, [
     { name: "name", label: "Namn", value: c.name },
     { name: "bas_konto", label: "BAS-konto", value: c.bas_konto },
+    { name: "default_rate_code", label: "Standardmoms", type: "select",
+      value: c.default_rate_code || "25",
+      options: RATE_OPTIONS.map((r) => ({ value: r, label: rateLabel(r) })) },
   ], "Spara");
   if (!f || !f.name) return;
   await api("PATCH", `/books/${bid()}/categories/${c.id}`,
-            { name: f.name, bas_konto: parseInt(f.bas_konto, 10) });
+            { name: f.name, bas_konto: parseInt(f.bas_konto, 10),
+              default_rate_code: f.default_rate_code || null });
   toast("Kategori uppdaterad");
   renderWorkspace();
 }
@@ -1199,7 +1239,10 @@ async function invoiceForm(panel) {
 
   const customer = el("select", {}, ...customers.map((c) => el("option", { value: c.kundnummer },
     c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer))));
-  const cat = el("select", {}, ...incomeCats.map((c) => el("option", { value: c.id }, c.name)));
+  // Optional default category for rows that don't set their own (blank = pick per row).
+  const cat = el("select", {},
+    el("option", { value: "" }, "— välj per rad —"),
+    ...incomeCats.map((c) => el("option", { value: c.id }, c.name)));
   const today = new Date().toISOString().slice(0, 10);
   const due = new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
   const invDate = el("input", { type: "date", value: today });
@@ -1208,15 +1251,18 @@ async function invoiceForm(panel) {
   const terms = el("input", { type: "text", value: "30 dagar netto" });
   const yourRef = el("input", { type: "text" });
   const note = el("input", { type: "text" });
-  const lines = lineItemsEditor();
+  const lines = lineItemsEditor(incomeCats);
   const recips = recipientsEditor();
 
   panel.appendChild(el("div", { class: "row" },
-    wrap("Kund", customer), wrap("Kategori (BAS)", cat)));
+    wrap("Kund", customer), wrap("Standardkategori (BAS, valfri)", cat)));
   panel.appendChild(el("div", { class: "row" },
     wrap("Fakturadatum", invDate), wrap("Förfallodatum", dueDate),
     wrap("Leveransdatum (valfritt)", delivery)));
   panel.appendChild(el("h3", { style: "margin-top:18px" }, "Artikelrader"));
+  panel.appendChild(el("p", { class: "muted" },
+    "Varje rad bokförs på sin egen kategori (BAS-konto). Lämna radens kategori tom för "
+    + "att använda standardkategorin ovan."));
   panel.appendChild(lines.element);
   panel.appendChild(el("h3", { style: "margin-top:18px" }, "RUT-mottagare (hushåll, valfritt)"));
   panel.appendChild(el("p", { class: "muted" },
@@ -1233,7 +1279,8 @@ async function invoiceForm(panel) {
     const lineData = lines.get();
     if (lineData.length === 0) { toast("Lägg till minst en artikelrad", true); return; }
     const body = {
-      customer_id: parseInt(customer.value, 10), category_id: parseInt(cat.value, 10),
+      customer_id: parseInt(customer.value, 10),
+      category_id: cat.value ? parseInt(cat.value, 10) : null,
       invoice_date: invDate.value, due_date: dueDate.value,
       delivery_date: delivery.value || null, payment_terms: terms.value || null,
       your_reference: yourRef.value || null, note: note.value || null,
@@ -1247,22 +1294,31 @@ async function invoiceForm(panel) {
   }
 }
 
-function lineItemsEditor() {
+function lineItemsEditor(incomeCats) {
   const rowsBox = el("div", {});
-  const RATES = ["25", "12", "6", "0", "momsfri", "ej_avdragsgill"];
+  const cats = incomeCats || [];
   function addRow() {
     const desc = el("input", { type: "text", placeholder: "Beskrivning" });
+    const cat = el("select", {},
+      el("option", { value: "" }, "(standard)"),
+      ...cats.map((c) => el("option", { value: c.id }, c.name)));
     const qty = el("input", { type: "text", value: "1", style: "width:64px" });
     const unit = el("input", { type: "text", value: "st", style: "width:54px" });
     const price = el("input", { type: "text", value: "0,00", style: "width:96px" });
-    const rate = el("select", {}, ...RATES.map((r) => el("option", { value: r }, r === "momsfri" || r === "ej_avdragsgill" ? r : r + "%")));
+    const rate = el("select", {}, ...RATE_OPTIONS.map((r) => el("option", { value: r }, rateLabel(r))));
     const rut = el("input", { type: "checkbox" });
+    // Picking a category pre-fills the moms rate from that category's default.
+    cat.onchange = () => {
+      const c = cats.find((x) => String(x.id) === cat.value);
+      if (c && c.default_rate_code) rate.value = c.default_rate_code;
+    };
     const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end" },
-      wrap("Beskrivning", desc), wrap("Antal", qty), wrap("Enhet", unit),
+      wrap("Beskrivning", desc), wrap("Kategori (BAS)", cat), wrap("Antal", qty), wrap("Enhet", unit),
       wrap("À-pris ex moms", price), wrap("Moms", rate), wrap("RUT", rut),
       el("button", { class: "btn small ghost", onclick: (e) => e.target.closest(".row").remove() }, "✕"));
     row._get = () => ({
       description: desc.value.trim(),
+      category_id: cat.value ? parseInt(cat.value, 10) : null,
       quantity_centi: Math.round(parseFloat((qty.value || "0").replace(",", ".")) * 100),
       unit: unit.value || null, unit_price_ore: toOre(price.value),
       rate_code: rate.value, rut_eligible: rut.checked,

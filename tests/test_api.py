@@ -614,3 +614,47 @@ class TestAccountingMethod:
     def test_invalid_method_rejected(self, client, book):
         assert client.put(f"/books/{book}/accounting-method",
                           json={"method": "nope"}).status_code == 400
+
+
+class TestBasKontonAndAddress:
+    def test_accounts_endpoint_lists_system_konton(self, client, book):
+        client.post(f"/books/{book}/categories",
+                    json={"name": "IT 25%", "kind": "income", "bas_konto": 3001,
+                          "default_rate_code": "25"})
+        accts = client.get(f"/books/{book}/accounts").json()
+        by = {a["bas_konto"]: a for a in accts}
+        assert by[1930]["is_system"] and by[1930]["system_label"]
+        assert by[3001]["is_system"] is False and by[3001]["category_count"] == 1
+
+    def test_category_carries_default_rate(self, client, book):
+        client.post(f"/books/{book}/categories",
+                    json={"name": "Varor 12%", "kind": "income", "bas_konto": 3002,
+                          "default_rate_code": "12"})
+        cats = client.get(f"/books/{book}/categories").json()
+        assert [c for c in cats if c["bas_konto"] == 3002][0]["default_rate_code"] == "12"
+
+    def test_customer_structured_address(self, client, book):
+        kid = client.post(f"/books/{book}/customers", json={
+            "type": "business", "company_name": "Köpare AB", "street": "Storgatan 1",
+            "zip_code": "11122", "city": "Stockholm"}).json()["kundnummer"]
+        c = client.get(f"/books/{book}/customers/{kid}").json()
+        assert c["country"] == "Sverige"
+        assert c["city"] == "Stockholm" and "Storgatan 1" in c["address"]
+
+    def test_invoice_per_line_categories_split_booking(self, client, book):
+        it = client.post(f"/books/{book}/categories",
+                         json={"name": "IT", "kind": "income", "bas_konto": 3001}).json()["id"]
+        varor = client.post(f"/books/{book}/categories",
+                            json={"name": "Varor", "kind": "income", "bas_konto": 3002}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "X AB"}).json()["kundnummer"]
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "invoice_date": "2026-03-01", "due_date": "2026-03-31",
+            "lines": [{"description": "Tjänst", "quantity_centi": 100, "unit_price_ore": 100000,
+                       "rate_code": "25", "category_id": it},
+                      {"description": "Vara", "quantity_centi": 100, "unit_price_ore": 40000,
+                       "rate_code": "25", "category_id": varor}]}).json()
+        assert inv["ex_moms_ore"] == 140000
+        got = client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()
+        cats = {ln["category_id"] for ln in got["lines"]}
+        assert cats == {it, varor}

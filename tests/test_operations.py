@@ -635,6 +635,95 @@ class TestInvoiceLifecycle:
             ops.credit_invoice(inv["invoice_id"], reason="x")
 
 
+class TestPerLineCategory:
+    def _two_cat_invoice(self, ops, **kw):
+        it = ops.create_category("Försäljning IT-tjänster", "income", 3001, default_rate_code="25")
+        varor = ops.create_category("Försäljning varor", "income", 3002, default_rate_code="25")
+        kid = ops.create_customer("business", company_name="Köpare AB", org_nr="551122-3344")
+        inv = ops.create_invoice(
+            customer_id=kid, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Konsulttimmar", "quantity_centi": 100,
+                    "unit_price_ore": 100000, "rate_code": "25", "category_id": it},
+                   {"description": "Hårdvara", "quantity_centi": 100,
+                    "unit_price_ore": 40000, "rate_code": "25", "category_id": varor}], **kw)
+        return inv, it, varor
+
+    def test_booking_splits_income_across_line_categories(self, ops):
+        inv, it, varor = self._two_cat_invoice(ops)
+        res = ops.pay_invoice(inv["invoice_id"], date="2026-03-10")   # kontantmetod
+        konton = {p["bas_konto"]: p["amount_ore"]
+                  for p in _postings(ops, res["verifikation_id"])}
+        assert konton[3001] == -100000      # IT-tjänster income credited
+        assert konton[3002] == -40000       # varor income credited
+        assert konton[2610] == -35000       # 25 % moms on 140000
+        assert konton[1930] == 175000       # bank receives inc total
+
+    def test_result_report_splits_by_line_category(self, ops):
+        inv, it, varor = self._two_cat_invoice(ops)
+        ops.pay_invoice(inv["invoice_id"], date="2026-03-10")
+        from backend.reports import result as result_report
+        rep = result_report.result_report(ops.conn, "2026-01-01", "2026-03-31")
+        by = {r["bas_konto"]: r["amount_ore"] for r in rep["by_category"]}
+        assert by[3001] == 100000 and by[3002] == 40000
+        assert rep["income_ore"] == 140000
+
+    def test_line_without_category_uses_invoice_default(self, ops):
+        cat = ops.create_category("Tjänst", "income", 3001)
+        kid = ops.create_customer("business", company_name="X AB")
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "A", "quantity_centi": 100, "unit_price_ore": 100000,
+                    "rate_code": "25"}])
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["lines"][0]["category_id"] == cat
+
+    def test_invoice_line_without_any_category_rejected(self, ops):
+        kid = ops.create_customer("business", company_name="X AB")
+        with pytest.raises(ValueError):
+            ops.create_invoice(
+                customer_id=kid, invoice_date="2026-03-01", due_date="2026-03-31",
+                lines=[{"description": "A", "quantity_centi": 100,
+                        "unit_price_ore": 100000, "rate_code": "25"}])
+
+
+class TestStructuredAddress:
+    def test_compose_and_country_default(self, ops):
+        kid = ops.create_customer("private", first_name="A", last_name="B",
+                                  personnummer="811218-9876", street="Storgatan 1",
+                                  zip_code="11122", city="Stockholm")
+        c = ops.get_customer(kid)
+        assert c["country"] == "Sverige"
+        assert c["address"] == "Storgatan 1, 11122 Stockholm"   # SE country omitted
+
+    def test_foreign_country_shown(self, ops):
+        kid = ops.create_customer("business", company_name="Oy AB", street="Mannerheim 1",
+                                  zip_code="00100", city="Helsinki", country="Finland")
+        assert ops.get_customer(kid)["address"].endswith("Finland")
+
+    def test_update_recomposes_address(self, ops):
+        kid = ops.create_customer("private", first_name="A", last_name="B",
+                                  personnummer="811218-9876", street="Gata 1",
+                                  zip_code="111", city="Ort")
+        ops.update_customer(kid, city="Annan ort")
+        assert "Annan ort" in ops.get_customer(kid)["address"]
+
+
+class TestCategoryDefaultRate:
+    def test_create_and_list_default_rate(self, ops):
+        ops.create_category("IT 25%", "income", 3001, default_rate_code="25")
+        row = ops.conn.execute(
+            "SELECT default_rate_code FROM category WHERE bas_konto=3001").fetchone()
+        assert row["default_rate_code"] == "25"
+
+    def test_invalid_default_rate_rejected(self, ops):
+        with pytest.raises(ValueError):
+            ops.create_category("Bad", "income", 3001, default_rate_code="99")
+
+    def test_system_accounts_listed(self, ops):
+        sys = ops.system_accounts()
+        assert sys[1930] and sys[2610]          # bank + utgående moms 25 % labelled
+
+
 class TestFakturametod:
     def _setup(self, ops):
         cat = ops.create_category("Tjänst", "income", 3001)

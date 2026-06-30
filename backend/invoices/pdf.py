@@ -101,7 +101,17 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         biz.append("Org.nr: " + str(buyer["org_nr"]))
     if buyer.get("vat_nr"):
         biz.append("Momsreg.nr: " + str(buyer["vat_nr"]))
-    bill_lines = [buyer_name, buyer.get("address"), *biz, buyer.get("email")]
+    # Prefer structured address parts (street / "zip city" / country) when present.
+    if buyer.get("street") or buyer.get("zip_code") or buyer.get("city"):
+        locality = " ".join(p for p in (str(buyer.get("zip_code") or "").strip(),
+                                        str(buyer.get("city") or "").strip()) if p)
+        country = str(buyer.get("country") or "").strip()
+        addr_lines = [buyer.get("street"), locality]
+        if country and country.lower() not in ("sverige", "sweden"):
+            addr_lines.append(country)
+    else:
+        addr_lines = [buyer.get("address")]
+    bill_lines = [buyer_name, *addr_lines, *biz, buyer.get("email")]
     ship = buyer.get("shipping_address")
     ship_lines = [buyer_name, ship] if ship else []
 

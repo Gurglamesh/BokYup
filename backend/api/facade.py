@@ -182,11 +182,26 @@ class AppFacade:
     # ---- reference: categories ----
     def h_list_categories(self, p, b, q):
         ops = self._ops(p["book_id"])
-        return _rows(ops, "SELECT id, name, kind, bas_konto, active FROM category ORDER BY bas_konto")
+        return _rows(ops, "SELECT id, name, kind, bas_konto, default_rate_code, active "
+                          "FROM category ORDER BY bas_konto")
+
+    def h_list_accounts(self, p, b, q):
+        """All BAS-konton, each tagged with whether it is a system account (the
+        booking engine's bank/moms/receivable konton) and which categories use it."""
+        ops = self._ops(p["book_id"])
+        sys_map = ops.system_accounts()             # {bas_konto: label}
+        rows = _rows(ops, "SELECT a.bas_konto, a.name, "
+                          "(SELECT COUNT(*) FROM category c WHERE c.bas_konto=a.bas_konto) "
+                          "AS category_count FROM account a ORDER BY a.bas_konto")
+        for r in rows:
+            r["system_label"] = sys_map.get(r["bas_konto"])
+            r["is_system"] = r["bas_konto"] in sys_map
+        return rows
 
     def h_create_category(self, p, b, q):
         ops = self._ops(p["book_id"])
-        cid = ops.create_category(b["name"], b["kind"], b["bas_konto"], b.get("account_name"))
+        cid = ops.create_category(b["name"], b["kind"], b["bas_konto"],
+                                  b.get("account_name"), b.get("default_rate_code"))
         return {"id": cid}
 
     def h_update_category(self, p, b, q):
@@ -395,7 +410,7 @@ class AppFacade:
     # ---- invoices (faktura) ----
     def h_create_invoice(self, p, b, q):
         return self._ops(p["book_id"]).create_invoice(
-            customer_id=b["customer_id"], category_id=b["category_id"],
+            customer_id=b["customer_id"], category_id=b.get("category_id"),
             invoice_date=b["invoice_date"], due_date=b["due_date"], lines=b["lines"],
             recipients=b.get("recipients"), delivery_date=b.get("delivery_date"),
             payment_terms=b.get("payment_terms"), our_reference=b.get("our_reference"),
@@ -473,6 +488,7 @@ _route("GET", "/books/{book_id}/recovery-key", "h_recovery_key_status")
 _route("POST", "/books/{book_id}/recovery-key", "h_add_recovery_key", 201)
 
 _route("GET", "/books/{book_id}/categories", "h_list_categories")
+_route("GET", "/books/{book_id}/accounts", "h_list_accounts")
 _route("POST", "/books/{book_id}/categories", "h_create_category", 201)
 _route("PATCH", "/books/{book_id}/categories/{category_id}", "h_update_category")
 

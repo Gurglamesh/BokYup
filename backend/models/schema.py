@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -102,6 +102,8 @@ CREATE TABLE category (
     name       TEXT NOT NULL,
     kind       TEXT NOT NULL CHECK (kind IN ('income','expense')),
     bas_konto  INTEGER NOT NULL REFERENCES account(bas_konto),
+    default_rate_code TEXT CHECK (default_rate_code IN
+                       ('25','12','6','0','momsfri','ej_avdragsgill')),  -- default moms
     active     INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
 );
@@ -120,8 +122,13 @@ CREATE TABLE customer (
     contact_person  TEXT,
     vat_nr          TEXT,
     -- shared
-    address          TEXT,               -- billing / faktureringsadress
+    address          TEXT,               -- legacy single-line billing address (composed from parts)
     shipping_address TEXT,               -- leveransadress (if different)
+    -- structured billing address (CLAUDE.md > Customers); country defaults to Sverige
+    street           TEXT,
+    zip_code         TEXT,
+    city             TEXT,
+    country          TEXT,
     email           TEXT,
     phone           TEXT,
     active          INTEGER NOT NULL DEFAULT 1,
@@ -190,6 +197,8 @@ CREATE TABLE moms_line (
     transaktion_id INTEGER NOT NULL REFERENCES transaktion(id),
     rate_code      TEXT NOT NULL CHECK (rate_code IN
                        ('25','12','6','0','momsfri','ej_avdragsgill')),
+    category_id    INTEGER REFERENCES category(id),  -- per-line income/expense account
+                                                     -- (NULL = transaktion.category_id)
     ex_moms_ore    INTEGER NOT NULL,    -- beskattningsunderlag
     moms_ore       INTEGER NOT NULL,    -- ingående (purchase) / utgående (sale)
     inc_moms_ore   INTEGER NOT NULL     -- total
@@ -308,6 +317,7 @@ CREATE TABLE invoice_line (
     invoice_id     INTEGER NOT NULL REFERENCES invoice(id),
     line_no        INTEGER NOT NULL,
     description    TEXT NOT NULL,
+    category_id    INTEGER REFERENCES category(id),   -- income account this line books to
     quantity_centi INTEGER NOT NULL,                  -- quantity * 100 (1.50 -> 150)
     unit           TEXT,                              -- "h", "st", ...
     unit_price_ore INTEGER NOT NULL,                  -- ex moms, per unit
@@ -525,6 +535,15 @@ _MIGRATIONS: dict[int, str] = {
     """,
     8: """
         ALTER TABLE invoice_event ADD COLUMN credit_note_number INTEGER;
+    """,
+    9: """
+        ALTER TABLE customer ADD COLUMN street TEXT;
+        ALTER TABLE customer ADD COLUMN zip_code TEXT;
+        ALTER TABLE customer ADD COLUMN city TEXT;
+        ALTER TABLE customer ADD COLUMN country TEXT;
+        ALTER TABLE category ADD COLUMN default_rate_code TEXT;
+        ALTER TABLE moms_line ADD COLUMN category_id INTEGER;
+        ALTER TABLE invoice_line ADD COLUMN category_id INTEGER;
     """,
 }
 

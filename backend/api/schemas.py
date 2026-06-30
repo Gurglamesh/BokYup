@@ -60,12 +60,14 @@ class CategoryReq(BaseModel):
     name: str
     kind: str                     # 'income' | 'expense'
     bas_konto: int
+    default_rate_code: Optional[str] = None   # default moms for lines on this category
     account_name: Optional[str] = None
 
 
 class CategoryUpdateReq(BaseModel):
     name: Optional[str] = None
     bas_konto: Optional[int] = None
+    default_rate_code: Optional[str] = None
     active: Optional[bool] = None
     account_name: Optional[str] = None
 
@@ -79,8 +81,12 @@ class CustomerReq(BaseModel):
     org_nr: Optional[str] = None
     contact_person: Optional[str] = None
     vat_nr: Optional[str] = None
-    address: Optional[str] = None              # billing / faktureringsadress
+    address: Optional[str] = None              # legacy single-line (composed from parts)
     shipping_address: Optional[str] = None     # leveransadress (if different)
+    street: Optional[str] = None
+    zip_code: Optional[str] = None
+    city: Optional[str] = None
+    country: Optional[str] = None              # defaults to Sverige server-side
     email: Optional[str] = None
     phone: Optional[str] = None
 
@@ -95,6 +101,10 @@ class CustomerUpdateReq(BaseModel):
     vat_nr: Optional[str] = None
     address: Optional[str] = None
     shipping_address: Optional[str] = None
+    street: Optional[str] = None
+    zip_code: Optional[str] = None
+    city: Optional[str] = None
+    country: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
     active: Optional[bool] = None
@@ -200,6 +210,7 @@ class InvoiceLineReq(BaseModel):
     quantity_centi: int           # quantity * 100 (1.50 -> 150)
     unit_price_ore: int           # ex moms, per unit
     rate_code: str
+    category_id: Optional[int] = None   # income account this line books to
     unit: Optional[str] = None
     rut_eligible: bool = False
 
@@ -230,7 +241,7 @@ class CreditInvoiceReq(BaseModel):
 
 class CreateInvoiceReq(BaseModel):
     customer_id: int
-    category_id: int
+    category_id: Optional[int] = None    # fallback account; lines may each set their own
     invoice_date: str
     due_date: str
     lines: list[InvoiceLineReq]

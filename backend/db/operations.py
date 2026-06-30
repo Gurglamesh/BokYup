@@ -130,6 +130,17 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _compose_address(street, zip_code, city, country) -> str:
+    """Build a single-line display address from structured parts (zip + city on one
+    line, country only if not Sweden)."""
+    locality = " ".join(p for p in (str(zip_code).strip() if zip_code else "",
+                                    str(city).strip() if city else "") if p)
+    parts = [p for p in (street, locality) if p]
+    if country and str(country).strip().lower() not in ("sverige", "sweden"):
+        parts.append(str(country).strip())
+    return ", ".join(parts)
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -157,26 +168,36 @@ class BookOps:
         return bas_konto
 
     def create_category(self, name: str, kind: str, bas_konto: int,
-                        account_name: Optional[str] = None) -> int:
-        """Create a category linked to a BAS-konto (auto-creating the account)."""
+                        account_name: Optional[str] = None,
+                        default_rate_code: Optional[str] = None) -> int:
+        """Create a category linked to a BAS-konto (auto-creating the account).
+
+        `default_rate_code` is the moms rate the UI pre-fills for lines booked to this
+        category (e.g. "Försäljning av IT-tjänster, 25 %"). Optional; validated."""
         if kind not in ("income", "expense"):
             raise ValueError("kind must be 'income' or 'expense'")
+        if default_rate_code is not None and default_rate_code not in S.MOMS_RATES:
+            raise ValueError(f"Unknown moms rate {default_rate_code!r}")
         self.ensure_account(bas_konto, account_name or name)
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO category(name, kind, bas_konto, created_at) VALUES (?,?,?,?)",
-                (name, kind, bas_konto, _now()),
+                "INSERT INTO category(name, kind, bas_konto, default_rate_code, created_at) "
+                "VALUES (?,?,?,?,?)",
+                (name, kind, bas_konto, default_rate_code, _now()),
             )
         return cur.lastrowid
 
     def update_category(self, category_id: int, *, name: Optional[str] = None,
                         bas_konto: Optional[int] = None, active: Optional[bool] = None,
-                        account_name: Optional[str] = None) -> None:
+                        account_name: Optional[str] = None,
+                        default_rate_code: Optional[str] = None) -> None:
         """Edit reference data freely. Does not touch already-booked verifikationer."""
         if bas_konto is not None:
             self.ensure_account(bas_konto, account_name or name or f"Konto {bas_konto}")
+        if default_rate_code is not None and default_rate_code not in S.MOMS_RATES:
+            raise ValueError(f"Unknown moms rate {default_rate_code!r}")
         sets, params = _build_update(
-            {"name": name, "bas_konto": bas_konto,
+            {"name": name, "bas_konto": bas_konto, "default_rate_code": default_rate_code,
              "active": None if active is None else int(active)}
         )
         if sets:
@@ -202,9 +223,19 @@ class BookOps:
 
         cols = {"type": type, "personnummer_enc": pnr_enc, "created_at": _now()}
         for k in ("first_name", "last_name", "company_name", "org_nr",
-                  "contact_person", "vat_nr", "address", "shipping_address", "email", "phone"):
+                  "contact_person", "vat_nr", "address", "shipping_address",
+                  "street", "zip_code", "city", "country", "email", "phone"):
             if k in fields:
                 cols[k] = fields[k]
+        # Structured address defaults to Sverige and composes the legacy single-line
+        # `address` (used by the invoice snapshot/PDF) when not given explicitly.
+        if any(cols.get(k) for k in ("street", "zip_code", "city")):
+            cols.setdefault("country", "Sverige")
+            if not cols.get("country"):
+                cols["country"] = "Sverige"
+            if not cols.get("address"):
+                cols["address"] = _compose_address(cols.get("street"), cols.get("zip_code"),
+                                                   cols.get("city"), cols.get("country"))
 
         names = ", ".join(cols)
         qs = ", ".join("?" for _ in cols)
@@ -226,9 +257,18 @@ class BookOps:
             else:
                 updates["personnummer_enc"] = None
         for k in ("first_name", "last_name", "company_name", "org_nr", "contact_person",
-                  "vat_nr", "address", "shipping_address", "email", "phone", "active"):
+                  "vat_nr", "address", "shipping_address", "street", "zip_code", "city",
+                  "country", "email", "phone", "active"):
             if k in fields:
                 updates[k] = fields[k]
+        # Recompose the legacy single-line address when a structured part changed and
+        # the caller didn't pass an explicit address.
+        if any(k in updates for k in ("street", "zip_code", "city", "country")) \
+                and "address" not in updates:
+            cur = self.get_customer(kundnummer)
+            cur.update(updates)
+            updates["address"] = _compose_address(cur.get("street"), cur.get("zip_code"),
+                                                  cur.get("city"), cur.get("country"))
         sets, params = _build_update(updates)
         if sets:
             with self.conn:
@@ -356,7 +396,6 @@ class BookOps:
 
         ex, moms_by_rate, inc = self._sum_moms(transaktion_id)
         sum_moms = sum(moms_by_rate.values())
-        konto = self._category_konto(t["category_id"])
 
         claim = self.conn.execute(
             "SELECT * FROM rut_claim WHERE transaktion_id=?", (transaktion_id,)
@@ -384,8 +423,9 @@ class BookOps:
                         "WHERE id=?", (payment_date, claim["id"]))
             return {"verifikation_id": vid, "ver_number": number}
 
+        income_splits = self._income_splits(transaktion_id)
         if t["direction"] == "in":
-            postings = [(konto, ex, "utgift")]
+            postings = [(k, ex_k, "utgift") for k, ex_k in income_splits]
             if sum_moms:
                 postings.append((self._sys_account("account_ingaende_moms"), sum_moms, "ingående moms"))
             postings.append((self._sys_account("account_bank"), -inc, "betalning"))
@@ -394,7 +434,7 @@ class BookOps:
             postings = [(self._sys_account("account_bank"), inc - rut, "inbetalning")]
             if rut:
                 postings.append((self._sys_account("account_rut_fordran"), rut, "husavdrag fordran"))
-            postings.append((konto, -ex, "försäljning"))
+            postings.extend((k, -ex_k, "försäljning") for k, ex_k in income_splits)
             for rate_code, m in moms_by_rate.items():
                 if m and rate_code in _UTG_MOMS_KEY:
                     postings.append((self._sys_account(_UTG_MOMS_KEY[rate_code]), -m, f"utgående moms {rate_code}%"))
@@ -691,7 +731,7 @@ class BookOps:
     # Invoices (faktura) — issued as a pending income; numbered sequentially
     # ==================================================================
 
-    def create_invoice(self, *, customer_id: int, category_id: int,
+    def create_invoice(self, *, customer_id: int, category_id: Optional[int] = None,
                        invoice_date: str, due_date: str, lines: list[dict],
                        recipients: Optional[list[dict]] = None,
                        delivery_date: Optional[str] = None,
@@ -703,33 +743,45 @@ class BookOps:
         Issue a faktura: compute the article lines, snapshot the buyer/seller/payment
         methods, split RUT across household recipients, and create the underlying
         PENDING income (so the existing pending->paid booking and the reports apply).
-        Assigns the next unbroken invoice_number. Returns a summary dict.
+        Each article line carries its own income category (BAS-konto); booking then
+        splits the income across those konton. `category_id` is the fallback used for
+        lines that don't set their own. Assigns the next unbroken invoice_number.
         """
         customer = self.get_customer(customer_id)
-        self._check_category(category_id, "income")
         recipients = recipients or []
         if not lines:
             raise ValueError("An invoice needs at least one article line")
+        if category_id is not None:
+            self._check_category(category_id, "income")
 
-        # 1) Per-line figures + aggregate the moms lines by rate (unit price is ex-moms).
+        # 1) Per-line figures + aggregate the moms lines by (category, rate). Each line
+        #    books to its own category (BAS-konto), falling back to the invoice default.
         computed, agg = [], {}
         for i, ln in enumerate(lines, start=1):
             rate_code = ln["rate_code"]
             if rate_code not in S.MOMS_RATES:
                 raise ValueError(f"Unknown moms rate {rate_code!r}")
+            line_cat = ln.get("category_id") or category_id
+            if line_cat is None:
+                raise ValueError("Each invoice line needs a category (or set a default category)")
+            self._check_category(line_cat, "income")
             qty_centi = int(ln["quantity_centi"])
             unit_price_ore = int(ln["unit_price_ore"])
             ex = round(qty_centi * unit_price_ore / 100)
             _, moms, _ = compute_moms_figures(ex, rate_code, inclusive=False)
             computed.append({
-                "line_no": i, "description": ln["description"], "quantity_centi": qty_centi,
-                "unit": ln.get("unit"), "unit_price_ore": unit_price_ore, "rate_code": rate_code,
+                "line_no": i, "description": ln["description"], "category_id": line_cat,
+                "quantity_centi": qty_centi, "unit": ln.get("unit"),
+                "unit_price_ore": unit_price_ore, "rate_code": rate_code,
                 "rut_eligible": 1 if ln.get("rut_eligible") else 0,
                 "ex_moms_ore": ex, "moms_ore": moms,
             })
-            agg[rate_code] = agg.get(rate_code, 0) + ex
-        moms_lines = [{"rate_code": rc, "amount_ore": ex, "inclusive": False}
-                      for rc, ex in agg.items()]
+            agg[(line_cat, rate_code)] = agg.get((line_cat, rate_code), 0) + ex
+        moms_lines = [{"rate_code": rc, "amount_ore": ex, "inclusive": False, "category_id": cat}
+                      for (cat, rc), ex in agg.items()]
+        # Fallback category for the underlying transaktion row (any line's category works
+        # since per-line category_id on the moms_lines drives the actual income split).
+        fallback_category = category_id or computed[0]["category_id"]
 
         # 2) RUT recipients (household split) — validate name + personnummer.
         rut_total = 0
@@ -748,7 +800,7 @@ class BookOps:
             })
 
         # 3) Underlying pending income (snapshot + moms_lines + rut_claim + reports).
-        income = self.record_income(customer_id, category_id, moms_lines, invoice_date,
+        income = self.record_income(customer_id, fallback_category, moms_lines, invoice_date,
                                     rut_amount_ore=rut_total, note=note)
         tid = income["transaktion_id"]
         ex_total, _, inc_total = self._sum_moms(tid)
@@ -780,12 +832,12 @@ class BookOps:
             invoice_id = cur.lastrowid
             for cl in computed:
                 self.conn.execute(
-                    "INSERT INTO invoice_line(invoice_id, line_no, description, quantity_centi, "
-                    "unit, unit_price_ore, rate_code, rut_eligible, ex_moms_ore, moms_ore) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (invoice_id, cl["line_no"], cl["description"], cl["quantity_centi"],
-                     cl["unit"], cl["unit_price_ore"], cl["rate_code"], cl["rut_eligible"],
-                     cl["ex_moms_ore"], cl["moms_ore"]))
+                    "INSERT INTO invoice_line(invoice_id, line_no, description, category_id, "
+                    "quantity_centi, unit, unit_price_ore, rate_code, rut_eligible, ex_moms_ore, "
+                    "moms_ore) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (invoice_id, cl["line_no"], cl["description"], cl["category_id"],
+                     cl["quantity_centi"], cl["unit"], cl["unit_price_ore"], cl["rate_code"],
+                     cl["rut_eligible"], cl["ex_moms_ore"], cl["moms_ore"]))
             for r in clean_recipients:
                 self.conn.execute(
                     "INSERT INTO rut_recipient(invoice_id, first_name, last_name, "
@@ -878,9 +930,11 @@ class BookOps:
         inv["seller"] = json.loads(inv.pop("seller_snapshot") or "{}")
         inv["payment_methods"] = json.loads(inv.pop("payment_methods_snapshot") or "[]")
         inv["lines"] = [dict(r) for r in self.conn.execute(
-            "SELECT line_no, description, quantity_centi, unit, unit_price_ore, rate_code, "
-            "rut_eligible, ex_moms_ore, moms_ore FROM invoice_line WHERE invoice_id=? "
-            "ORDER BY line_no", (invoice_id,)).fetchall()]
+            "SELECT il.line_no, il.description, il.category_id, c.name AS category_name, "
+            "c.bas_konto AS category_bas_konto, il.quantity_centi, il.unit, il.unit_price_ore, "
+            "il.rate_code, il.rut_eligible, il.ex_moms_ore, il.moms_ore FROM invoice_line il "
+            "LEFT JOIN category c ON c.id = il.category_id WHERE il.invoice_id=? "
+            "ORDER BY il.line_no", (invoice_id,)).fetchall()]
         inv["recipients"] = [{
             "first_name": r["first_name"], "last_name": r["last_name"],
             "personnummer": self.session.decrypt_text(r["personnummer_enc"]),
@@ -1019,16 +1073,14 @@ class BookOps:
         tid = inv["transaktion_id"]
         text = f"Kreditering faktura {inv['invoice_number']}" + (f": {reason}" if reason else "")
 
-        # Reverse the proportional income/moms slice, balanced against the receivable.
+        # Reverse the proportional income/moms slice (split per line category),
+        # balanced against the receivable.
         slices = self._recognition_slice(tid, bal["credited_ore"], amount, inv["inc_moms_ore"])
-        konto = self._category_konto(
-            self.conn.execute("SELECT category_id FROM transaktion WHERE id=?", (tid,)).fetchone()["category_id"])
-        sum_ex = sum(ex for ex, _ in slices.values())
-        postings = [(konto, sum_ex, "kreditering försäljning")]
-        for rate_code, (ex_s, moms_s) in slices.items():
-            if moms_s and rate_code in _UTG_MOMS_KEY:
-                postings.append((self._sys_account(_UTG_MOMS_KEY[rate_code]), moms_s,
-                                 f"kreditering moms {rate_code}%"))
+        postings = [(konto, ex, "kreditering försäljning")
+                    for konto, ex in sorted(self._group_income(tid, slices).items())]
+        for rate_code, moms in sorted(self._group_moms(slices).items()):
+            postings.append((self._sys_account(_UTG_MOMS_KEY[rate_code]), moms,
+                             f"kreditering moms {rate_code}%"))
         postings.append((self._sys_account("account_kundfordran"), -amount, "minskad kundfordran"))
         with self.conn:
             vid, num = self._post_verifikation(date, date, text, postings)
@@ -1070,12 +1122,13 @@ class BookOps:
         slices = self._recognition_slice(orig["transaktion_id"], credited_before,
                                          ev["amount_ore"], orig["inc_moms_ore"])
         lines, ex_total, moms_total = [], 0, 0
-        for rate_code, (ex_s, moms_s) in slices.items():
+        for s in slices:
+            ex_s, moms_s = s["ex_s"], s["moms_s"]
             if ex_s or moms_s:
                 lines.append({"line_no": len(lines) + 1,
                               "description": f"Kreditering avseende faktura {orig['invoice_number']}",
                               "quantity_centi": 100, "unit": None, "unit_price_ore": -ex_s,
-                              "rate_code": rate_code, "rut_eligible": 0,
+                              "rate_code": s["rate_code"], "rut_eligible": 0,
                               "ex_moms_ore": -ex_s, "moms_ore": -moms_s})
                 ex_total -= ex_s
                 moms_total -= moms_s
@@ -1119,24 +1172,63 @@ class BookOps:
         elif transaktion_id:
             self.conn.execute("UPDATE transaktion SET status='pending' WHERE id=?", (transaktion_id,))
 
-    def _recognition_slice(self, transaktion_id, recognized_before, amount, total_inc) -> dict:
-        """Per-rate (ex, moms) to recognise for `amount` of cash, using cumulative
-        rounding so a sequence of partials reconciles exactly to the öre."""
+    def _recognition_slice(self, transaktion_id, recognized_before, amount, total_inc) -> list:
+        """Per-line (category_id, rate, ex, moms) to recognise for `amount` of cash,
+        using cumulative rounding so a sequence of partials reconciles exactly to the
+        öre. One entry per moms_line (an invoice carries one line per category×rate)."""
         before, after = recognized_before, recognized_before + amount
-        out = {}
+        out = []
         for ln in self.conn.execute(
-                "SELECT rate_code, ex_moms_ore, moms_ore FROM moms_line WHERE transaktion_id=?",
-                (transaktion_id,)):
+                "SELECT category_id, rate_code, ex_moms_ore, moms_ore FROM moms_line "
+                "WHERE transaktion_id=?", (transaktion_id,)):
             ex_s = (round(ln["ex_moms_ore"] * after / total_inc)
                     - round(ln["ex_moms_ore"] * before / total_inc))
             moms_s = (round(ln["moms_ore"] * after / total_inc)
                       - round(ln["moms_ore"] * before / total_inc))
-            out[ln["rate_code"]] = (ex_s, moms_s)
+            out.append({"category_id": ln["category_id"], "rate_code": ln["rate_code"],
+                        "ex_s": ex_s, "moms_s": moms_s})
         return out
+
+    def _income_splits(self, transaktion_id) -> list:
+        """[(bas_konto, sum_ex), …] — the full ex-moms of a transaktion grouped by each
+        moms_line's category konto (fallback the transaktion category). Used when
+        booking the whole amount at once (cash sale/purchase, fakturametod issue)."""
+        fb = self.conn.execute("SELECT category_id FROM transaktion WHERE id=?",
+                               (transaktion_id,)).fetchone()["category_id"]
+        agg: dict[int, int] = {}
+        for ln in self.conn.execute(
+                "SELECT category_id, ex_moms_ore FROM moms_line WHERE transaktion_id=?",
+                (transaktion_id,)):
+            cat = ln["category_id"] if ln["category_id"] is not None else fb
+            konto = self._category_konto(cat)
+            agg[konto] = agg.get(konto, 0) + ln["ex_moms_ore"]
+        return sorted(agg.items())
+
+    def _group_income(self, transaktion_id, slices) -> dict:
+        """{bas_konto: sum_ex} — slice ex grouped by each line's category konto, falling
+        back to the transaktion's category when a line carries none (plain income)."""
+        fb = self.conn.execute("SELECT category_id FROM transaktion WHERE id=?",
+                               (transaktion_id,)).fetchone()["category_id"]
+        agg: dict[int, int] = {}
+        for s in slices:
+            cat = s["category_id"] if s["category_id"] is not None else fb
+            konto = self._category_konto(cat)
+            agg[konto] = agg.get(konto, 0) + s["ex_s"]
+        return agg
+
+    @staticmethod
+    def _group_moms(slices) -> dict:
+        """{rate_code: sum_moms} over the utgående-moms rates only."""
+        agg: dict[str, int] = {}
+        for s in slices:
+            if s["moms_s"] and s["rate_code"] in _UTG_MOMS_KEY:
+                agg[s["rate_code"]] = agg.get(s["rate_code"], 0) + s["moms_s"]
+        return agg
 
     def _book_recognition_clone(self, src_transaktion_id, vid, date, slices, sign, note) -> None:
         """Synthetic transaktion + sliced moms_lines linked to `vid` so the moms/result
-        reports attribute this slice to `vid`'s date (hidden from the Transaktioner list)."""
+        reports attribute this slice to `vid`'s date (hidden from the Transaktioner list).
+        Carries each slice's category_id so the result report splits by line category."""
         src = self.conn.execute(
             "SELECT direction, category_id, supplier_id, customer_id FROM transaktion WHERE id=?",
             (src_transaktion_id,)).fetchone()
@@ -1146,28 +1238,26 @@ class BookOps:
             (src["direction"], src["category_id"], src["supplier_id"], src["customer_id"],
              date, vid, note, _now()))
         rid = cur.lastrowid
-        for rate_code, (ex_s, moms_s) in slices.items():
-            if ex_s or moms_s:
+        for s in slices:
+            if s["ex_s"] or s["moms_s"]:
                 self.conn.execute(
-                    "INSERT INTO moms_line(transaktion_id, rate_code, ex_moms_ore, moms_ore, "
-                    "inc_moms_ore) VALUES (?,?,?,?,?)",
-                    (rid, rate_code, sign * ex_s, sign * moms_s, sign * (ex_s + moms_s)))
+                    "INSERT INTO moms_line(transaktion_id, rate_code, category_id, ex_moms_ore, "
+                    "moms_ore, inc_moms_ore) VALUES (?,?,?,?,?,?)",
+                    (rid, s["rate_code"], s["category_id"], sign * s["ex_s"],
+                     sign * s["moms_s"], sign * (s["ex_s"] + s["moms_s"])))
 
     def _book_kontant_recognition(self, transaktion_id, recognized_before, amount, total_inc,
                                   date, sign, text) -> tuple[int, int]:
         """Kontantmetod: book bank +/- amount against income + moms recognised for the
-        proportional slice, plus the report-clone. Returns (verifikation_id, number)."""
+        proportional slice (income split per line category), plus the report-clone.
+        Returns (verifikation_id, number)."""
         slices = self._recognition_slice(transaktion_id, recognized_before, amount, total_inc)
-        konto = self._category_konto(
-            self.conn.execute("SELECT category_id FROM transaktion WHERE id=?",
-                              (transaktion_id,)).fetchone()["category_id"])
-        sum_ex = sum(ex for ex, _ in slices.values())
-        postings = [(self._sys_account("account_bank"), sign * amount, "inbetalning"),
-                    (konto, -sign * sum_ex, "försäljning")]
-        for rate_code, (ex_s, moms_s) in slices.items():
-            if moms_s and rate_code in _UTG_MOMS_KEY:
-                postings.append((self._sys_account(_UTG_MOMS_KEY[rate_code]), -sign * moms_s,
-                                 f"utgående moms {rate_code}%"))
+        postings = [(self._sys_account("account_bank"), sign * amount, "inbetalning")]
+        for konto, ex in sorted(self._group_income(transaktion_id, slices).items()):
+            postings.append((konto, -sign * ex, "försäljning"))
+        for rate_code, moms in sorted(self._group_moms(slices).items()):
+            postings.append((self._sys_account(_UTG_MOMS_KEY[rate_code]), -sign * moms,
+                             f"utgående moms {rate_code}%"))
         with self.conn:
             vid, num = self._post_verifikation(date, date, text, postings)
             self._book_recognition_clone(transaktion_id, vid, date, slices, sign, "fakturabetalning")
@@ -1180,17 +1270,14 @@ class BookOps:
         verifikation (so the moms is reported in the invoice's period). The later
         payment settles the receivable. Must be a sale (direction 'out').
         """
-        t = self.conn.execute(
-            "SELECT category_id FROM transaktion WHERE id=?", (transaktion_id,)).fetchone()
         ex, moms_by_rate, inc = self._sum_moms(transaktion_id)
-        konto = self._category_konto(t["category_id"])
         cust_part = inc - rut_ore
         postings = []
         if cust_part:
             postings.append((self._sys_account("account_kundfordran"), cust_part, "kundfordran"))
         if rut_ore:
             postings.append((self._sys_account("account_rut_fordran"), rut_ore, "husavdrag fordran"))
-        postings.append((konto, -ex, "försäljning"))
+        postings.extend((k, -ex_k, "försäljning") for k, ex_k in self._income_splits(transaktion_id))
         for rate_code, m in moms_by_rate.items():
             if m and rate_code in _UTG_MOMS_KEY:
                 postings.append((self._sys_account(_UTG_MOMS_KEY[rate_code]), -m,
@@ -1295,6 +1382,15 @@ class BookOps:
         self.ensure_account(n, _SYS_ACCOUNT_NAMES.get(config_key, f"Konto {n}"))
         return n
 
+    def system_accounts(self) -> dict[int, str]:
+        """The booking engine's BAS-konton (bank, moms, receivables, …), each
+        materialised into the chart and mapped {bas_konto: human label}. Lets the UI
+        show the otherwise-hidden system konton alongside the user's categories."""
+        out: dict[int, str] = {}
+        for key, label in _SYS_ACCOUNT_NAMES.items():
+            out[self._sys_account(key)] = label
+        return out
+
     def _check_category(self, category_id: int, expected_kind: str) -> None:
         row = self.conn.execute(
             "SELECT kind FROM category WHERE id=?", (category_id,)
@@ -1324,7 +1420,7 @@ class BookOps:
             (src_transaktion_id,),
         ).fetchone()
         lines = self.conn.execute(
-            "SELECT rate_code, ex_moms_ore, moms_ore, inc_moms_ore FROM moms_line "
+            "SELECT rate_code, category_id, ex_moms_ore, moms_ore, inc_moms_ore FROM moms_line "
             "WHERE transaktion_id=?", (src_transaktion_id,),
         ).fetchall()
         if src is None or not lines:
@@ -1339,9 +1435,9 @@ class BookOps:
         rid = cur.lastrowid
         for ln in lines:
             self.conn.execute(
-                "INSERT INTO moms_line(transaktion_id, rate_code, ex_moms_ore, moms_ore, inc_moms_ore) "
-                "VALUES (?,?,?,?,?)",
-                (rid, ln["rate_code"], sign * ln["ex_moms_ore"],
+                "INSERT INTO moms_line(transaktion_id, rate_code, category_id, ex_moms_ore, "
+                "moms_ore, inc_moms_ore) VALUES (?,?,?,?,?,?)",
+                (rid, ln["rate_code"], ln["category_id"], sign * ln["ex_moms_ore"],
                  sign * ln["moms_ore"], sign * ln["inc_moms_ore"]),
             )
         return rid
@@ -1370,9 +1466,9 @@ class BookOps:
                     ln["amount_ore"], rate_code, ln.get("inclusive", True)
                 )
                 self.conn.execute(
-                    "INSERT INTO moms_line(transaktion_id, rate_code, ex_moms_ore, "
-                    "moms_ore, inc_moms_ore) VALUES (?,?,?,?,?)",
-                    (transaktion_id, rate_code, ex, moms, inc),
+                    "INSERT INTO moms_line(transaktion_id, rate_code, category_id, ex_moms_ore, "
+                    "moms_ore, inc_moms_ore) VALUES (?,?,?,?,?,?)",
+                    (transaktion_id, rate_code, ln.get("category_id"), ex, moms, inc),
                 )
 
     def _insert_rut_claim(self, transaktion_id, customer_id, rut_amount_ore, year) -> int:

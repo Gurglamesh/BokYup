@@ -171,6 +171,10 @@ def _build_router():
     def list_categories(book_id: str, request: Request):
         return fac(request).h_list_categories({"book_id": book_id}, {}, {})
 
+    @r.get("/books/{book_id}/accounts")
+    def list_accounts(book_id: str, request: Request):
+        return fac(request).h_list_accounts({"book_id": book_id}, {}, {})
+
     @r.post("/books/{book_id}/categories", status_code=201)
     def create_category(book_id: str, body: sc.CategoryReq, request: Request):
         return fac(request).h_create_category({"book_id": book_id}, body.model_dump(), {})
