@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 9
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -102,6 +102,8 @@ CREATE TABLE category (
     name       TEXT NOT NULL,
     kind       TEXT NOT NULL CHECK (kind IN ('income','expense')),
     bas_konto  INTEGER NOT NULL REFERENCES account(bas_konto),
+    default_rate_code TEXT CHECK (default_rate_code IN
+                       ('25','12','6','0','momsfri','ej_avdragsgill')),  -- default moms
     active     INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
 );
@@ -120,7 +122,13 @@ CREATE TABLE customer (
     contact_person  TEXT,
     vat_nr          TEXT,
     -- shared
-    address         TEXT,
+    address          TEXT,               -- legacy single-line billing address (composed from parts)
+    shipping_address TEXT,               -- leveransadress (if different)
+    -- structured billing address (CLAUDE.md > Customers); country defaults to Sverige
+    street           TEXT,
+    zip_code         TEXT,
+    city             TEXT,
+    country          TEXT,
     email           TEXT,
     phone           TEXT,
     active          INTEGER NOT NULL DEFAULT 1,
@@ -189,6 +197,8 @@ CREATE TABLE moms_line (
     transaktion_id INTEGER NOT NULL REFERENCES transaktion(id),
     rate_code      TEXT NOT NULL CHECK (rate_code IN
                        ('25','12','6','0','momsfri','ej_avdragsgill')),
+    category_id    INTEGER REFERENCES category(id),  -- per-line income/expense account
+                                                     -- (NULL = transaktion.category_id)
     ex_moms_ore    INTEGER NOT NULL,    -- beskattningsunderlag
     moms_ore       INTEGER NOT NULL,    -- ingående (purchase) / utgående (sale)
     inc_moms_ore   INTEGER NOT NULL     -- total
@@ -220,6 +230,115 @@ CREATE TABLE period_lock (
     locked_at    TEXT NOT NULL
 );
 
+-- ----- receipt photos (encrypted; stored as files in <db>.photos/) ---------
+-- The file content is AES-256-GCM ciphertext (book DEK); this row is the index.
+-- A transaktion may carry several (e.g. multi-page) receipts.
+CREATE TABLE receipt (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaktion_id  INTEGER NOT NULL REFERENCES transaktion(id),
+    filename        TEXT NOT NULL,      -- name inside <db>.photos/ (ciphertext file)
+    mime            TEXT NOT NULL,
+    original_format TEXT CHECK (original_format IN ('paper','digital')),
+    byte_size       INTEGER NOT NULL,   -- plaintext size, for display
+    sha256          TEXT NOT NULL,      -- of the ciphertext file (integrity)
+    created_at      TEXT NOT NULL
+);
+
+-- ----- seller/company profile (single row id=1) — frozen onto each invoice ---
+CREATE TABLE company (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    name        TEXT,
+    org_nr      TEXT,
+    vat_nr      TEXT,                                  -- momsregistreringsnummer
+    address     TEXT,
+    email       TEXT,
+    phone       TEXT,
+    f_skatt     INTEGER NOT NULL DEFAULT 1,            -- godkänd för F-skatt
+    logo_enc    BLOB,                                  -- AES-GCM(DEK) PNG logo, on all documents
+    updated_at  TEXT
+);
+
+-- ----- payment methods (Swish / Bankgiro / IBAN / ...) — label + number/link --
+CREATE TABLE payment_method (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    label      TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    active     INTEGER NOT NULL DEFAULT 1
+);
+
+-- ----- invoice (faktura). invoice_number is an UNBROKEN sequential series, ----
+-- assigned at issue (legal, like verifikationsnummer). The buyer block (which may
+-- hold a personnummer) is encrypted; the seller + payment-method blocks are frozen
+-- as JSON so later edits never change an already-issued faktura.
+CREATE TABLE invoice (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_number           INTEGER UNIQUE,
+    customer_id              INTEGER REFERENCES customer(kundnummer),
+    transaktion_id           INTEGER REFERENCES transaktion(id),
+    invoice_date             TEXT NOT NULL,
+    due_date                 TEXT NOT NULL,
+    delivery_date            TEXT,
+    payment_terms            TEXT,
+    buyer_snapshot_enc       TEXT,
+    seller_snapshot          TEXT,
+    payment_methods_snapshot TEXT,
+    our_reference            TEXT,
+    your_reference           TEXT,
+    note                     TEXT,
+    ex_moms_ore              INTEGER NOT NULL DEFAULT 0,
+    moms_ore                 INTEGER NOT NULL DEFAULT 0,
+    inc_moms_ore             INTEGER NOT NULL DEFAULT 0,
+    rut_total_ore            INTEGER NOT NULL DEFAULT 0,
+    cancelled_at             TEXT,                  -- makulerad (voided before booking)
+    credited_at              TEXT,                  -- krediterad (booking reversed)
+    credit_verifikation_id   INTEGER REFERENCES verifikation(id),
+    created_at               TEXT NOT NULL
+);
+
+-- ----- invoice settlement subledger: each payment / refund / credit is an event
+-- that books its own verifikation; the invoice's outstanding balance + state are
+-- derived from these (supports partial payments, partial credits, and refunds).
+CREATE TABLE invoice_event (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_id      INTEGER NOT NULL REFERENCES invoice(id),
+    kind            TEXT NOT NULL CHECK (kind IN ('payment','refund','credit')),
+    amount_ore      INTEGER NOT NULL,        -- inc-moms amount of this event (positive)
+    date            TEXT NOT NULL,
+    verifikation_id INTEGER REFERENCES verifikation(id),
+    credit_note_number INTEGER,              -- kreditfaktura number (credit events; shares the faktura series)
+    note            TEXT,
+    created_at      TEXT NOT NULL
+);
+
+-- ----- invoice line items (articles) -------------------------------------
+CREATE TABLE invoice_line (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_id     INTEGER NOT NULL REFERENCES invoice(id),
+    line_no        INTEGER NOT NULL,
+    description    TEXT NOT NULL,
+    category_id    INTEGER REFERENCES category(id),   -- income account this line books to
+    quantity_centi INTEGER NOT NULL,                  -- quantity * 100 (1.50 -> 150)
+    unit           TEXT,                              -- "h", "st", ...
+    unit_price_ore INTEGER NOT NULL,                  -- ex moms, per unit
+    rate_code      TEXT NOT NULL CHECK (rate_code IN
+                       ('25','12','6','0','momsfri','ej_avdragsgill')),
+    rut_eligible   INTEGER NOT NULL DEFAULT 0,
+    ex_moms_ore    INTEGER NOT NULL,                  -- line total ex moms
+    moms_ore       INTEGER NOT NULL
+);
+
+-- ----- RUT recipients: a household can split RUT across several people, each ---
+-- with their own name + personnummer (encrypted) and share of the skattereduktion.
+CREATE TABLE rut_recipient (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_id       INTEGER NOT NULL REFERENCES invoice(id),
+    first_name       TEXT NOT NULL,
+    last_name        TEXT NOT NULL,
+    personnummer_enc TEXT NOT NULL,
+    rut_amount_ore   INTEGER NOT NULL
+);
+
 -- ----- indexes ------------------------------------------------------------
 CREATE INDEX idx_verifikation_date   ON verifikation(ver_date);
 CREATE INDEX idx_posting_ver         ON posting(verifikation_id);
@@ -228,6 +347,11 @@ CREATE INDEX idx_transaktion_status  ON transaktion(status);
 CREATE INDEX idx_moms_line_trans     ON moms_line(transaktion_id);
 CREATE INDEX idx_rut_state           ON rut_claim(state);
 CREATE INDEX idx_customer_type       ON customer(type);
+CREATE INDEX idx_receipt_trans       ON receipt(transaktion_id);
+CREATE INDEX idx_invoice_number      ON invoice(invoice_number);
+CREATE INDEX idx_invoice_line_inv    ON invoice_line(invoice_id);
+CREATE INDEX idx_rut_recipient_inv   ON rut_recipient(invoice_id);
+CREATE INDEX idx_invoice_event_inv   ON invoice_event(invoice_id);
 """
 
 # ---------------------------------------------------------------------------
@@ -280,6 +404,10 @@ END;
 # RUT/ROT amount is taken as user input.)
 _DEFAULT_CONFIG = {
     "rut_rot_cap_ore_per_customer_year": "7500000",  # 75 000 kr (verified 2026-06)
+    # Bookkeeping method for invoices (per book): 'kontantmetod' (book at payment +
+    # year-end accruals) or 'fakturametod' (book kundfordran/income/moms at issue,
+    # then bank/kundfordran at payment). Default kontantmetod.
+    "bokforingsmetod": "kontantmetod",
     # System BAS-konton used by the booking engine (Layer 4). Editable so a
     # revisor can map them to the entity's chart. Defaults follow standard BAS.
     "account_bank": "1930",                 # Företagskonto / bank
@@ -322,6 +450,140 @@ def get_schema_version(conn: sqlite3.Connection) -> int:
     """Return the schema version stored in PRAGMA user_version (0 if unset)."""
     row = conn.execute("PRAGMA user_version").fetchone()
     return int(row[0]) if row is not None else 0
+
+
+# Forward migrations for already-created books, keyed by the version they bring the
+# database UP TO. Each step is frozen (carries its own DDL) and idempotent.
+_MIGRATIONS: dict[int, str] = {
+    2: """
+        CREATE TABLE IF NOT EXISTS receipt (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaktion_id  INTEGER NOT NULL REFERENCES transaktion(id),
+            filename        TEXT NOT NULL,
+            mime            TEXT NOT NULL,
+            original_format TEXT CHECK (original_format IN ('paper','digital')),
+            byte_size       INTEGER NOT NULL,
+            sha256          TEXT NOT NULL,
+            created_at      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_receipt_trans ON receipt(transaktion_id);
+    """,
+    3: """
+        CREATE TABLE IF NOT EXISTS company (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            name TEXT, org_nr TEXT, vat_nr TEXT, address TEXT, email TEXT, phone TEXT,
+            f_skatt INTEGER NOT NULL DEFAULT 1, updated_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS payment_method (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL, value TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS invoice (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_number INTEGER UNIQUE,
+            customer_id INTEGER REFERENCES customer(kundnummer),
+            transaktion_id INTEGER REFERENCES transaktion(id),
+            invoice_date TEXT NOT NULL, due_date TEXT NOT NULL, delivery_date TEXT,
+            payment_terms TEXT, buyer_snapshot_enc TEXT, seller_snapshot TEXT,
+            payment_methods_snapshot TEXT, our_reference TEXT, your_reference TEXT, note TEXT,
+            ex_moms_ore INTEGER NOT NULL DEFAULT 0, moms_ore INTEGER NOT NULL DEFAULT 0,
+            inc_moms_ore INTEGER NOT NULL DEFAULT 0, rut_total_ore INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS invoice_line (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id INTEGER NOT NULL REFERENCES invoice(id),
+            line_no INTEGER NOT NULL, description TEXT NOT NULL,
+            quantity_centi INTEGER NOT NULL, unit TEXT, unit_price_ore INTEGER NOT NULL,
+            rate_code TEXT NOT NULL CHECK (rate_code IN
+                ('25','12','6','0','momsfri','ej_avdragsgill')),
+            rut_eligible INTEGER NOT NULL DEFAULT 0,
+            ex_moms_ore INTEGER NOT NULL, moms_ore INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS rut_recipient (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id INTEGER NOT NULL REFERENCES invoice(id),
+            first_name TEXT NOT NULL, last_name TEXT NOT NULL,
+            personnummer_enc TEXT NOT NULL, rut_amount_ore INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_invoice_number   ON invoice(invoice_number);
+        CREATE INDEX IF NOT EXISTS idx_invoice_line_inv ON invoice_line(invoice_id);
+        CREATE INDEX IF NOT EXISTS idx_rut_recipient_inv ON rut_recipient(invoice_id);
+    """,
+    4: """
+        ALTER TABLE company ADD COLUMN logo_enc BLOB;
+    """,
+    5: """
+        ALTER TABLE customer ADD COLUMN shipping_address TEXT;
+    """,
+    6: """
+        ALTER TABLE invoice ADD COLUMN cancelled_at TEXT;
+        ALTER TABLE invoice ADD COLUMN credited_at TEXT;
+        ALTER TABLE invoice ADD COLUMN credit_verifikation_id INTEGER;
+    """,
+    7: """
+        CREATE TABLE IF NOT EXISTS invoice_event (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id INTEGER NOT NULL REFERENCES invoice(id),
+            kind TEXT NOT NULL CHECK (kind IN ('payment','refund','credit')),
+            amount_ore INTEGER NOT NULL, date TEXT NOT NULL,
+            verifikation_id INTEGER REFERENCES verifikation(id),
+            note TEXT, created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_invoice_event_inv ON invoice_event(invoice_id);
+    """,
+    8: """
+        ALTER TABLE invoice_event ADD COLUMN credit_note_number INTEGER;
+    """,
+    9: """
+        ALTER TABLE customer ADD COLUMN street TEXT;
+        ALTER TABLE customer ADD COLUMN zip_code TEXT;
+        ALTER TABLE customer ADD COLUMN city TEXT;
+        ALTER TABLE customer ADD COLUMN country TEXT;
+        ALTER TABLE category ADD COLUMN default_rate_code TEXT;
+        ALTER TABLE moms_line ADD COLUMN category_id INTEGER;
+        ALTER TABLE invoice_line ADD COLUMN category_id INTEGER;
+    """,
+}
+
+
+def migrate(conn: sqlite3.Connection) -> int:
+    """
+    Bring an existing book's schema up to SCHEMA_VERSION, running any missing
+    forward migrations in order. No-op on a fresh/current database. Returns the
+    resulting schema version.
+    """
+    # Migrations bring an EXISTING book up to date; a brand-new/empty database is
+    # created at the current version by initialize_schema, not migrated into one.
+    if not is_initialized(conn):
+        return get_schema_version(conn)
+    current = get_schema_version(conn)
+    for target in sorted(_MIGRATIONS):
+        if current < target:
+            _run_migration(conn, _MIGRATIONS[target])
+            conn.execute(f"PRAGMA user_version = {target}")
+            current = target
+    conn.commit()
+    return current
+
+
+def _run_migration(conn: sqlite3.Connection, script: str) -> None:
+    """
+    Execute a forward migration statement-by-statement, tolerating an already-applied
+    `ALTER TABLE ... ADD COLUMN` (SQLite has no IF NOT EXISTS for it). This keeps
+    migrations idempotent so a partially-migrated book can be re-run safely. The
+    statements here contain no semicolons inside literals, so a naive split is safe.
+    """
+    for stmt in script.split(";"):
+        sql = stmt.strip()
+        if not sql:
+            continue
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
 
 def is_initialized(conn: sqlite3.Connection) -> bool:

@@ -41,10 +41,18 @@ SALT_LEN = 16
 NONCE_LEN = 12        # AES-GCM standard nonce size
 
 # Argon2id work factors. Defaults aim for ~0.3–1s on a typical laptop.
-# time_cost/memory_cost can be raised over time; old DBs keep their own values.
+# time_cost/memory_cost can be raised over time; old DBs keep their own values
+# (each wrapped DEK stores the params it was made with).
 ARGON2_TIME_COST = 3
 ARGON2_MEMORY_COST = 64 * 1024   # 64 MiB, in KiB
-ARGON2_PARALLELISM = 4
+# Parallelism MUST stay 1. The KEK is derived on every platform the app runs on,
+# including the phone, where the Argon2 stack runs as WebAssembly (Pyodide) with
+# NO pthreads — any parallelism > 1 raises "Threading failure" there. With a single
+# lane the derivation is also fully deterministic across platforms, so a book made
+# (and exported) on a PC unlocks bit-for-bit on the phone. This is what makes the
+# "encrypt on PC, import on phone" requirement possible. Strengthen via time_cost/
+# memory_cost, never parallelism. (Verified: PC and Pyodide produce identical KEKs.)
+ARGON2_PARALLELISM = 1
 
 CRYPTO_FORMAT_VERSION = 1
 

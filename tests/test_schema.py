@@ -269,3 +269,69 @@ class TestMomsRate:
     def test_unknown_rate_raises(self):
         with pytest.raises(ValueError):
             S.moms_rate("18")
+
+
+# ---------------------------------------------------------------------------
+# Forward migration (existing books gain new tables)
+# ---------------------------------------------------------------------------
+
+class TestMigration:
+    def test_fresh_schema_is_current(self, conn):
+        assert S.get_schema_version(conn) == S.SCHEMA_VERSION
+        assert S.SCHEMA_VERSION >= 2
+
+    def test_migrate_adds_receipt_table_to_v1_db(self, tmp_path: Path):
+        # Simulate a pre-receipt (v1) book: full schema minus the receipt table.
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        S.initialize_schema(db)
+        db.execute("DROP TABLE receipt")
+        db.execute("PRAGMA user_version = 1")
+        db.commit()
+        assert S.get_schema_version(db) == 1
+
+        result = S.migrate(db)
+        assert result == S.SCHEMA_VERSION
+        assert S.get_schema_version(db) == S.SCHEMA_VERSION
+        # receipt table now exists and is usable
+        names = {r["name"] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "receipt" in names
+
+    def test_migrate_is_idempotent(self, conn):
+        before = S.get_schema_version(conn)
+        assert S.migrate(conn) == before     # already current -> no-op
+        assert S.migrate(conn) == before
+
+
+class TestInvoiceSchema:
+    def test_new_tables_exist(self, conn):
+        names = {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"company", "payment_method", "invoice", "invoice_line",
+                "rut_recipient"} <= names
+
+    def test_company_is_single_row(self, conn):
+        conn.execute("INSERT INTO company(id, name) VALUES (1, 'Min Firma')")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO company(id, name) VALUES (2, 'Annan')")
+
+    def test_invoice_number_is_unique(self, conn):
+        conn.execute("INSERT INTO invoice(invoice_number, invoice_date, due_date, created_at) "
+                     "VALUES (1, '2026-01-01', '2026-01-31', '2026-01-01')")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO invoice(invoice_number, invoice_date, due_date, created_at) "
+                         "VALUES (1, '2026-02-01', '2026-02-28', '2026-02-01')")
+
+    def test_v2_to_v3_migration_adds_invoice_tables(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        S.initialize_schema(db)
+        for t in ("invoice", "invoice_line", "rut_recipient", "company", "payment_method"):
+            db.execute(f"DROP TABLE {t}")
+        db.execute("PRAGMA user_version = 2")
+        db.commit()
+        assert S.migrate(db) == S.SCHEMA_VERSION
+        names = {r["name"] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"company", "payment_method", "invoice", "invoice_line", "rut_recipient"} <= names

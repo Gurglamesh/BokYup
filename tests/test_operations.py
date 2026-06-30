@@ -385,3 +385,441 @@ class TestYearEndAccrual:
                           "2026-12-20", paid_date="2026-12-20")
         out = ops.book_year_end_accruals("2026-12-31")
         assert out["count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Receipts (encrypted photos)
+# ---------------------------------------------------------------------------
+
+class TestReceipts:
+    def _pending_expense(self, ops: BookOps) -> int:
+        cat = ops.create_category("Kontorsmaterial", "expense", 5460)
+        res = ops.record_expense(None, cat, [{"rate_code": "25", "amount_ore": 1250}],
+                                 "2026-02-01")
+        return res["transaktion_id"]
+
+    def test_attach_then_get_roundtrips(self, ops: BookOps):
+        tid = self._pending_expense(ops)
+        data = b"\x89PNG\r\n\x1a\n fake image bytes \xff\x00"
+        rc = ops.attach_receipt(tid, data, "image/png", "paper")
+        got, mime = ops.get_receipt(rc["id"])
+        assert got == data and mime == "image/png"
+
+    def test_stored_file_is_ciphertext(self, ops: BookOps, tmp_path: Path):
+        tid = self._pending_expense(ops)
+        data = b"secret receipt total 1250"
+        rc = ops.attach_receipt(tid, data, "image/jpeg")
+        photos = Path(str(ops.session.record.db_path) + ".photos")
+        blob = (photos / rc["filename"]).read_bytes()
+        assert data not in blob          # encrypted at rest
+        assert len(blob) > len(data)     # nonce + GCM tag overhead
+
+    def test_list_receipts(self, ops: BookOps):
+        tid = self._pending_expense(ops)
+        ops.attach_receipt(tid, b"a", "image/png")
+        ops.attach_receipt(tid, b"bb", "image/png")
+        lst = ops.list_receipts(tid)
+        assert len(lst) == 2
+        assert {r["byte_size"] for r in lst} == {1, 2}
+
+    def test_integrity_check_detects_tampering(self, ops: BookOps):
+        tid = self._pending_expense(ops)
+        rc = ops.attach_receipt(tid, b"hello", "image/png")
+        photos = Path(str(ops.session.record.db_path) + ".photos")
+        (photos / rc["filename"]).write_bytes(b"tampered")
+        with pytest.raises(Exception):
+            ops.get_receipt(rc["id"])
+
+    def test_delete_allowed_while_pending(self, ops: BookOps):
+        tid = self._pending_expense(ops)
+        rc = ops.attach_receipt(tid, b"x", "image/png")
+        ops.delete_receipt(rc["id"])
+        assert ops.list_receipts(tid) == []
+
+    def test_delete_blocked_after_booking(self, ops: BookOps):
+        tid = self._pending_expense(ops)
+        rc = ops.attach_receipt(tid, b"x", "image/png")
+        ops.register_payment(tid, "2026-02-05")     # books it -> immutable
+        with pytest.raises(InvalidState):
+            ops.delete_receipt(rc["id"])
+
+    def test_attach_rejects_unknown_transaktion(self, ops: BookOps):
+        with pytest.raises(KeyError):
+            ops.attach_receipt(9999, b"x", "image/png")
+
+
+# ---------------------------------------------------------------------------
+# Invoices (faktura)
+# ---------------------------------------------------------------------------
+
+class TestInvoices:
+    def _setup(self, ops):
+        cat = ops.create_category("Tjänster", "income", 3001)
+        kid = ops.create_customer("private", first_name="Anna", last_name="Svensson",
+                                  personnummer="811218-9876", address="Storgatan 1, Stockholm")
+        return cat, kid
+
+    def test_company_and_payment_methods(self, ops):
+        ops.set_company(name="Min Firma AB", org_nr="556677-8899", vat_nr="SE556677889901",
+                        address="Vägen 2", f_skatt=1)
+        assert ops.get_company()["name"] == "Min Firma AB"
+        pid = ops.create_payment_method("Swish", "123 456 78 90")
+        ops.create_payment_method("Bankgiro", "123-4567", sort_order=1)
+        methods = ops.list_payment_methods(active_only=True)
+        assert [m["label"] for m in methods] == ["Swish", "Bankgiro"]
+        ops.update_payment_method(pid, active=0)
+        assert [m["label"] for m in ops.list_payment_methods(active_only=True)] == ["Bankgiro"]
+
+    def test_create_invoice_numbering_and_lines(self, ops):
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Konsult", "quantity_centi": 200, "unit": "h",
+                    "unit_price_ore": 100000, "rate_code": "25"},
+                   {"description": "Material", "quantity_centi": 100, "unit": "st",
+                    "unit_price_ore": 5000, "rate_code": "25"}])
+        # 2h*1000 + 1*50 = 2050 kr ex; moms 25% = 512.50 kr
+        assert inv["invoice_number"] == 1
+        assert inv["ex_moms_ore"] == 205000
+        assert inv["moms_ore"] == 51250
+        assert inv["inc_moms_ore"] == 256250
+        # next invoice gets the next unbroken number
+        inv2 = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-02",
+                                  due_date="2026-04-01",
+                                  lines=[{"description": "X", "quantity_centi": 100,
+                                          "unit_price_ore": 10000, "rate_code": "25"}])
+        assert inv2["invoice_number"] == 2
+
+    def test_invoice_is_pending_then_books_when_paid(self, ops):
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                                 due_date="2026-03-31",
+                                 lines=[{"description": "Jobb", "quantity_centi": 100,
+                                         "unit_price_ore": 100000, "rate_code": "25"}])
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["status"] == "pending"
+        ops.register_payment(inv["transaktion_id"], "2026-03-15")
+        assert ops.get_invoice(inv["invoice_id"])["status"] == "paid"
+
+    def test_rut_split_across_household(self, ops):
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Städning", "quantity_centi": 100, "unit_price_ore": 1000000,
+                    "rate_code": "25", "rut_eligible": True}],
+            recipients=[{"first_name": "Anna", "last_name": "Svensson",
+                         "personnummer": "811218-9876", "rut_amount_ore": 150000},
+                        {"first_name": "Björn", "last_name": "Svensson",
+                         "personnummer": "19811218-9876", "rut_amount_ore": 100000}])
+        assert inv["rut_total_ore"] == 250000
+        got = ops.get_invoice(inv["invoice_id"])
+        assert len(got["recipients"]) == 2
+        assert got["recipients"][0]["personnummer"] == "8112189876"   # normalized + decrypted
+        assert sum(r["rut_amount_ore"] for r in got["recipients"]) == 250000
+
+    def test_invoice_rejects_bad_recipient_personnummer(self, ops):
+        cat, kid = self._setup(ops)
+        with pytest.raises(ValueError):
+            ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                               due_date="2026-03-31",
+                               lines=[{"description": "X", "quantity_centi": 100,
+                                       "unit_price_ore": 1000, "rate_code": "25"}],
+                               recipients=[{"first_name": "A", "last_name": "B",
+                                            "personnummer": "811218-9875",  # bad Luhn
+                                            "rut_amount_ore": 100}])
+
+    def test_get_invoice_decrypts_buyer_and_snapshots(self, ops):
+        ops.set_company(name="Min Firma AB", org_nr="556677-8899")
+        ops.create_payment_method("Swish", "123 456 78 90")
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                                 due_date="2026-03-31",
+                                 lines=[{"description": "X", "quantity_centi": 100,
+                                         "unit_price_ore": 100000, "rate_code": "25"}])
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["buyer"]["first_name"] == "Anna"
+        assert got["buyer"]["personnummer"] == "811218-9876"
+        assert got["seller"]["name"] == "Min Firma AB"
+        assert got["payment_methods"][0]["label"] == "Swish"
+        assert got["lines"][0]["description"] == "X"
+
+
+class TestLogo:
+    def _png(self, fmt="PNG"):
+        import io
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (200, 80), (20, 90, 170)).save(buf, format=fmt)
+        return buf.getvalue()
+
+    def test_set_get_delete_logo(self, ops):
+        assert ops.get_company()["has_logo"] is False
+        assert ops.get_logo() is None
+        ops.set_logo(self._png("PNG"))
+        assert ops.get_company()["has_logo"] is True
+        data, mime = ops.get_logo()
+        assert mime == "image/png" and data[:4] == b"\x89PNG"
+        ops.delete_logo()
+        assert ops.get_company()["has_logo"] is False and ops.get_logo() is None
+
+    def test_logo_normalises_webp_to_png(self, ops):
+        ops.set_logo(self._png("WEBP"))               # uploaded as webp
+        data, mime = ops.get_logo()
+        assert mime == "image/png" and data[:4] == b"\x89PNG"
+
+    def test_logo_rejects_garbage(self, ops):
+        with pytest.raises(ValueError):
+            ops.set_logo(b"not an image")
+
+
+class TestInvoiceAddresses:
+    def test_billing_shipping_and_vat_in_snapshot(self, ops):
+        cat = ops.create_category("Tjänst", "income", 3001)
+        kid = ops.create_customer("business", company_name="Köpare AB", org_nr="551122-3344",
+                                  vat_nr="SE551122334401", address="Kungsgatan 5, Göteborg",
+                                  shipping_address="Lagervägen 9, Mölndal")
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                                 due_date="2026-03-31",
+                                 lines=[{"description": "X", "quantity_centi": 100,
+                                         "unit_price_ore": 100000, "rate_code": "25"}])
+        buyer = ops.get_invoice(inv["invoice_id"])["buyer"]
+        assert buyer["address"] == "Kungsgatan 5, Göteborg"
+        assert buyer["shipping_address"] == "Lagervägen 9, Mölndal"
+        assert buyer["vat_nr"] == "SE551122334401"
+
+
+class TestInvoiceLifecycle:
+    def _inv(self, ops, **kw):
+        cat = ops.create_category("Tjänst", "income", 3001)
+        kid = ops.create_customer("private", first_name="A", last_name="B",
+                                  personnummer="811218-9876")
+        return ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                                  due_date="2026-03-31",
+                                  lines=[{"description": "X", "quantity_centi": 100,
+                                          "unit_price_ore": 100000, "rate_code": "25"}], **kw)
+
+    def test_makulera_unpaid_invoice(self, ops):
+        inv = self._inv(ops)
+        tid = inv["transaktion_id"]
+        ops.cancel_invoice(inv["invoice_id"])
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["state"] == "cancelled"
+        # the pending transaktion is gone (no longer payable)
+        assert ops.conn.execute("SELECT 1 FROM transaktion WHERE id=?", (tid,)).fetchone() is None
+        with pytest.raises(InvalidState):
+            ops.cancel_invoice(inv["invoice_id"])         # already cancelled
+
+    def test_cannot_makulera_booked_invoice(self, ops):
+        inv = self._inv(ops)
+        ops.register_payment(inv["transaktion_id"], "2026-03-10")
+        with pytest.raises(InvalidState):
+            ops.cancel_invoice(inv["invoice_id"])
+
+    def test_kreditera_booked_invoice_reverses_ledger(self, ops):
+        from backend.reports import vat as vat_report
+        inv = self._inv(ops)
+        ops.pay_invoice(inv["invoice_id"], date="2026-03-10")        # full payment (kontantmetod)
+        before = vat_report.momsdeklaration(ops.conn, "2026-01-01", "2026-03-31")["boxes"]["10"]
+        assert before == 25000
+        res = ops.credit_invoice(inv["invoice_id"], reason="fel pris", date="2026-03-20")
+        assert res["ver_number"] == 2                      # the credit verifikation
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["state"] == "credited"
+        # the credit nets the moms back out in the same period
+        after = vat_report.momsdeklaration(ops.conn, "2026-01-01", "2026-03-31")["boxes"]["10"]
+        assert after == 0
+
+    def test_cannot_kreditera_unpaid_kontantmetod_invoice(self, ops):
+        inv = self._inv(ops)   # kontantmetod, unpaid -> nothing recognised to reverse
+        with pytest.raises(InvalidState):
+            ops.credit_invoice(inv["invoice_id"], reason="x")
+
+
+class TestPerLineCategory:
+    def _two_cat_invoice(self, ops, **kw):
+        it = ops.create_category("Försäljning IT-tjänster", "income", 3001, default_rate_code="25")
+        varor = ops.create_category("Försäljning varor", "income", 3002, default_rate_code="25")
+        kid = ops.create_customer("business", company_name="Köpare AB", org_nr="551122-3344")
+        inv = ops.create_invoice(
+            customer_id=kid, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Konsulttimmar", "quantity_centi": 100,
+                    "unit_price_ore": 100000, "rate_code": "25", "category_id": it},
+                   {"description": "Hårdvara", "quantity_centi": 100,
+                    "unit_price_ore": 40000, "rate_code": "25", "category_id": varor}], **kw)
+        return inv, it, varor
+
+    def test_booking_splits_income_across_line_categories(self, ops):
+        inv, it, varor = self._two_cat_invoice(ops)
+        res = ops.pay_invoice(inv["invoice_id"], date="2026-03-10")   # kontantmetod
+        konton = {p["bas_konto"]: p["amount_ore"]
+                  for p in _postings(ops, res["verifikation_id"])}
+        assert konton[3001] == -100000      # IT-tjänster income credited
+        assert konton[3002] == -40000       # varor income credited
+        assert konton[2610] == -35000       # 25 % moms on 140000
+        assert konton[1930] == 175000       # bank receives inc total
+
+    def test_result_report_splits_by_line_category(self, ops):
+        inv, it, varor = self._two_cat_invoice(ops)
+        ops.pay_invoice(inv["invoice_id"], date="2026-03-10")
+        from backend.reports import result as result_report
+        rep = result_report.result_report(ops.conn, "2026-01-01", "2026-03-31")
+        by = {r["bas_konto"]: r["amount_ore"] for r in rep["by_category"]}
+        assert by[3001] == 100000 and by[3002] == 40000
+        assert rep["income_ore"] == 140000
+
+    def test_line_without_category_uses_invoice_default(self, ops):
+        cat = ops.create_category("Tjänst", "income", 3001)
+        kid = ops.create_customer("business", company_name="X AB")
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "A", "quantity_centi": 100, "unit_price_ore": 100000,
+                    "rate_code": "25"}])
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["lines"][0]["category_id"] == cat
+
+    def test_invoice_line_without_any_category_rejected(self, ops):
+        kid = ops.create_customer("business", company_name="X AB")
+        with pytest.raises(ValueError):
+            ops.create_invoice(
+                customer_id=kid, invoice_date="2026-03-01", due_date="2026-03-31",
+                lines=[{"description": "A", "quantity_centi": 100,
+                        "unit_price_ore": 100000, "rate_code": "25"}])
+
+
+class TestStructuredAddress:
+    def test_compose_and_country_default(self, ops):
+        kid = ops.create_customer("private", first_name="A", last_name="B",
+                                  personnummer="811218-9876", street="Storgatan 1",
+                                  zip_code="11122", city="Stockholm")
+        c = ops.get_customer(kid)
+        assert c["country"] == "Sverige"
+        assert c["address"] == "Storgatan 1, 11122 Stockholm"   # SE country omitted
+
+    def test_foreign_country_shown(self, ops):
+        kid = ops.create_customer("business", company_name="Oy AB", street="Mannerheim 1",
+                                  zip_code="00100", city="Helsinki", country="Finland")
+        assert ops.get_customer(kid)["address"].endswith("Finland")
+
+    def test_update_recomposes_address(self, ops):
+        kid = ops.create_customer("private", first_name="A", last_name="B",
+                                  personnummer="811218-9876", street="Gata 1",
+                                  zip_code="111", city="Ort")
+        ops.update_customer(kid, city="Annan ort")
+        assert "Annan ort" in ops.get_customer(kid)["address"]
+
+
+class TestCategoryDefaultRate:
+    def test_create_and_list_default_rate(self, ops):
+        ops.create_category("IT 25%", "income", 3001, default_rate_code="25")
+        row = ops.conn.execute(
+            "SELECT default_rate_code FROM category WHERE bas_konto=3001").fetchone()
+        assert row["default_rate_code"] == "25"
+
+    def test_invalid_default_rate_rejected(self, ops):
+        with pytest.raises(ValueError):
+            ops.create_category("Bad", "income", 3001, default_rate_code="99")
+
+    def test_system_accounts_listed(self, ops):
+        sys = ops.system_accounts()
+        assert sys[1930] and sys[2610]          # bank + utgående moms 25 % labelled
+
+
+class TestFakturametod:
+    def _setup(self, ops):
+        cat = ops.create_category("Tjänst", "income", 3001)
+        kid = ops.create_customer("private", first_name="A", last_name="B",
+                                  personnummer="811218-9876")
+        return cat, kid
+
+    def _postings(self, ops, vid):
+        return {r["bas_konto"]: r["amount_ore"] for r in ops.conn.execute(
+            "SELECT bas_konto, amount_ore FROM posting WHERE verifikation_id=?", (vid,))}
+
+    def test_default_is_kontantmetod(self, ops):
+        assert ops.get_accounting_method() == "kontantmetod"
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                                 due_date="2026-03-31",
+                                 lines=[{"description": "X", "quantity_centi": 100,
+                                         "unit_price_ore": 100000, "rate_code": "25"}])
+        # kontantmetod: nothing booked at issue
+        v = ops.conn.execute("SELECT verifikation_id FROM transaktion WHERE id=?",
+                             (inv["transaktion_id"],)).fetchone()["verifikation_id"]
+        assert v is None
+
+    def test_fakturametod_books_at_issue_and_payment(self, ops):
+        from backend.reports import vat as vat_report
+        ops.set_accounting_method("fakturametod")
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+                                 due_date="2026-03-31",
+                                 lines=[{"description": "X", "quantity_centi": 100,
+                                         "unit_price_ore": 100000, "rate_code": "25"}])
+        tid = inv["transaktion_id"]
+        # issue verifikation: kundfordran 1510 / income 3001 / moms 2610
+        vid = ops.conn.execute("SELECT verifikation_id FROM transaktion WHERE id=?",
+                               (tid,)).fetchone()["verifikation_id"]
+        assert vid is not None
+        p = self._postings(ops, vid)
+        assert p[1510] == 125000 and p[3001] == -100000 and p[2610] == -25000
+        # moms reported in the invoice's period already
+        assert vat_report.momsdeklaration(ops.conn, "2026-01-01", "2026-03-31")["boxes"]["10"] == 25000
+        assert ops.get_invoice(inv["invoice_id"])["state"] == "pending"   # booked but unpaid
+
+        # payment (later quarter) settles the receivable: bank / kundfordran, no moms
+        res = ops.register_payment(tid, "2026-05-10")
+        pay = self._postings(ops, res["verifikation_id"])
+        assert pay[1930] == 125000 and pay[1510] == -125000
+        # moms stays in Q1, not the payment quarter
+        assert vat_report.momsdeklaration(ops.conn, "2026-04-01", "2026-06-30")["boxes"]["10"] == 0
+        assert ops.get_invoice(inv["invoice_id"])["state"] == "paid"
+
+    def test_fakturametod_rut_split_at_issue(self, ops):
+        ops.set_accounting_method("fakturametod")
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 1000000,
+                    "rate_code": "25", "rut_eligible": True}],
+            recipients=[{"first_name": "A", "last_name": "B", "personnummer": "811218-9876",
+                         "rut_amount_ore": 250000}])
+        vid = ops.conn.execute("SELECT verifikation_id FROM transaktion WHERE id=?",
+                               (inv["transaktion_id"],)).fetchone()["verifikation_id"]
+        p = self._postings(ops, vid)
+        # inc 1 250 000; customer owes inc - rut = 1 000 000 on 1510, rut 250 000 on 1513
+        assert p[1510] == 1000000 and p[1513] == 250000
+
+
+class TestPartialSettlement:
+    def _inv(self, ops, amount_ore=100003):
+        cat = ops.create_category("T", "income", 3001)
+        kid = ops.create_customer("private", first_name="A", last_name="B",
+                                  personnummer="811218-9876")
+        # ex 100003 @ 25% -> moms 25001, inc 125004 (deliberately awkward for rounding)
+        return ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-02-01",
+                                  due_date="2026-02-28",
+                                  lines=[{"description": "X", "quantity_centi": 100,
+                                          "unit_price_ore": amount_ore, "rate_code": "25"}])
+
+    def test_kontant_partials_reconcile_to_ore(self, ops):
+        from backend.reports import vat as vat_report
+        inv = self._inv(ops)                                   # inc 125004
+        for amt, d in [(33333, "2026-02-05"), (50000, "2026-02-10")]:
+            ops.pay_invoice(inv["invoice_id"], amt, d)
+        ops.pay_invoice(inv["invoice_id"], date="2026-02-20")  # remainder
+        b = ops.get_invoice(inv["invoice_id"])
+        assert b["outstanding_ore"] == 0 and b["state"] == "paid"
+        # the three proportional slices reconcile to the exact full moms (25001)
+        assert vat_report.momsdeklaration(ops.conn, "2026-01-01", "2026-02-28")["boxes"]["10"] == 25001
+
+    def test_fakturametod_partials_settle_receivable(self, ops):
+        ops.set_accounting_method("fakturametod")
+        inv = self._inv(ops)                                   # inc 125004
+        ops.pay_invoice(inv["invoice_id"], 25004, "2026-02-05")
+        assert ops.get_invoice(inv["invoice_id"])["outstanding_ore"] == 100000
+        ops.pay_invoice(inv["invoice_id"], date="2026-02-20")
+        b = ops.get_invoice(inv["invoice_id"])
+        assert b["outstanding_ore"] == 0 and b["state"] == "paid"
+        for v in ops.conn.execute("SELECT id FROM verifikation"):
+            assert sum(p["amount_ore"] for p in ops.conn.execute(
+                "SELECT amount_ore FROM posting WHERE verifikation_id=?", (v["id"],))) == 0

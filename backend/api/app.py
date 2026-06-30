@@ -1,8 +1,10 @@
 """
-app.py — FastAPI application (Layer 7).
+app.py — FastAPI application (Layer 7 / desktop transport).
 
-Exposes the whole backend over HTTP so the same logic serves the desktop web UI
-today and phone clients later (CLAUDE.md > Architecture).
+Exposes the whole backend over HTTP for the desktop web UI. The actual request→
+operations logic lives in `backend/api/facade.py` (AppFacade); these routes only
+validate the request body with Pydantic and delegate to the facade's handlers, so
+the same logic also runs in-process on the phone (Pyodide) without duplication.
 
 Security model (CLAUDE.md): there is NO app-level password. Each database is
 unlocked individually with its own passphrase; the DEK then lives only in server
@@ -16,60 +18,21 @@ trusted local filesystem paths. Do not expose this server on a network as-is.
 from __future__ import annotations
 
 import asyncio
-import sqlite3
-import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from backend import __version__ as APP_VERSION
 from backend.api import schemas as sc
+from backend.api.facade import AppFacade, BookLocked, RawResult, DEFAULT_AUTOLOCK_SECONDS
 from backend.core.crypto import BadPassphrase, CryptoError
 from backend.db import bundle
-from backend.db.manager import BookSession, DatabaseManager
-from backend.db.operations import BookOps, InvalidState, PeriodLocked
-from backend.models import schema as S
-from backend.reports import result as result_report
-from backend.reports import sie as sie_report
-from backend.reports import vat as vat_report
+from backend.db.manager import DatabaseManager
+from backend.db.operations import InvalidState, PeriodLocked
 
-DEFAULT_AUTOLOCK_SECONDS = 15 * 60
 DEFAULT_SWEEP_INTERVAL = 60
-
-
-# ===========================================================================
-# Dependencies
-# ===========================================================================
-
-def _manager(request: Request) -> DatabaseManager:
-    return request.app.state.manager
-
-
-def _session(book_id: str, request: Request) -> BookSession:
-    """Resolve an UNLOCKED session, enforcing auto-lock-on-access (423 if locked)."""
-    mgr: DatabaseManager = request.app.state.manager
-    activity: dict = request.app.state.last_activity
-    autolock: int = request.app.state.autolock_seconds
-
-    session = mgr.get_session(book_id)
-    if session is None:
-        raise HTTPException(status_code=423, detail="Book is locked")
-
-    now = time.monotonic()
-    last = activity.get(book_id)
-    if autolock and last is not None and now - last > autolock:
-        mgr.lock_book(book_id)
-        activity.pop(book_id, None)
-        raise HTTPException(status_code=423, detail="Book auto-locked due to inactivity")
-
-    activity[book_id] = now
-    return session
-
-
-def _ops(session: BookSession = Depends(_session)) -> BookOps:
-    return BookOps(session)
 
 
 # ===========================================================================
@@ -89,15 +52,17 @@ def create_app(app_dir: str | Path | None = None,
             task.cancel()
 
     app = FastAPI(title="BokYup API", version=APP_VERSION, lifespan=lifespan)
-    app.state.manager = DatabaseManager(Path(app_dir)) if app_dir else DatabaseManager()
-    app.state.autolock_seconds = autolock_seconds
+    manager = DatabaseManager(Path(app_dir)) if app_dir else DatabaseManager()
+    facade = AppFacade(manager, autolock_seconds)
+    app.state.facade = facade
+    app.state.manager = manager                  # kept for direct access / tests
+    app.state.last_activity = facade.last_activity
     app.state.sweep_interval = sweep_interval
-    app.state.last_activity = {}
 
     _register_exception_handlers(app)
     app.include_router(_build_router())
 
-    # Serve the web frontend (Layer 8) at /app from this same server.
+    # Serve the web frontend at /app from this same server.
     if serve_ui:
         from fastapi.staticfiles import StaticFiles
         static_dir = Path(__file__).parent / "static"
@@ -107,18 +72,10 @@ def create_app(app_dir: str | Path | None = None,
 
 
 async def _autolock_sweeper(app: FastAPI) -> None:
-    """Actively wipe idle sessions' DEKs (best-effort, in addition to on-access check)."""
+    """Actively wipe idle sessions' DEKs (best-effort, alongside the on-access check)."""
     while True:
         await asyncio.sleep(app.state.sweep_interval)
-        now = time.monotonic()
-        autolock = app.state.autolock_seconds
-        if not autolock:
-            continue
-        for rec in app.state.manager.list_books():
-            last = app.state.last_activity.get(rec.id)
-            if last is not None and now - last > autolock:
-                app.state.manager.lock_book(rec.id)
-                app.state.last_activity.pop(rec.id, None)
+        app.state.facade.sweep()
 
 
 # ===========================================================================
@@ -126,14 +83,13 @@ async def _autolock_sweeper(app: FastAPI) -> None:
 # ===========================================================================
 
 def _register_exception_handlers(app: FastAPI) -> None:
-    from fastapi.responses import JSONResponse
-
     def handler(status: int):
         async def _h(request: Request, exc: Exception):
             return JSONResponse(status_code=status, content={"detail": str(exc)})
         return _h
 
     app.add_exception_handler(BadPassphrase, handler(401))
+    app.add_exception_handler(BookLocked, handler(423))       # locked / auto-locked
     app.add_exception_handler(CryptoError, handler(423))      # locked session
     app.add_exception_handler(PeriodLocked, handler(409))
     app.add_exception_handler(InvalidState, handler(409))
@@ -145,7 +101,7 @@ def _register_exception_handlers(app: FastAPI) -> None:
 
 
 # ===========================================================================
-# Routes
+# Routes — thin: validate body, then delegate to the facade handler.
 # ===========================================================================
 
 def _build_router():
@@ -153,197 +109,291 @@ def _build_router():
 
     r = APIRouter()
 
+    def fac(request: Request) -> AppFacade:
+        return request.app.state.facade
+
     # ---- meta ----
     @r.get("/")
-    def root():
-        return {"name": "BokYup API", "version": APP_VERSION}
+    def root(request: Request):
+        return fac(request).h_root({}, {}, {})
 
     # ---- books / registry ----
     @r.get("/books")
     def list_books(request: Request):
-        return [b.to_dict() for b in _manager(request).list_books()]
+        return fac(request).h_list_books({}, {}, {})
 
     @r.post("/books", status_code=201)
     def create_book(body: sc.CreateBookReq, request: Request):
-        mgr = _manager(request)
-        record, session = mgr.create_book(body.display_name, body.db_path, body.passphrase)
-        S.initialize_schema(session.connection())
-        request.app.state.last_activity[record.id] = time.monotonic()
-        return record.to_dict()
-
-    @r.post("/books/{book_id}/unlock")
-    def unlock(book_id: str, body: sc.UnlockReq, request: Request):
-        _manager(request).open_book(book_id, body.passphrase)
-        request.app.state.last_activity[book_id] = time.monotonic()
-        return {"book_id": book_id, "unlocked": True}
-
-    @r.post("/books/{book_id}/unlock-recovery")
-    def unlock_recovery(book_id: str, body: sc.RecoveryUnlockReq, request: Request):
-        _manager(request).open_book_with_recovery(book_id, body.recovery_key)
-        request.app.state.last_activity[book_id] = time.monotonic()
-        return {"book_id": book_id, "unlocked": True}
-
-    @r.post("/books/{book_id}/lock")
-    def lock(book_id: str, request: Request):
-        _manager(request).lock_book(book_id)
-        request.app.state.last_activity.pop(book_id, None)
-        return {"book_id": book_id, "locked": True}
-
-    @r.patch("/books/{book_id}")
-    def rename(book_id: str, body: sc.RenameReq, request: Request):
-        _manager(request).rename_book(book_id, body.display_name)
-        return {"book_id": book_id, "display_name": body.display_name}
-
-    @r.delete("/books/{book_id}")
-    def remove(book_id: str, request: Request):
-        _manager(request).remove_from_registry(book_id)
-        return {"book_id": book_id, "removed": True}
-
-    @r.post("/books/{book_id}/export")
-    def export_book(book_id: str, body: sc.ExportReq, request: Request):
-        out = _manager(request).export_book(book_id, body.out_path)
-        return {"out_path": str(out)}
+        return fac(request).h_create_book({}, body.model_dump(), {})
 
     @r.post("/books/import", status_code=201)
     def import_book(body: sc.ImportReq, request: Request):
-        rec = _manager(request).import_book(
-            body.bundle_path, body.dest_db_path,
-            display_name=body.display_name, overwrite=body.overwrite,
-        )
-        return rec.to_dict()
+        return fac(request).h_import_book({}, body.model_dump(), {})
+
+    @r.post("/books/{book_id}/unlock")
+    def unlock(book_id: str, body: sc.UnlockReq, request: Request):
+        return fac(request).h_unlock({"book_id": book_id}, body.model_dump(), {})
+
+    @r.post("/books/{book_id}/unlock-recovery")
+    def unlock_recovery(book_id: str, body: sc.RecoveryUnlockReq, request: Request):
+        return fac(request).h_unlock_recovery({"book_id": book_id}, body.model_dump(), {})
+
+    @r.post("/books/{book_id}/lock")
+    def lock(book_id: str, request: Request):
+        return fac(request).h_lock({"book_id": book_id}, {}, {})
+
+    @r.patch("/books/{book_id}")
+    def rename(book_id: str, body: sc.RenameReq, request: Request):
+        return fac(request).h_rename({"book_id": book_id}, body.model_dump(), {})
+
+    @r.delete("/books/{book_id}")
+    def remove(book_id: str, request: Request):
+        return fac(request).h_remove({"book_id": book_id}, {}, {})
+
+    @r.post("/books/{book_id}/export")
+    def export_book(book_id: str, body: sc.ExportReq, request: Request):
+        return fac(request).h_export_book({"book_id": book_id}, body.model_dump(), {})
+
+    @r.post("/books/{book_id}/change-passphrase")
+    def change_passphrase(book_id: str, body: sc.ChangePassphraseReq, request: Request):
+        return fac(request).h_change_passphrase({"book_id": book_id}, body.model_dump(), {})
+
+    @r.get("/books/{book_id}/recovery-key")
+    def recovery_key_status(book_id: str, request: Request):
+        return fac(request).h_recovery_key_status({"book_id": book_id}, {}, {})
+
+    @r.post("/books/{book_id}/recovery-key", status_code=201)
+    def add_recovery_key(book_id: str, body: sc.RecoveryKeyReq, request: Request):
+        return fac(request).h_add_recovery_key({"book_id": book_id}, body.model_dump(), {})
 
     # ---- reference: categories ----
     @r.get("/books/{book_id}/categories")
-    def list_categories(ops: BookOps = Depends(_ops)):
-        return _rows(ops.conn, "SELECT id, name, kind, bas_konto, active FROM category ORDER BY bas_konto")
+    def list_categories(book_id: str, request: Request):
+        return fac(request).h_list_categories({"book_id": book_id}, {}, {})
+
+    @r.get("/books/{book_id}/accounts")
+    def list_accounts(book_id: str, request: Request):
+        return fac(request).h_list_accounts({"book_id": book_id}, {}, {})
 
     @r.post("/books/{book_id}/categories", status_code=201)
-    def create_category(body: sc.CategoryReq, ops: BookOps = Depends(_ops)):
-        cid = ops.create_category(body.name, body.kind, body.bas_konto, body.account_name)
-        return {"id": cid}
+    def create_category(book_id: str, body: sc.CategoryReq, request: Request):
+        return fac(request).h_create_category({"book_id": book_id}, body.model_dump(), {})
 
     @r.patch("/books/{book_id}/categories/{category_id}")
-    def update_category(category_id: int, body: sc.CategoryUpdateReq, ops: BookOps = Depends(_ops)):
-        ops.update_category(category_id, **body.model_dump(exclude_none=True))
-        return {"id": category_id}
+    def update_category(book_id: str, category_id: int, body: sc.CategoryUpdateReq, request: Request):
+        return fac(request).h_update_category(
+            {"book_id": book_id, "category_id": category_id}, body.model_dump(), {})
 
     # ---- reference: customers ----
     @r.get("/books/{book_id}/customers")
-    def list_customers(ops: BookOps = Depends(_ops)):
-        return _rows(ops.conn,
-                     "SELECT kundnummer, type, first_name, last_name, company_name, "
-                     "org_nr, email, phone, active FROM customer ORDER BY kundnummer")
+    def list_customers(book_id: str, request: Request):
+        return fac(request).h_list_customers({"book_id": book_id}, {}, {})
 
     @r.get("/books/{book_id}/customers/{kundnummer}")
-    def get_customer(kundnummer: int, ops: BookOps = Depends(_ops)):
-        return ops.get_customer(kundnummer)
+    def get_customer(book_id: str, kundnummer: int, request: Request):
+        return fac(request).h_get_customer({"book_id": book_id, "kundnummer": kundnummer}, {}, {})
 
     @r.post("/books/{book_id}/customers", status_code=201)
-    def create_customer(body: sc.CustomerReq, ops: BookOps = Depends(_ops)):
-        data = body.model_dump(exclude_none=True)
-        ctype = data.pop("type")
-        return {"kundnummer": ops.create_customer(ctype, **data)}
+    def create_customer(book_id: str, body: sc.CustomerReq, request: Request):
+        return fac(request).h_create_customer({"book_id": book_id}, body.model_dump(), {})
 
     @r.patch("/books/{book_id}/customers/{kundnummer}")
-    def update_customer(kundnummer: int, body: sc.CustomerUpdateReq, ops: BookOps = Depends(_ops)):
-        ops.update_customer(kundnummer, **body.model_dump(exclude_none=True))
-        return {"kundnummer": kundnummer}
+    def update_customer(book_id: str, kundnummer: int, body: sc.CustomerUpdateReq, request: Request):
+        return fac(request).h_update_customer(
+            {"book_id": book_id, "kundnummer": kundnummer}, body.model_dump(), {})
 
     # ---- reference: suppliers ----
     @r.get("/books/{book_id}/suppliers")
-    def list_suppliers(ops: BookOps = Depends(_ops)):
-        return _rows(ops.conn, "SELECT id, name, default_moms_rate, org_nr, address, active "
-                               "FROM supplier ORDER BY name")
+    def list_suppliers(book_id: str, request: Request):
+        return fac(request).h_list_suppliers({"book_id": book_id}, {}, {})
 
     @r.post("/books/{book_id}/suppliers", status_code=201)
-    def create_supplier(body: sc.SupplierReq, ops: BookOps = Depends(_ops)):
-        return {"id": ops.create_supplier(body.name, body.default_moms_rate, body.org_nr, body.address)}
+    def create_supplier(book_id: str, body: sc.SupplierReq, request: Request):
+        return fac(request).h_create_supplier({"book_id": book_id}, body.model_dump(), {})
 
     @r.patch("/books/{book_id}/suppliers/{supplier_id}")
-    def update_supplier(supplier_id: int, body: sc.SupplierUpdateReq, ops: BookOps = Depends(_ops)):
-        ops.update_supplier(supplier_id, **body.model_dump(exclude_none=True))
-        return {"id": supplier_id}
+    def update_supplier(book_id: str, supplier_id: int, body: sc.SupplierUpdateReq, request: Request):
+        return fac(request).h_update_supplier(
+            {"book_id": book_id, "supplier_id": supplier_id}, body.model_dump(), {})
 
     # ---- bookkeeping ----
     @r.post("/books/{book_id}/expenses", status_code=201)
-    def record_expense(body: sc.RecordExpenseReq, ops: BookOps = Depends(_ops)):
-        return ops.record_expense(
-            body.supplier_id, body.category_id, [l.model_dump() for l in body.lines],
-            body.trans_date, note=body.note,
-            receipt_original_format=body.receipt_original_format, paid_date=body.paid_date,
-        )
+    def record_expense(book_id: str, body: sc.RecordExpenseReq, request: Request):
+        return fac(request).h_record_expense({"book_id": book_id}, body.model_dump(), {})
 
     @r.post("/books/{book_id}/incomes", status_code=201)
-    def record_income(body: sc.RecordIncomeReq, ops: BookOps = Depends(_ops)):
-        return ops.record_income(
-            body.customer_id, body.category_id, [l.model_dump() for l in body.lines],
-            body.trans_date, rut_amount_ore=body.rut_amount_ore,
-            note=body.note, paid_date=body.paid_date,
-        )
+    def record_income(book_id: str, body: sc.RecordIncomeReq, request: Request):
+        return fac(request).h_record_income({"book_id": book_id}, body.model_dump(), {})
 
     @r.post("/books/{book_id}/transaktioner/{transaktion_id}/pay")
-    def register_payment(transaktion_id: int, body: sc.PaymentReq, ops: BookOps = Depends(_ops)):
-        return ops.register_payment(transaktion_id, body.payment_date)
+    def register_payment(book_id: str, transaktion_id: int, body: sc.PaymentReq, request: Request):
+        return fac(request).h_register_payment(
+            {"book_id": book_id, "transaktion_id": transaktion_id}, body.model_dump(), {})
 
     @r.post("/books/{book_id}/rut/{rut_claim_id}/skatteverket-payment")
-    def rut_skatteverket_payment(rut_claim_id: int, body: sc.PaymentReq, ops: BookOps = Depends(_ops)):
-        return ops.register_rut_skatteverket_payment(rut_claim_id, body.payment_date)
+    def rut_skatteverket_payment(book_id: str, rut_claim_id: int, body: sc.PaymentReq, request: Request):
+        return fac(request).h_rut_skatteverket_payment(
+            {"book_id": book_id, "rut_claim_id": rut_claim_id}, body.model_dump(), {})
 
     @r.get("/books/{book_id}/customers/{kundnummer}/rut-cap/{year}")
-    def rut_cap(kundnummer: int, year: int, ops: BookOps = Depends(_ops)):
-        return ops.rut_cap_status(kundnummer, year)
+    def rut_cap(book_id: str, kundnummer: int, year: int, request: Request):
+        return fac(request).h_rut_cap(
+            {"book_id": book_id, "kundnummer": kundnummer, "year": year}, {}, {})
+
+    @r.get("/books/{book_id}/rut-claims")
+    def list_rut_claims(book_id: str, request: Request):
+        return fac(request).h_list_rut_claims({"book_id": book_id}, {}, {})
 
     @r.post("/books/{book_id}/verifikationer/{verifikation_id}/reverse", status_code=201)
-    def reverse_verifikation(verifikation_id: int, body: sc.ReverseReq, ops: BookOps = Depends(_ops)):
-        return ops.reverse_verifikation(verifikation_id, body.reason, body.reg_date)
+    def reverse_verifikation(book_id: str, verifikation_id: int, body: sc.ReverseReq, request: Request):
+        return fac(request).h_reverse_verifikation(
+            {"book_id": book_id, "verifikation_id": verifikation_id}, body.model_dump(), {})
 
     @r.post("/books/{book_id}/period-locks", status_code=201)
-    def lock_period(body: sc.PeriodLockReq, ops: BookOps = Depends(_ops)):
-        return {"id": ops.lock_period(body.period_start, body.period_end, body.kind)}
+    def lock_period(book_id: str, body: sc.PeriodLockReq, request: Request):
+        return fac(request).h_lock_period({"book_id": book_id}, body.model_dump(), {})
 
     @r.post("/books/{book_id}/year-end-accruals", status_code=201)
-    def year_end_accruals(body: sc.YearEndAccrualReq, ops: BookOps = Depends(_ops)):
-        return ops.book_year_end_accruals(body.fiscal_year_end)
+    def year_end_accruals(book_id: str, body: sc.YearEndAccrualReq, request: Request):
+        return fac(request).h_year_end_accruals({"book_id": book_id}, body.model_dump(), {})
 
     @r.get("/books/{book_id}/verifikationer")
-    def list_verifikationer(ops: BookOps = Depends(_ops)):
-        return _rows(ops.conn,
-                     "SELECT id, series, ver_number, ver_date, text, posted, rattelse_of "
-                     "FROM verifikation ORDER BY ver_number")
+    def list_verifikationer(book_id: str, request: Request):
+        return fac(request).h_list_verifikationer({"book_id": book_id}, {}, {})
 
     @r.get("/books/{book_id}/transaktioner")
-    def list_transaktioner(ops: BookOps = Depends(_ops)):
-        return _rows(ops.conn,
-                     "SELECT id, direction, status, trans_date, payment_date, category_id, "
-                     "customer_id, supplier_id, verifikation_id FROM transaktion ORDER BY id")
+    def list_transaktioner(book_id: str, request: Request, include_synthetic: bool = False):
+        return fac(request).h_list_transaktioner(
+            {"book_id": book_id}, {}, {"include_synthetic": "1" if include_synthetic else "0"})
+
+    # ---- receipts (encrypted photos) ----
+    @r.post("/books/{book_id}/transaktioner/{transaktion_id}/receipts", status_code=201)
+    def upload_receipt(book_id: str, transaktion_id: int, body: sc.ReceiptUploadReq, request: Request):
+        return fac(request).h_upload_receipt(
+            {"book_id": book_id, "transaktion_id": transaktion_id}, body.model_dump(), {})
+
+    @r.get("/books/{book_id}/transaktioner/{transaktion_id}/receipts")
+    def list_receipts(book_id: str, transaktion_id: int, request: Request):
+        return fac(request).h_list_receipts(
+            {"book_id": book_id, "transaktion_id": transaktion_id}, {}, {})
+
+    @r.get("/books/{book_id}/receipts/{receipt_id}")
+    def get_receipt(book_id: str, receipt_id: int, request: Request):
+        res = fac(request).h_get_receipt({"book_id": book_id, "receipt_id": receipt_id}, {}, {})
+        return Response(content=res.content, media_type=res.media_type)
+
+    @r.delete("/books/{book_id}/receipts/{receipt_id}")
+    def delete_receipt(book_id: str, receipt_id: int, request: Request):
+        return fac(request).h_delete_receipt({"book_id": book_id, "receipt_id": receipt_id}, {}, {})
 
     # ---- reports ----
     @r.get("/books/{book_id}/reports/momsdeklaration")
-    def report_moms(start: str, end: str, ops: BookOps = Depends(_ops)):
-        return vat_report.momsdeklaration(ops.conn, start, end)
+    def report_moms(book_id: str, start: str, end: str, request: Request):
+        return fac(request).h_report_moms({"book_id": book_id}, {}, {"start": start, "end": end})
 
     @r.get("/books/{book_id}/reports/result")
-    def report_result(start: str, end: str, ops: BookOps = Depends(_ops)):
-        return result_report.result_report(ops.conn, start, end)
+    def report_result(book_id: str, start: str, end: str, request: Request):
+        return fac(request).h_report_result({"book_id": book_id}, {}, {"start": start, "end": end})
 
     @r.get("/books/{book_id}/reports/sie", response_class=PlainTextResponse)
-    def report_sie(ops: BookOps = Depends(_ops), company_name: str = "", org_nr: str = "",
+    def report_sie(book_id: str, request: Request, company_name: str = "", org_nr: str = "",
                    fiscal_year_start: str = "", fiscal_year_end: str = ""):
-        return sie_report.export_sie(
-            ops.conn, company_name=company_name, org_nr=org_nr,
-            fiscal_year_start=fiscal_year_start or None,
-            fiscal_year_end=fiscal_year_end or None,
-        )
+        res = fac(request).h_report_sie({"book_id": book_id}, {}, {
+            "company_name": company_name, "org_nr": org_nr,
+            "fiscal_year_start": fiscal_year_start, "fiscal_year_end": fiscal_year_end})
+        return PlainTextResponse(res.content)
+
+    # ---- accounting method (per book) ----
+    @r.get("/books/{book_id}/accounting-method")
+    def get_accounting_method(book_id: str, request: Request):
+        return fac(request).h_get_accounting_method({"book_id": book_id}, {}, {})
+
+    @r.put("/books/{book_id}/accounting-method")
+    def set_accounting_method(book_id: str, body: sc.AccountingMethodReq, request: Request):
+        return fac(request).h_set_accounting_method({"book_id": book_id}, body.model_dump(), {})
+
+    # ---- company profile (seller) ----
+    @r.get("/books/{book_id}/company")
+    def get_company(book_id: str, request: Request):
+        return fac(request).h_get_company({"book_id": book_id}, {}, {})
+
+    @r.put("/books/{book_id}/company")
+    def set_company(book_id: str, body: sc.CompanyReq, request: Request):
+        return fac(request).h_set_company({"book_id": book_id}, body.model_dump(), {})
+
+    # ---- logo (used on every document) ----
+    @r.get("/books/{book_id}/logo")
+    def get_logo(book_id: str, request: Request):
+        res = fac(request).h_get_logo({"book_id": book_id}, {}, {})
+        return Response(content=res.content, media_type=res.media_type)
+
+    @r.put("/books/{book_id}/logo")
+    def set_logo(book_id: str, body: sc.LogoReq, request: Request):
+        return fac(request).h_set_logo({"book_id": book_id}, body.model_dump(), {})
+
+    @r.delete("/books/{book_id}/logo")
+    def delete_logo(book_id: str, request: Request):
+        return fac(request).h_delete_logo({"book_id": book_id}, {}, {})
+
+    # ---- payment methods ----
+    @r.get("/books/{book_id}/payment-methods")
+    def list_payment_methods(book_id: str, request: Request):
+        return fac(request).h_list_payment_methods({"book_id": book_id}, {}, {})
+
+    @r.post("/books/{book_id}/payment-methods", status_code=201)
+    def create_payment_method(book_id: str, body: sc.PaymentMethodReq, request: Request):
+        return fac(request).h_create_payment_method({"book_id": book_id}, body.model_dump(), {})
+
+    @r.patch("/books/{book_id}/payment-methods/{payment_method_id}")
+    def update_payment_method(book_id: str, payment_method_id: int,
+                              body: sc.PaymentMethodUpdateReq, request: Request):
+        return fac(request).h_update_payment_method(
+            {"book_id": book_id, "payment_method_id": payment_method_id}, body.model_dump(), {})
+
+    # ---- invoices (faktura) ----
+    @r.post("/books/{book_id}/invoices", status_code=201)
+    def create_invoice(book_id: str, body: sc.CreateInvoiceReq, request: Request):
+        return fac(request).h_create_invoice({"book_id": book_id}, body.model_dump(), {})
+
+    @r.get("/books/{book_id}/invoices")
+    def list_invoices(book_id: str, request: Request):
+        return fac(request).h_list_invoices({"book_id": book_id}, {}, {})
+
+    @r.get("/books/{book_id}/invoices/{invoice_id}")
+    def get_invoice(book_id: str, invoice_id: int, request: Request):
+        return fac(request).h_get_invoice({"book_id": book_id, "invoice_id": invoice_id}, {}, {})
+
+    @r.post("/books/{book_id}/invoices/{invoice_id}/cancel", status_code=201)
+    def cancel_invoice(book_id: str, invoice_id: int, request: Request):
+        return fac(request).h_cancel_invoice({"book_id": book_id, "invoice_id": invoice_id}, {}, {})
+
+    @r.post("/books/{book_id}/invoices/{invoice_id}/pay", status_code=201)
+    def pay_invoice(book_id: str, invoice_id: int, body: sc.PayInvoiceReq, request: Request):
+        return fac(request).h_pay_invoice(
+            {"book_id": book_id, "invoice_id": invoice_id}, body.model_dump(), {})
+
+    @r.post("/books/{book_id}/invoices/{invoice_id}/refund", status_code=201)
+    def refund_invoice(book_id: str, invoice_id: int, body: sc.RefundInvoiceReq, request: Request):
+        return fac(request).h_refund_invoice(
+            {"book_id": book_id, "invoice_id": invoice_id}, body.model_dump(), {})
+
+    @r.post("/books/{book_id}/invoices/{invoice_id}/credit", status_code=201)
+    def credit_invoice(book_id: str, invoice_id: int, body: sc.CreditInvoiceReq, request: Request):
+        return fac(request).h_credit_invoice(
+            {"book_id": book_id, "invoice_id": invoice_id}, body.model_dump(), {})
+
+    @r.get("/books/{book_id}/invoices/{invoice_id}/pdf")
+    def invoice_pdf(book_id: str, invoice_id: int, request: Request):
+        res = fac(request).h_invoice_pdf({"book_id": book_id, "invoice_id": invoice_id}, {}, {})
+        return Response(content=res.content, media_type=res.media_type)
+
+    @r.get("/books/{book_id}/invoices/{invoice_id}/credit-notes/{event_id}/pdf")
+    def credit_note_pdf(book_id: str, invoice_id: int, event_id: int, request: Request):
+        res = fac(request).h_credit_note_pdf(
+            {"book_id": book_id, "invoice_id": invoice_id, "event_id": event_id}, {}, {})
+        return Response(content=res.content, media_type=res.media_type)
 
     return r
-
-
-# ===========================================================================
-# Helpers
-# ===========================================================================
-
-def _rows(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[dict]:
-    return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
 # Convenience for `python -m backend.api.app`

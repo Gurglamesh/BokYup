@@ -151,6 +151,24 @@ class TestRoundTrip:
         mgr.import_book(out, dest)
         assert (Path(str(dest) + ".photos") / "r.bin").read_bytes() == b"photo"
 
+    def test_attached_receipt_survives_and_decrypts(self, tmp_path):
+        mgr, record, session = _make_book(tmp_path, pw="secret")
+        ops = BookOps(session)
+        cat = ops.create_category("Kontorsmaterial", "expense", 5460)
+        tid = ops.record_expense(None, cat, [{"rate_code": "25", "amount_ore": 1250}],
+                                 "2026-02-01")["transaktion_id"]
+        data = b"\xff\xd8\xff receipt jpeg bytes \x00\x10"
+        ops.attach_receipt(tid, data, "image/jpeg", "paper")
+
+        out = mgr.export_book(record.id, tmp_path / "rc.buyn")
+        dest = tmp_path / "restored_rc.db"
+        rec2 = mgr.import_book(out, dest)
+        s2 = mgr.open_book(rec2.id, "secret")
+        ops2 = BookOps(s2)
+        rid = ops2.list_receipts(tid)[0]["id"]
+        got, mime = ops2.get_receipt(rid)
+        assert got == data and mime == "image/jpeg"
+
 
 # ---------------------------------------------------------------------------
 # Safety: overwrite protection, auto-backup, schema version

@@ -51,6 +51,13 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
 - AES-256-GCM everywhere (authenticated; detects tampering).
 - We deliberately do **application-level field/blob encryption** instead of SQLCipher
   to keep the stack pip-installable on every OS including phone wrappers.
+- **Argon2id `parallelism` is fixed at 1 (decided 2026-06, do NOT raise it).** The same
+  Python crypto core runs on the phone as WebAssembly (Pyodide), which has no pthreads:
+  any parallelism > 1 raises "Threading failure" there, and a single lane makes the KEK
+  derivation bit-for-bit deterministic across PC and phone. This is what lets a book
+  exported on a PC unlock unchanged on the phone (verified: native CPython and Pyodide
+  314 produce identical KEKs — frozen as a contract in `tests/test_crypto_vectors.py`).
+  Strengthen the KEK via `time_cost`/`memory_cost`, never `parallelism`.
 
 ## Auto-lock (decided)
 
@@ -75,6 +82,15 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
   a photo of a digital receipt is not a valid substitute for the digital original.
 - **Method**: kontantmetod (book when money moves) fits the pending→paid flow; at
   year-end even kontantmetod must book unpaid invoices.
+- **Both methods now selectable per book** (config `bokforingsmetod`, default
+  kontantmetod; 2026-06). **Fakturametoden** books an invoice at issue (1510
+  Kundfordringar + income + utgående moms, dated the invoice date → moms reported in
+  the invoice's period) and again at payment (1930 Bank / 1510 settling the
+  receivable). The issue posting is the transaktion's verifikation so the reports
+  attribute moms to the invoice date; payment carries no moms_lines. register_payment
+  is method-aware; year-end accrual + makulera skip issue-booked invoices; kreditera
+  reverses the issue posting. Plain (non-invoice) incomes/expenses still book at
+  payment. See `create_invoice`/`_book_invoice_issue`/`register_payment`.
 
 ## Moms (VAT) model
 
@@ -187,7 +203,103 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       categories, momsdeklaration + SIE download), served at /app by the same FastAPI
       server; pywebview desktop launcher (`python -m backend.desktop`). DONE; JS
       `node --check`'d, server wiring tested, full stack live-smoke-tested.
-- [ ] Later — phone wrappers (Android/iOS) against the same API; camera receipt capture.
+      UI surfacing (2026-06): added RUT section (claim lifecycle + Skatteverket-payment,
+      backed by new `GET /rut-claims`), Verifikat section (rättelse/reverse), Bokslut
+      section (period locking + year-end accruals), SIE export with company/org/fiscal
+      year, and the RUT-cap warning on record-income.
+- [x] **Receipt capture + encrypted storage** (2026-06). New `receipt` table
+      (SCHEMA_VERSION→2, `schema.migrate()` upgrades existing books on open). Photos are
+      AES-256-GCM-encrypted with the book DEK and stored as files in `<db>.photos/`
+      (already carried by the `.buyn` bundle); `BookOps.attach_receipt/list_receipts/
+      get_receipt/delete_receipt` (delete only while the transaktion is still pending —
+      once booked the receipt is part of the immutable record). API: base64 upload +
+      list + raw-image GET + delete (no new server deps). Web UI: expense form now takes
+      **multiple moms lines** (a receipt can mix 6/12/25 %) and a receipt picker (file
+      import + `capture` for phone camera + live `getUserMedia` "Ta foto" on desktop);
+      Transaktioner has a 📎 viewer. DONE, all tests pass, live-smoke-tested.
+- [x] **Invoices (faktura) + PDF** (2026-06). Fully compliant Swedish faktura on PC
+      AND phone. Schema v3 (company/payment_method/invoice/invoice_line/rut_recipient);
+      `create_invoice` numbers sequentially (unbroken), snapshots buyer(enc)/seller/
+      payment-methods, splits RUT across household recipients (each name + encrypted
+      personnummer + share of the skattereduktion), and issues the underlying PENDING
+      income so booking + reports are unchanged. PDF via **fpdf2** (`backend/invoices/
+      pdf.py`) — pure-pip and verified under Pyodide, so it renders on the phone too
+      (Pillow + fpdf2/defusedxml/fonttools vendored; pure wheels listed in
+      `vendor/pure_wheels.json`). API `/company` `/payment-methods` `/invoices(/pdf)`;
+      "Fakturor" UI with line-item + RUT-recipient editors; company + betalsätt in
+      Inställningar. Verified end-to-end in a real browser on desktop and the phone
+      WASM bundle. NOTE: per-recipient RUT *cap* tracking still uses the customer's
+      claim (recipients captured for the document + future per-person cap).
+      LOGO (schema v4): an editable per-book logo (`company.logo_enc`) shown on every
+      document. Any PNG/JPG/WEBP is normalised to a size-bounded PNG via Pillow,
+      DEK-encrypted, and drawn top-right on the faktura (current logo at render time).
+      `set/get/delete_logo`, API `PUT/GET/DELETE /logo`, uploader in Inställningar.
+      LAYOUT (schema v5): buyer block on top (Faktureras till + Leveransadress, with
+      `customer.shipping_address`), seller details moved to a footer under the payment
+      methods. LIFECYCLE (schema v6): driven from the Fakturor tab — bokför betalning
+      (pay), makulera (void an UNBOOKED invoice; number stays reserved, pending
+      transaktion removed, nothing hits the ledger), kreditera (reverse a BOOKED
+      invoice via rättelse). `cancel_invoice`/`credit_invoice` + derived `state`
+      (pending/paid/cancelled/credited); booking itself happens at payment
+      (kontantmetod) — verified: balanced double-entry + moms into the
+      momsdeklaration, RUT books the 1513 receivable.
+      SUBLEDGER (schema v7, 2026-06): `invoice_event` (payment|refund|credit) — an
+      invoice's outstanding/state are derived from it, so settlements can be PARTIAL.
+      `pay_invoice`/`refund_invoice`/`credit_invoice(amount=None)`: fakturametod
+      moves cash against 1510; kontantmetod recognises income+moms PROPORTIONALLY per
+      payment (per-rate slices, cumulative öre-exact rounding) via hidden report-
+      clones (`fakturabetalning`/`kreditering` notes). A credit on a paid invoice
+      makes 1510 negative (owed back) → refund pays it out. RUT invoices keep the full
+      register_payment + Skatteverket flow (subledger guarded). API POST
+      /invoices/{id}/pay|refund|credit; Fakturor UI shows "Kvar" + Delbetald + the
+      pay/refund/credit actions.
+      CREDIT NOTE (schema v8, 2026-06): a numbered **kreditfaktura** document. Every
+      credit event reserves a number from the SAME faktura series
+      (`_next_invoice_number` = max of `invoice.invoice_number` and
+      `invoice_event.credit_note_number`, +1 → unbroken across both document kinds);
+      stored on `invoice_event.credit_note_number`. `get_credit_note(invoice_id,
+      event_id)` builds a render dict reusing the original's frozen buyer/seller
+      snapshots, with the credited slice as NEGATIVE lines and `credit_of` = the
+      original number. `render_invoice_pdf` renders it in credit-note mode
+      (KREDITFAKTURA title, "Avser faktura" reference, "Att återfå"). API GET
+      /invoices/{id}/credit-notes/{event_id}/pdf; `list_invoices` exposes
+      `credit_notes[]` and Fakturor UI shows a "Kreditnota N" download per credit.
+- [x] **Per-line invoice categories + split booking, BAS-konto view, structured
+      customer address** (schema v9, 2026-06). Each **invoice article line** now carries
+      its own income category (`invoice_line.category_id`); booking splits the income
+      across those categories' BAS-konton. The split is carried on
+      `moms_line.category_id` (NULL → the transaktion's category, so plain
+      income/expense is unchanged) and threaded through every booking path:
+      register_payment, `_book_invoice_issue` (fakturametod), kontant recognition
+      (`_recognition_slice` now per line; `_income_splits`/`_group_income`/`_group_moms`
+      helpers), credit/kreditnota, and `_clone_transaktion_for_report`. The **result
+      report** groups by `COALESCE(moms_line.category_id, transaktion.category_id)` so a
+      multi-category invoice splits across konton (momsdeklaration unchanged — moms is
+      per-rate). `create_invoice.category_id` is now an optional per-invoice fallback.
+      **Categories carry a `default_rate_code`** (e.g. "Försäljning IT-tjänster, 25 %");
+      the line editor pre-fills moms from it. The UI tab "Kategorier" became
+      **"BAS-konton"**: it lists the user categories *and* the engine's system konton
+      (bank/moms/fordringar) via `GET /accounts` + `BookOps.system_accounts()`.
+      **Customers gained a structured address** (street/zip_code/city/country, country
+      defaults to Sverige); the legacy single-line `address` is composed from the parts
+      and the faktura PDF renders them as separate lines. Invoice creation in the web UI
+      is article-by-article with a per-line category picker. **httpx → httpx2** (the
+      starlette TestClient dep; deprecation warning gone). All tests pass (237).
+- [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
+      (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
+      provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
+      `{lines,total}` shape the form already edits. Engine choice still open.
+- [~] **Phone = same backend as WASM (Pyodide), fully local** (2026-06). Decided NOT to
+      run a server or talk to the PC: the phone runs the SAME Python backend compiled to
+      WebAssembly inside the WebView, so legal logic stays written-once. Proven end-to-end
+      (`tools/wasm-smoke/`): real `crypto.py` + sqlite3 run in WASM and `.buyn` export/
+      import round-trips BOTH ways across native CPython ↔ WASM (encrypted fields + receipt
+      photos intact). Enabler: Argon2 `parallelism=1` (see Encryption). Shipped: transport-
+      independent `api/facade.py` (Phase 1), `api/phone.py` JSON boundary + `static/
+      pyodide-boot.js` + `app.js` native branch (Phase 2), key-mgmt/backup/reference-edit
+      UI (Phase 4). Scaffolded, build on a dev machine: `phone/` (Capacitor) + `packaging/`
+      (PyInstaller). Remaining: run device/OS builds; phone `.buyn` file-bridge
+      (`@capacitor/filesystem`+`share`). Camera receipt capture already works in the WebView.
 
 ## Working agreement
 

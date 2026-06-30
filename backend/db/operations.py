@@ -35,10 +35,13 @@ Money is integer ören throughout (see schema money helpers).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
 from typing import Optional
 
 from backend.db.manager import BookSession
@@ -86,6 +89,13 @@ _UTG_MOMS_KEY = {
     "6": "account_utgaende_moms_6",
 }
 
+# Notes stamped on the SYNTHETIC transaktion rows that `_clone_transaktion_for_report`
+# creates to attribute a rättelse/accrual to the right period in the moms/result
+# reports. They are bookkeeping artefacts, not user transactions, so the default
+# Transaktioner list hides them (the legal record lives in the verifikationer).
+SYNTHETIC_TRANSAKTION_NOTES = ("rättelse", "periodisering", "återföring",
+                               "fakturabetalning", "kreditering")
+
 
 # ---------------------------------------------------------------------------
 # Moms calculation (pure)
@@ -120,6 +130,19 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _compose_address(street, zip_code, city, country) -> str:
+    """Build a single-line display address from structured parts (zip + city on one
+    line, country only if not Sweden)."""
+    locality = " ".join(p for p in (str(zip_code).strip() if zip_code else "",
+                                    str(city).strip() if city else "") if p)
+    parts = [p for p in (street, locality) if p]
+    if country and str(country).strip().lower() not in ("sverige", "sweden"):
+        parts.append(str(country).strip())
+    return ", ".join(parts)
+
+
+
+
 # ---------------------------------------------------------------------------
 # Operations facade over one unlocked book
 # ---------------------------------------------------------------------------
@@ -145,26 +168,36 @@ class BookOps:
         return bas_konto
 
     def create_category(self, name: str, kind: str, bas_konto: int,
-                        account_name: Optional[str] = None) -> int:
-        """Create a category linked to a BAS-konto (auto-creating the account)."""
+                        account_name: Optional[str] = None,
+                        default_rate_code: Optional[str] = None) -> int:
+        """Create a category linked to a BAS-konto (auto-creating the account).
+
+        `default_rate_code` is the moms rate the UI pre-fills for lines booked to this
+        category (e.g. "Försäljning av IT-tjänster, 25 %"). Optional; validated."""
         if kind not in ("income", "expense"):
             raise ValueError("kind must be 'income' or 'expense'")
+        if default_rate_code is not None and default_rate_code not in S.MOMS_RATES:
+            raise ValueError(f"Unknown moms rate {default_rate_code!r}")
         self.ensure_account(bas_konto, account_name or name)
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO category(name, kind, bas_konto, created_at) VALUES (?,?,?,?)",
-                (name, kind, bas_konto, _now()),
+                "INSERT INTO category(name, kind, bas_konto, default_rate_code, created_at) "
+                "VALUES (?,?,?,?,?)",
+                (name, kind, bas_konto, default_rate_code, _now()),
             )
         return cur.lastrowid
 
     def update_category(self, category_id: int, *, name: Optional[str] = None,
                         bas_konto: Optional[int] = None, active: Optional[bool] = None,
-                        account_name: Optional[str] = None) -> None:
+                        account_name: Optional[str] = None,
+                        default_rate_code: Optional[str] = None) -> None:
         """Edit reference data freely. Does not touch already-booked verifikationer."""
         if bas_konto is not None:
             self.ensure_account(bas_konto, account_name or name or f"Konto {bas_konto}")
+        if default_rate_code is not None and default_rate_code not in S.MOMS_RATES:
+            raise ValueError(f"Unknown moms rate {default_rate_code!r}")
         sets, params = _build_update(
-            {"name": name, "bas_konto": bas_konto,
+            {"name": name, "bas_konto": bas_konto, "default_rate_code": default_rate_code,
              "active": None if active is None else int(active)}
         )
         if sets:
@@ -190,9 +223,19 @@ class BookOps:
 
         cols = {"type": type, "personnummer_enc": pnr_enc, "created_at": _now()}
         for k in ("first_name", "last_name", "company_name", "org_nr",
-                  "contact_person", "vat_nr", "address", "email", "phone"):
+                  "contact_person", "vat_nr", "address", "shipping_address",
+                  "street", "zip_code", "city", "country", "email", "phone"):
             if k in fields:
                 cols[k] = fields[k]
+        # Structured address defaults to Sverige and composes the legacy single-line
+        # `address` (used by the invoice snapshot/PDF) when not given explicitly.
+        if any(cols.get(k) for k in ("street", "zip_code", "city")):
+            cols.setdefault("country", "Sverige")
+            if not cols.get("country"):
+                cols["country"] = "Sverige"
+            if not cols.get("address"):
+                cols["address"] = _compose_address(cols.get("street"), cols.get("zip_code"),
+                                                   cols.get("city"), cols.get("country"))
 
         names = ", ".join(cols)
         qs = ", ".join("?" for _ in cols)
@@ -214,9 +257,18 @@ class BookOps:
             else:
                 updates["personnummer_enc"] = None
         for k in ("first_name", "last_name", "company_name", "org_nr", "contact_person",
-                  "vat_nr", "address", "email", "phone", "active"):
+                  "vat_nr", "address", "shipping_address", "street", "zip_code", "city",
+                  "country", "email", "phone", "active"):
             if k in fields:
                 updates[k] = fields[k]
+        # Recompose the legacy single-line address when a structured part changed and
+        # the caller didn't pass an explicit address.
+        if any(k in updates for k in ("street", "zip_code", "city", "country")) \
+                and "address" not in updates:
+            cur = self.get_customer(kundnummer)
+            cur.update(updates)
+            updates["address"] = _compose_address(cur.get("street"), cur.get("zip_code"),
+                                                  cur.get("city"), cur.get("country"))
         sets, params = _build_update(updates)
         if sets:
             with self.conn:
@@ -339,20 +391,41 @@ class BookOps:
         ).fetchone()
         if t is None:
             raise KeyError(f"No transaktion {transaktion_id}")
-        if t["verifikation_id"] is not None:
-            raise InvalidState("Transaktion is already booked")
+        if t["status"] == "paid":
+            raise InvalidState("Transaktion is already paid")
 
         ex, moms_by_rate, inc = self._sum_moms(transaktion_id)
         sum_moms = sum(moms_by_rate.values())
-        konto = self._category_konto(t["category_id"])
 
         claim = self.conn.execute(
             "SELECT * FROM rut_claim WHERE transaktion_id=?", (transaktion_id,)
         ).fetchone()
         rut = claim["rut_amount_ore"] if claim else 0
 
+        # Fakturametod: the invoice was already booked at issue (kundfordran). Payment
+        # only settles the receivable (bank <- kundfordran); income/moms already booked.
+        if t["verifikation_id"] is not None:
+            cust_part = inc - rut
+            postings = []
+            if cust_part:
+                postings.append((self._sys_account("account_bank"), cust_part, "inbetalning"))
+                postings.append((self._sys_account("account_kundfordran"), -cust_part,
+                                 "kvitta kundfordran"))
+            with self.conn:
+                vid, number = self._post_verifikation(
+                    payment_date, payment_date, "Betalning faktura", postings)
+                self.conn.execute(
+                    "UPDATE transaktion SET status='paid', payment_date=? WHERE id=?",
+                    (payment_date, transaktion_id))
+                if claim:
+                    self.conn.execute(
+                        "UPDATE rut_claim SET state='customer_paid', customer_payment_date=? "
+                        "WHERE id=?", (payment_date, claim["id"]))
+            return {"verifikation_id": vid, "ver_number": number}
+
+        income_splits = self._income_splits(transaktion_id)
         if t["direction"] == "in":
-            postings = [(konto, ex, "utgift")]
+            postings = [(k, ex_k, "utgift") for k, ex_k in income_splits]
             if sum_moms:
                 postings.append((self._sys_account("account_ingaende_moms"), sum_moms, "ingående moms"))
             postings.append((self._sys_account("account_bank"), -inc, "betalning"))
@@ -361,7 +434,7 @@ class BookOps:
             postings = [(self._sys_account("account_bank"), inc - rut, "inbetalning")]
             if rut:
                 postings.append((self._sys_account("account_rut_fordran"), rut, "husavdrag fordran"))
-            postings.append((konto, -ex, "försäljning"))
+            postings.extend((k, -ex_k, "försäljning") for k, ex_k in income_splits)
             for rate_code, m in moms_by_rate.items():
                 if m and rate_code in _UTG_MOMS_KEY:
                     postings.append((self._sys_account(_UTG_MOMS_KEY[rate_code]), -m, f"utgående moms {rate_code}%"))
@@ -553,6 +626,747 @@ class BookOps:
         return row is not None
 
     # ==================================================================
+    # Company profile (seller) + payment methods — reference data
+    # ==================================================================
+
+    def get_accounting_method(self) -> str:
+        """'kontantmetod' (book at payment) or 'fakturametod' (book at issue + payment)."""
+        row = self.conn.execute(
+            "SELECT value FROM config WHERE key='bokforingsmetod'").fetchone()
+        return row[0] if row else "kontantmetod"
+
+    def set_accounting_method(self, method: str) -> None:
+        if method not in ("kontantmetod", "fakturametod"):
+            raise ValueError("method must be 'kontantmetod' or 'fakturametod'")
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO config(key, value) VALUES ('bokforingsmetod', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (method,))
+
+    def get_company(self) -> dict:
+        row = self.conn.execute(
+            "SELECT id, name, org_nr, vat_nr, address, email, phone, f_skatt, updated_at, "
+            "(logo_enc IS NOT NULL) AS has_logo FROM company WHERE id=1"
+        ).fetchone()
+        if row is None:
+            return {"id": 1, "name": None, "org_nr": None, "vat_nr": None,
+                    "address": None, "email": None, "phone": None, "f_skatt": 1,
+                    "has_logo": False}
+        d = dict(row)
+        d["has_logo"] = bool(d["has_logo"])
+        return d
+
+    def set_logo(self, image_bytes: bytes) -> None:
+        """
+        Store the book's logo (used on every document). Any common format the phone
+        or PC can produce (PNG/JPG/WEBP/…) is normalised to a size-bounded PNG via
+        Pillow, then AES-256-GCM-encrypted with the DEK and stored in the company row
+        (so it travels in the .buyn bundle). Replaces any existing logo.
+        """
+        import io
+        from PIL import Image
+        try:
+            img = Image.open(io.BytesIO(image_bytes))
+            img.load()
+        except Exception as exc:
+            raise ValueError("Unsupported or corrupt image") from exc
+        img = img.convert("RGBA")
+        max_px = 600
+        if max(img.size) > max_px:
+            img.thumbnail((max_px, max_px))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        enc = self.session.encrypt_blob(buf.getvalue())
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO company(id) VALUES (1)")
+            self.conn.execute("UPDATE company SET logo_enc=?, updated_at=? WHERE id=1",
+                              (enc, _now()))
+
+    def get_logo(self) -> Optional[tuple[bytes, str]]:
+        """Return (png_bytes, 'image/png') for the book's logo, or None if unset."""
+        row = self.conn.execute("SELECT logo_enc FROM company WHERE id=1").fetchone()
+        if row is None or row["logo_enc"] is None:
+            return None
+        return self.session.decrypt_blob(row["logo_enc"]), "image/png"
+
+    def delete_logo(self) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE company SET logo_enc=NULL, updated_at=? WHERE id=1", (_now(),))
+
+    def set_company(self, **fields) -> None:
+        allowed = ("name", "org_nr", "vat_nr", "address", "email", "phone", "f_skatt")
+        data = {k: v for k, v in fields.items() if k in allowed}
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO company(id) VALUES (1)")
+            if data:
+                sets = ", ".join(f"{k}=?" for k in data)
+                self.conn.execute(f"UPDATE company SET {sets}, updated_at=? WHERE id=1",
+                                  (*data.values(), _now()))
+
+    def list_payment_methods(self, active_only: bool = False) -> list[dict]:
+        sql = ("SELECT id, label, value, sort_order, active FROM payment_method "
+               + ("WHERE active=1 " if active_only else "") + "ORDER BY sort_order, id")
+        return [dict(r) for r in self.conn.execute(sql).fetchall()]
+
+    def create_payment_method(self, label: str, value: str, sort_order: int = 0) -> int:
+        if not label or not value:
+            raise ValueError("Payment method needs a label and a value")
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO payment_method(label, value, sort_order) VALUES (?,?,?)",
+                (label, value, sort_order))
+        return cur.lastrowid
+
+    def update_payment_method(self, payment_method_id: int, **fields) -> None:
+        allowed = ("label", "value", "sort_order", "active")
+        data = {k: v for k, v in fields.items() if k in allowed}
+        if not data:
+            return
+        sets = ", ".join(f"{k}=?" for k in data)
+        with self.conn:
+            self.conn.execute(f"UPDATE payment_method SET {sets} WHERE id=?",
+                              (*data.values(), payment_method_id))
+
+    # ==================================================================
+    # Invoices (faktura) — issued as a pending income; numbered sequentially
+    # ==================================================================
+
+    def create_invoice(self, *, customer_id: int, category_id: Optional[int] = None,
+                       invoice_date: str, due_date: str, lines: list[dict],
+                       recipients: Optional[list[dict]] = None,
+                       delivery_date: Optional[str] = None,
+                       payment_terms: Optional[str] = None,
+                       our_reference: Optional[str] = None,
+                       your_reference: Optional[str] = None,
+                       note: Optional[str] = None) -> dict:
+        """
+        Issue a faktura: compute the article lines, snapshot the buyer/seller/payment
+        methods, split RUT across household recipients, and create the underlying
+        PENDING income (so the existing pending->paid booking and the reports apply).
+        Each article line carries its own income category (BAS-konto); booking then
+        splits the income across those konton. `category_id` is the fallback used for
+        lines that don't set their own. Assigns the next unbroken invoice_number.
+        """
+        customer = self.get_customer(customer_id)
+        recipients = recipients or []
+        if not lines:
+            raise ValueError("An invoice needs at least one article line")
+        if category_id is not None:
+            self._check_category(category_id, "income")
+
+        # 1) Per-line figures + aggregate the moms lines by (category, rate). Each line
+        #    books to its own category (BAS-konto), falling back to the invoice default.
+        computed, agg = [], {}
+        for i, ln in enumerate(lines, start=1):
+            rate_code = ln["rate_code"]
+            if rate_code not in S.MOMS_RATES:
+                raise ValueError(f"Unknown moms rate {rate_code!r}")
+            line_cat = ln.get("category_id") or category_id
+            if line_cat is None:
+                raise ValueError("Each invoice line needs a category (or set a default category)")
+            self._check_category(line_cat, "income")
+            qty_centi = int(ln["quantity_centi"])
+            unit_price_ore = int(ln["unit_price_ore"])
+            ex = round(qty_centi * unit_price_ore / 100)
+            _, moms, _ = compute_moms_figures(ex, rate_code, inclusive=False)
+            computed.append({
+                "line_no": i, "description": ln["description"], "category_id": line_cat,
+                "quantity_centi": qty_centi, "unit": ln.get("unit"),
+                "unit_price_ore": unit_price_ore, "rate_code": rate_code,
+                "rut_eligible": 1 if ln.get("rut_eligible") else 0,
+                "ex_moms_ore": ex, "moms_ore": moms,
+            })
+            agg[(line_cat, rate_code)] = agg.get((line_cat, rate_code), 0) + ex
+        moms_lines = [{"rate_code": rc, "amount_ore": ex, "inclusive": False, "category_id": cat}
+                      for (cat, rc), ex in agg.items()]
+        # Fallback category for the underlying transaktion row (any line's category works
+        # since per-line category_id on the moms_lines drives the actual income split).
+        fallback_category = category_id or computed[0]["category_id"]
+
+        # 2) RUT recipients (household split) — validate name + personnummer.
+        rut_total = 0
+        clean_recipients = []
+        for r in recipients:
+            if not r.get("first_name") or not r.get("last_name"):
+                raise ValueError("Each RUT recipient needs a first and last name")
+            if not S.is_valid_personnummer(r["personnummer"]):
+                raise ValueError("RUT recipient has an invalid personnummer")
+            amount = int(r["rut_amount_ore"])
+            rut_total += amount
+            clean_recipients.append({
+                "first_name": r["first_name"], "last_name": r["last_name"],
+                "personnummer": S.normalize_personnummer(r["personnummer"]),
+                "rut_amount_ore": amount,
+            })
+
+        # 3) Underlying pending income (snapshot + moms_lines + rut_claim + reports).
+        income = self.record_income(customer_id, fallback_category, moms_lines, invoice_date,
+                                    rut_amount_ore=rut_total, note=note)
+        tid = income["transaktion_id"]
+        ex_total, _, inc_total = self._sum_moms(tid)
+        moms_total = inc_total - ex_total
+
+        # 3b) Fakturametod: book the invoice NOW (kundfordran/income/moms at issue).
+        # The transaktion's verifikation becomes this issue posting, so the moms is
+        # reported in the invoice's period; payment later only settles the receivable.
+        # Kontantmetod leaves it pending (booked when paid + year-end accrual).
+        if self.get_accounting_method() == "fakturametod":
+            self._book_invoice_issue(tid, invoice_date, rut_total)
+
+        # 4) Frozen snapshots + the sequential invoice number.
+        buyer_snapshot_enc = self.session.encrypt_text(json.dumps(customer, default=str))
+        seller_snapshot = json.dumps(self.get_company(), default=str)
+        pm_snapshot = json.dumps(self.list_payment_methods(active_only=True), default=str)
+        number = self._next_invoice_number()
+
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO invoice(invoice_number, customer_id, transaktion_id, invoice_date, "
+                "due_date, delivery_date, payment_terms, buyer_snapshot_enc, seller_snapshot, "
+                "payment_methods_snapshot, our_reference, your_reference, note, ex_moms_ore, "
+                "moms_ore, inc_moms_ore, rut_total_ore, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (number, customer_id, tid, invoice_date, due_date, delivery_date, payment_terms,
+                 buyer_snapshot_enc, seller_snapshot, pm_snapshot, our_reference, your_reference,
+                 note, ex_total, moms_total, inc_total, rut_total, _now()))
+            invoice_id = cur.lastrowid
+            for cl in computed:
+                self.conn.execute(
+                    "INSERT INTO invoice_line(invoice_id, line_no, description, category_id, "
+                    "quantity_centi, unit, unit_price_ore, rate_code, rut_eligible, ex_moms_ore, "
+                    "moms_ore) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (invoice_id, cl["line_no"], cl["description"], cl["category_id"],
+                     cl["quantity_centi"], cl["unit"], cl["unit_price_ore"], cl["rate_code"],
+                     cl["rut_eligible"], cl["ex_moms_ore"], cl["moms_ore"]))
+            for r in clean_recipients:
+                self.conn.execute(
+                    "INSERT INTO rut_recipient(invoice_id, first_name, last_name, "
+                    "personnummer_enc, rut_amount_ore) VALUES (?,?,?,?,?)",
+                    (invoice_id, r["first_name"], r["last_name"],
+                     self.session.encrypt_text(r["personnummer"]), r["rut_amount_ore"]))
+
+        return {"invoice_id": invoice_id, "invoice_number": number, "transaktion_id": tid,
+                "ex_moms_ore": ex_total, "moms_ore": moms_total, "inc_moms_ore": inc_total,
+                "rut_total_ore": rut_total}
+
+    def _invoice_balances(self, invoice_id: int) -> dict:
+        """
+        Derive an invoice's running settlement from the event subledger.
+
+        customer_due = (inc − RUT) − credits   (what the customer should pay)
+        paid         = payments − refunds
+        outstanding  = customer_due − paid
+        """
+        inv = self.conn.execute(
+            "SELECT inc_moms_ore, rut_total_ore, cancelled_at, credited_at, transaktion_id "
+            "FROM invoice WHERE id=?", (invoice_id,)).fetchone()
+        ev = {r["kind"]: r["s"] for r in self.conn.execute(
+            "SELECT kind, COALESCE(SUM(amount_ore),0) AS s FROM invoice_event "
+            "WHERE invoice_id=? GROUP BY kind", (invoice_id,))}
+        payments, refunds, credits = ev.get("payment", 0), ev.get("refund", 0), ev.get("credit", 0)
+        has_events = bool(ev)
+        tx_status = None
+        if inv["transaktion_id"]:
+            row = self.conn.execute("SELECT status FROM transaktion WHERE id=?",
+                                    (inv["transaktion_id"],)).fetchone()
+            tx_status = row["status"] if row else None
+        customer_total = inv["inc_moms_ore"] - inv["rut_total_ore"]
+        customer_due = customer_total - credits
+        paid = payments - refunds
+        # Legacy/RUT path: paid in full via register_payment (no subledger events).
+        if not has_events and tx_status == "paid":
+            paid = customer_due
+        return {
+            "inc_moms_ore": inv["inc_moms_ore"], "rut_total_ore": inv["rut_total_ore"],
+            "customer_total_ore": customer_total, "credited_ore": credits,
+            "customer_due_ore": customer_due, "paid_ore": payments - refunds,
+            "refunded_ore": refunds,
+            "outstanding_ore": customer_due - paid,
+            "state": self._invoice_state(inv, customer_total, credits, paid),
+        }
+
+    @staticmethod
+    def _invoice_state(inv_row, customer_total, credits, paid) -> str:
+        if inv_row["cancelled_at"]:
+            return "cancelled"
+        if inv_row["credited_at"] or (customer_total > 0 and credits >= customer_total):
+            return "credited"
+        if paid <= 0:
+            return "pending"
+        if paid >= customer_total - credits:
+            return "paid"
+        return "partial"
+
+    def list_invoices(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT id, invoice_number, invoice_date, due_date, customer_id, transaktion_id, "
+            "inc_moms_ore, rut_total_ore FROM invoice ORDER BY invoice_number").fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d.update(self._invoice_balances(r["id"]))
+            d["credit_notes"] = [dict(c) for c in self.conn.execute(
+                "SELECT id, credit_note_number, date, amount_ore FROM invoice_event "
+                "WHERE invoice_id=? AND kind='credit' AND credit_note_number IS NOT NULL "
+                "ORDER BY id", (r["id"],)).fetchall()]
+            out.append(d)
+        return out
+
+    def get_invoice(self, invoice_id: int) -> dict:
+        row = self.conn.execute("SELECT * FROM invoice WHERE id=?", (invoice_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No invoice {invoice_id}")
+        inv = dict(row)
+        status_row = self.conn.execute(
+            "SELECT status, payment_date FROM transaktion WHERE id=?",
+            (inv["transaktion_id"],)).fetchone()
+        inv["status"] = status_row["status"] if status_row else None
+        inv["payment_date"] = status_row["payment_date"] if status_row else None
+        inv.update(self._invoice_balances(invoice_id))
+        inv["events"] = [dict(r) for r in self.conn.execute(
+            "SELECT id, kind, amount_ore, date, verifikation_id, credit_note_number, note "
+            "FROM invoice_event WHERE invoice_id=? ORDER BY date, id", (invoice_id,)).fetchall()]
+        inv["buyer"] = json.loads(self.session.decrypt_text(inv.pop("buyer_snapshot_enc")))
+        inv["seller"] = json.loads(inv.pop("seller_snapshot") or "{}")
+        inv["payment_methods"] = json.loads(inv.pop("payment_methods_snapshot") or "[]")
+        inv["lines"] = [dict(r) for r in self.conn.execute(
+            "SELECT il.line_no, il.description, il.category_id, c.name AS category_name, "
+            "c.bas_konto AS category_bas_konto, il.quantity_centi, il.unit, il.unit_price_ore, "
+            "il.rate_code, il.rut_eligible, il.ex_moms_ore, il.moms_ore FROM invoice_line il "
+            "LEFT JOIN category c ON c.id = il.category_id WHERE il.invoice_id=? "
+            "ORDER BY il.line_no", (invoice_id,)).fetchall()]
+        inv["recipients"] = [{
+            "first_name": r["first_name"], "last_name": r["last_name"],
+            "personnummer": self.session.decrypt_text(r["personnummer_enc"]),
+            "rut_amount_ore": r["rut_amount_ore"],
+        } for r in self.conn.execute(
+            "SELECT first_name, last_name, personnummer_enc, rut_amount_ore "
+            "FROM rut_recipient WHERE invoice_id=? ORDER BY id", (invoice_id,)).fetchall()]
+        return inv
+
+    def cancel_invoice(self, invoice_id: int) -> dict:
+        """
+        Makulera (void) an UNBOOKED invoice. Only allowed while the underlying income
+        is still pending (kontantmetod: nothing has hit the ledger). The pending
+        transaktion + its moms_lines/rut_claim are removed so it is no longer payable;
+        the invoice_number stays reserved (a gap-free series) and the invoice row is
+        kept and flagged makulerad. A booked invoice must be credited instead.
+        """
+        inv = self.conn.execute(
+            "SELECT transaktion_id, cancelled_at, credited_at FROM invoice WHERE id=?",
+            (invoice_id,)).fetchone()
+        if inv is None:
+            raise KeyError(f"No invoice {invoice_id}")
+        if inv["cancelled_at"] or inv["credited_at"]:
+            raise InvalidState("Invoice is already makulerad/krediterad")
+        tid = inv["transaktion_id"]
+        t = self.conn.execute("SELECT verifikation_id FROM transaktion WHERE id=?",
+                              (tid,)).fetchone() if tid else None
+        if t and t["verifikation_id"] is not None:
+            raise InvalidState("Invoice is booked (paid); kreditera it instead of makulera")
+        if self.conn.execute("SELECT 1 FROM invoice_event WHERE invoice_id=? LIMIT 1",
+                             (invoice_id,)).fetchone():
+            raise InvalidState("Invoice has payments/credits; kreditera/återbetala it instead")
+        with self.conn:
+            # Detach the invoice first so deleting the transaktion can't trip the FK.
+            self.conn.execute(
+                "UPDATE invoice SET cancelled_at=?, transaktion_id=NULL WHERE id=?",
+                (_now(), invoice_id))
+            if tid:
+                self.conn.execute("DELETE FROM moms_line WHERE transaktion_id=?", (tid,))
+                self.conn.execute("DELETE FROM rut_claim WHERE transaktion_id=?", (tid,))
+                self.conn.execute("DELETE FROM transaktion WHERE id=?", (tid,))
+        return {"invoice_id": invoice_id, "cancelled": True}
+
+    # ---- settlement subledger: partial payments / refunds / credits ----------
+
+    def pay_invoice(self, invoice_id: int, amount_ore: Optional[int] = None,
+                    date: Optional[str] = None) -> dict:
+        """
+        Register a customer payment against an invoice (partial or full). Books the
+        cash and records an invoice_event; the invoice's outstanding balance + state
+        follow from the events. `amount_ore` defaults to the full outstanding amount.
+        RUT invoices use the full register_payment + Skatteverket flow instead.
+        """
+        inv, bal = self._require_open_invoice(invoice_id)
+        if inv["rut_total_ore"]:
+            raise InvalidState("RUT invoices: use the full payment + Skatteverket flow")
+        amount = bal["outstanding_ore"] if amount_ore is None else int(amount_ore)
+        if amount <= 0:
+            raise ValueError("Payment amount must be > 0")
+        if amount > bal["outstanding_ore"]:
+            raise InvalidState("Payment exceeds the outstanding amount")
+        date = date or _now()[:10]
+        tid = inv["transaktion_id"]
+        text = f"Betalning faktura {inv['invoice_number']}"
+
+        if self.get_accounting_method() == "fakturametod":
+            postings = [(self._sys_account("account_bank"), amount, "inbetalning"),
+                        (self._sys_account("account_kundfordran"), -amount, "kvitta kundfordran")]
+            with self.conn:
+                vid, num = self._post_verifikation(date, date, text, postings)
+                self._record_invoice_event(invoice_id, "payment", amount, date, vid)
+                self._sync_invoice_paid(invoice_id, tid, date)
+        else:  # kontantmetod: recognise income + moms proportionally as cash arrives
+            vid, num = self._book_kontant_recognition(tid, bal["paid_ore"], amount,
+                                                      inv["inc_moms_ore"], date, +1, text)
+            with self.conn:
+                self._record_invoice_event(invoice_id, "payment", amount, date, vid)
+                self._sync_invoice_paid(invoice_id, tid, date)
+        return {"invoice_id": invoice_id, "verifikation_id": vid, "ver_number": num,
+                "amount_ore": amount, "outstanding_ore": self._invoice_balances(invoice_id)["outstanding_ore"]}
+
+    def refund_invoice(self, invoice_id: int, amount_ore: int,
+                       date: Optional[str] = None, note: Optional[str] = None) -> dict:
+        """Pay money back to the customer (full or partial) — the reverse of a payment."""
+        inv, bal = self._require_open_invoice(invoice_id)
+        if inv["rut_total_ore"]:
+            raise InvalidState("RUT invoices: refunds not supported via the subledger")
+        amount = int(amount_ore)
+        if amount <= 0:
+            raise ValueError("Refund amount must be > 0")
+        if amount > bal["paid_ore"]:
+            raise InvalidState("Refund exceeds what has been paid")
+        date = date or _now()[:10]
+        tid = inv["transaktion_id"]
+        text = f"Återbetalning faktura {inv['invoice_number']}"
+
+        if self.get_accounting_method() == "fakturametod":
+            postings = [(self._sys_account("account_bank"), -amount, "återbetalning"),
+                        (self._sys_account("account_kundfordran"), amount, "återställd kundfordran")]
+            with self.conn:
+                vid, num = self._post_verifikation(date, date, text, postings)
+                self._record_invoice_event(invoice_id, "refund", amount, date, vid, note)
+                self._sync_invoice_paid(invoice_id, tid, date)
+        else:  # kontantmetod: de-recognise the income/moms slice being refunded
+            vid, num = self._book_kontant_recognition(tid, bal["paid_ore"] - amount, amount,
+                                                      inv["inc_moms_ore"], date, -1, text)
+            with self.conn:
+                self._record_invoice_event(invoice_id, "refund", amount, date, vid, note)
+                self._sync_invoice_paid(invoice_id, tid, date)
+        return {"invoice_id": invoice_id, "verifikation_id": vid, "ver_number": num,
+                "amount_ore": amount}
+
+    def credit_invoice(self, invoice_id: int, amount_ore: Optional[int] = None,
+                       reason: Optional[str] = None, date: Optional[str] = None) -> dict:
+        """
+        Kreditera an invoice (full or partial). Reverses income + moms for the credited
+        slice and lowers the customer receivable (1510) — so a credit on an already-paid
+        invoice makes the receivable negative, i.e. money owed back, which `refund_invoice`
+        then pays out. A fully credited invoice is flagged krediterad.
+        """
+        inv, bal = self._require_open_invoice(invoice_id)
+        if inv["rut_total_ore"]:
+            raise InvalidState("RUT invoices: partial credit not supported; use makulera/full flow")
+        billable = inv["inc_moms_ore"] - inv["rut_total_ore"] - bal["credited_ore"]
+        amount = billable if amount_ore is None else int(amount_ore)
+        if amount <= 0:
+            raise ValueError("Credit amount must be > 0")
+        if amount > billable:
+            raise InvalidState("Credit exceeds the invoice amount")
+        # Kontantmetod recognises income only as cash arrives, so there is nothing to
+        # reverse beyond what has been paid; void an unpaid part with makulera instead.
+        if self.get_accounting_method() == "kontantmetod" and amount > bal["paid_ore"]:
+            raise InvalidState(
+                "Kontantmetod: credit cannot exceed the paid amount (makulera the unpaid part)")
+        date = date or _now()[:10]
+        tid = inv["transaktion_id"]
+        text = f"Kreditering faktura {inv['invoice_number']}" + (f": {reason}" if reason else "")
+
+        # Reverse the proportional income/moms slice (split per line category),
+        # balanced against the receivable.
+        slices = self._recognition_slice(tid, bal["credited_ore"], amount, inv["inc_moms_ore"])
+        postings = [(konto, ex, "kreditering försäljning")
+                    for konto, ex in sorted(self._group_income(tid, slices).items())]
+        for rate_code, moms in sorted(self._group_moms(slices).items()):
+            postings.append((self._sys_account(_UTG_MOMS_KEY[rate_code]), moms,
+                             f"kreditering moms {rate_code}%"))
+        postings.append((self._sys_account("account_kundfordran"), -amount, "minskad kundfordran"))
+        with self.conn:
+            vid, num = self._post_verifikation(date, date, text, postings)
+            # negative report-clone so the momsdeklaration/result net the credit
+            self._book_recognition_clone(tid, vid, date, slices, -1, "kreditering")
+            credit_note_number = self._next_invoice_number()
+            ev_id = self._record_invoice_event(invoice_id, "credit", amount, date, vid, reason,
+                                               credit_note_number)
+            fully = bal["credited_ore"] + amount >= inv["inc_moms_ore"] - inv["rut_total_ore"]
+            if fully:
+                self.conn.execute(
+                    "UPDATE invoice SET credited_at=?, credit_verifikation_id=? WHERE id=?",
+                    (_now(), vid, invoice_id))
+        return {"invoice_id": invoice_id, "verifikation_id": vid, "ver_number": num,
+                "amount_ore": amount, "credited": True, "credit_note_number": credit_note_number,
+                "credit_event_id": ev_id}
+
+    def _next_invoice_number(self) -> int:
+        """Next number in the faktura series, shared by invoices and credit notes
+        (so every issued document has a unique, unbroken number)."""
+        a = self.conn.execute("SELECT COALESCE(MAX(invoice_number), 0) FROM invoice").fetchone()[0]
+        b = self.conn.execute(
+            "SELECT COALESCE(MAX(credit_note_number), 0) FROM invoice_event").fetchone()[0]
+        return max(a, b) + 1
+
+    def get_credit_note(self, invoice_id: int, event_id: int) -> dict:
+        """Build a render dict for a kreditfaktura: the original invoice's frozen
+        buyer/seller/payment snapshots, a reference to the original number, and the
+        credited slice as NEGATIVE line(s)."""
+        ev = self.conn.execute(
+            "SELECT id, amount_ore, date, credit_note_number, note FROM invoice_event "
+            "WHERE id=? AND invoice_id=? AND kind='credit'", (event_id, invoice_id)).fetchone()
+        if ev is None:
+            raise KeyError(f"No credit note {event_id} on invoice {invoice_id}")
+        orig = self.get_invoice(invoice_id)
+        credited_before = self.conn.execute(
+            "SELECT COALESCE(SUM(amount_ore),0) FROM invoice_event "
+            "WHERE invoice_id=? AND kind='credit' AND id<?", (invoice_id, event_id)).fetchone()[0]
+        slices = self._recognition_slice(orig["transaktion_id"], credited_before,
+                                         ev["amount_ore"], orig["inc_moms_ore"])
+        lines, ex_total, moms_total = [], 0, 0
+        for s in slices:
+            ex_s, moms_s = s["ex_s"], s["moms_s"]
+            if ex_s or moms_s:
+                lines.append({"line_no": len(lines) + 1,
+                              "description": f"Kreditering avseende faktura {orig['invoice_number']}",
+                              "quantity_centi": 100, "unit": None, "unit_price_ore": -ex_s,
+                              "rate_code": s["rate_code"], "rut_eligible": 0,
+                              "ex_moms_ore": -ex_s, "moms_ore": -moms_s})
+                ex_total -= ex_s
+                moms_total -= moms_s
+        return {
+            "invoice_number": ev["credit_note_number"], "invoice_date": ev["date"],
+            "due_date": None, "delivery_date": None,
+            "buyer": orig["buyer"], "seller": orig["seller"],
+            "payment_methods": [], "payment_terms": None,
+            "our_reference": orig.get("our_reference"), "your_reference": orig.get("your_reference"),
+            "note": ev["note"], "lines": lines, "recipients": [],
+            "ex_moms_ore": ex_total, "moms_ore": moms_total, "inc_moms_ore": -ev["amount_ore"],
+            "rut_total_ore": 0, "credit_of": orig["invoice_number"],
+        }
+
+    # ---- subledger internals -------------------------------------------------
+
+    def _require_open_invoice(self, invoice_id: int) -> tuple:
+        inv = self.conn.execute(
+            "SELECT id, invoice_number, transaktion_id, inc_moms_ore, rut_total_ore, "
+            "cancelled_at FROM invoice WHERE id=?", (invoice_id,)).fetchone()
+        if inv is None:
+            raise KeyError(f"No invoice {invoice_id}")
+        if inv["cancelled_at"]:
+            raise InvalidState("Invoice is makulerad")
+        return inv, self._invoice_balances(invoice_id)
+
+    def _record_invoice_event(self, invoice_id, kind, amount, date, vid, note=None,
+                              credit_note_number=None) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO invoice_event(invoice_id, kind, amount_ore, date, verifikation_id, "
+            "credit_note_number, note, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (invoice_id, kind, amount, date, vid, credit_note_number, note, _now()))
+        return cur.lastrowid
+
+    def _sync_invoice_paid(self, invoice_id, transaktion_id, date) -> None:
+        """Mark the underlying transaktion paid once the invoice is fully settled."""
+        bal = self._invoice_balances(invoice_id)
+        if transaktion_id and bal["outstanding_ore"] <= 0:
+            self.conn.execute("UPDATE transaktion SET status='paid', payment_date=? WHERE id=?",
+                              (date, transaktion_id))
+        elif transaktion_id:
+            self.conn.execute("UPDATE transaktion SET status='pending' WHERE id=?", (transaktion_id,))
+
+    def _recognition_slice(self, transaktion_id, recognized_before, amount, total_inc) -> list:
+        """Per-line (category_id, rate, ex, moms) to recognise for `amount` of cash,
+        using cumulative rounding so a sequence of partials reconciles exactly to the
+        öre. One entry per moms_line (an invoice carries one line per category×rate)."""
+        before, after = recognized_before, recognized_before + amount
+        out = []
+        for ln in self.conn.execute(
+                "SELECT category_id, rate_code, ex_moms_ore, moms_ore FROM moms_line "
+                "WHERE transaktion_id=?", (transaktion_id,)):
+            ex_s = (round(ln["ex_moms_ore"] * after / total_inc)
+                    - round(ln["ex_moms_ore"] * before / total_inc))
+            moms_s = (round(ln["moms_ore"] * after / total_inc)
+                      - round(ln["moms_ore"] * before / total_inc))
+            out.append({"category_id": ln["category_id"], "rate_code": ln["rate_code"],
+                        "ex_s": ex_s, "moms_s": moms_s})
+        return out
+
+    def _income_splits(self, transaktion_id) -> list:
+        """[(bas_konto, sum_ex), …] — the full ex-moms of a transaktion grouped by each
+        moms_line's category konto (fallback the transaktion category). Used when
+        booking the whole amount at once (cash sale/purchase, fakturametod issue)."""
+        fb = self.conn.execute("SELECT category_id FROM transaktion WHERE id=?",
+                               (transaktion_id,)).fetchone()["category_id"]
+        agg: dict[int, int] = {}
+        for ln in self.conn.execute(
+                "SELECT category_id, ex_moms_ore FROM moms_line WHERE transaktion_id=?",
+                (transaktion_id,)):
+            cat = ln["category_id"] if ln["category_id"] is not None else fb
+            konto = self._category_konto(cat)
+            agg[konto] = agg.get(konto, 0) + ln["ex_moms_ore"]
+        return sorted(agg.items())
+
+    def _group_income(self, transaktion_id, slices) -> dict:
+        """{bas_konto: sum_ex} — slice ex grouped by each line's category konto, falling
+        back to the transaktion's category when a line carries none (plain income)."""
+        fb = self.conn.execute("SELECT category_id FROM transaktion WHERE id=?",
+                               (transaktion_id,)).fetchone()["category_id"]
+        agg: dict[int, int] = {}
+        for s in slices:
+            cat = s["category_id"] if s["category_id"] is not None else fb
+            konto = self._category_konto(cat)
+            agg[konto] = agg.get(konto, 0) + s["ex_s"]
+        return agg
+
+    @staticmethod
+    def _group_moms(slices) -> dict:
+        """{rate_code: sum_moms} over the utgående-moms rates only."""
+        agg: dict[str, int] = {}
+        for s in slices:
+            if s["moms_s"] and s["rate_code"] in _UTG_MOMS_KEY:
+                agg[s["rate_code"]] = agg.get(s["rate_code"], 0) + s["moms_s"]
+        return agg
+
+    def _book_recognition_clone(self, src_transaktion_id, vid, date, slices, sign, note) -> None:
+        """Synthetic transaktion + sliced moms_lines linked to `vid` so the moms/result
+        reports attribute this slice to `vid`'s date (hidden from the Transaktioner list).
+        Carries each slice's category_id so the result report splits by line category."""
+        src = self.conn.execute(
+            "SELECT direction, category_id, supplier_id, customer_id FROM transaktion WHERE id=?",
+            (src_transaktion_id,)).fetchone()
+        cur = self.conn.execute(
+            "INSERT INTO transaktion(direction, category_id, supplier_id, customer_id, trans_date, "
+            "status, verifikation_id, note, created_at) VALUES (?,?,?,?,?, 'paid', ?, ?, ?)",
+            (src["direction"], src["category_id"], src["supplier_id"], src["customer_id"],
+             date, vid, note, _now()))
+        rid = cur.lastrowid
+        for s in slices:
+            if s["ex_s"] or s["moms_s"]:
+                self.conn.execute(
+                    "INSERT INTO moms_line(transaktion_id, rate_code, category_id, ex_moms_ore, "
+                    "moms_ore, inc_moms_ore) VALUES (?,?,?,?,?,?)",
+                    (rid, s["rate_code"], s["category_id"], sign * s["ex_s"],
+                     sign * s["moms_s"], sign * (s["ex_s"] + s["moms_s"])))
+
+    def _book_kontant_recognition(self, transaktion_id, recognized_before, amount, total_inc,
+                                  date, sign, text) -> tuple[int, int]:
+        """Kontantmetod: book bank +/- amount against income + moms recognised for the
+        proportional slice (income split per line category), plus the report-clone.
+        Returns (verifikation_id, number)."""
+        slices = self._recognition_slice(transaktion_id, recognized_before, amount, total_inc)
+        postings = [(self._sys_account("account_bank"), sign * amount, "inbetalning")]
+        for konto, ex in sorted(self._group_income(transaktion_id, slices).items()):
+            postings.append((konto, -sign * ex, "försäljning"))
+        for rate_code, moms in sorted(self._group_moms(slices).items()):
+            postings.append((self._sys_account(_UTG_MOMS_KEY[rate_code]), -sign * moms,
+                             f"utgående moms {rate_code}%"))
+        with self.conn:
+            vid, num = self._post_verifikation(date, date, text, postings)
+            self._book_recognition_clone(transaktion_id, vid, date, slices, sign, "fakturabetalning")
+        return vid, num
+
+    def _book_invoice_issue(self, transaktion_id: int, ver_date: str, rut_ore: int) -> tuple[int, int]:
+        """
+        Fakturametod issue posting for a sale: debit the receivable(s) and credit the
+        income + utgående moms, dated `ver_date`, and set it as the transaktion's
+        verifikation (so the moms is reported in the invoice's period). The later
+        payment settles the receivable. Must be a sale (direction 'out').
+        """
+        ex, moms_by_rate, inc = self._sum_moms(transaktion_id)
+        cust_part = inc - rut_ore
+        postings = []
+        if cust_part:
+            postings.append((self._sys_account("account_kundfordran"), cust_part, "kundfordran"))
+        if rut_ore:
+            postings.append((self._sys_account("account_rut_fordran"), rut_ore, "husavdrag fordran"))
+        postings.extend((k, -ex_k, "försäljning") for k, ex_k in self._income_splits(transaktion_id))
+        for rate_code, m in moms_by_rate.items():
+            if m and rate_code in _UTG_MOMS_KEY:
+                postings.append((self._sys_account(_UTG_MOMS_KEY[rate_code]), -m,
+                                 f"utgående moms {rate_code}%"))
+        with self.conn:
+            vid, number = self._post_verifikation(ver_date, ver_date, "Faktura (kundfordran)", postings)
+            self.conn.execute("UPDATE transaktion SET verifikation_id=? WHERE id=?",
+                              (vid, transaktion_id))
+        return vid, number
+
+    # ==================================================================
+    # Receipts (encrypted photos, stored as files beside the db)
+    # ==================================================================
+
+    def _photos_dir(self) -> Path:
+        from backend.db import bundle  # local import avoids a circular dependency
+        return bundle._photos_dir(Path(self.session.record.db_path))
+
+    def attach_receipt(self, transaktion_id: int, data: bytes, mime: str,
+                       original_format: Optional[str] = None) -> dict:
+        """
+        Store a receipt photo for a transaktion: the bytes are encrypted with the
+        book DEK and written as a file in `<db>.photos/`; a `receipt` row indexes it.
+        The plaintext never touches disk. Returns the new receipt's metadata.
+        """
+        if self.conn.execute(
+            "SELECT 1 FROM transaktion WHERE id=?", (transaktion_id,)
+        ).fetchone() is None:
+            raise KeyError(f"No transaktion {transaktion_id}")
+        if original_format is not None and original_format not in S.RECEIPT_FORMATS:
+            raise ValueError(f"Invalid receipt format: {original_format}")
+
+        enc = self.session.encrypt_blob(data)
+        filename = f"{uuid.uuid4().hex}.bin"
+        photos = self._photos_dir()
+        photos.mkdir(parents=True, exist_ok=True)
+        (photos / filename).write_bytes(enc)
+
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO receipt(transaktion_id, filename, mime, original_format, "
+                "byte_size, sha256, created_at) VALUES (?,?,?,?,?,?,?)",
+                (transaktion_id, filename, mime, original_format,
+                 len(data), hashlib.sha256(enc).hexdigest(), _now()),
+            )
+        return {"id": cur.lastrowid, "transaktion_id": transaktion_id,
+                "filename": filename, "mime": mime, "byte_size": len(data)}
+
+    def list_receipts(self, transaktion_id: int) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT id, transaktion_id, mime, original_format, byte_size, created_at "
+            "FROM receipt WHERE transaktion_id=? ORDER BY id",
+            (transaktion_id,),
+        ).fetchall()]
+
+    def get_receipt(self, receipt_id: int) -> tuple[bytes, str]:
+        """Return (plaintext_bytes, mime) for a stored receipt, verifying integrity."""
+        row = self.conn.execute(
+            "SELECT filename, mime, sha256 FROM receipt WHERE id=?", (receipt_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"No receipt {receipt_id}")
+        enc = (self._photos_dir() / row["filename"]).read_bytes()
+        if hashlib.sha256(enc).hexdigest() != row["sha256"]:
+            raise OperationError(f"Receipt {receipt_id} failed integrity check")
+        return self.session.decrypt_blob(enc), row["mime"]
+
+    def delete_receipt(self, receipt_id: int) -> None:
+        """
+        Remove a receipt — allowed ONLY while its transaktion is still pending
+        (not yet booked into a verifikation). Once posted the receipt is part of the
+        immutable legal record.
+        """
+        row = self.conn.execute(
+            "SELECT r.filename, t.verifikation_id FROM receipt r "
+            "JOIN transaktion t ON t.id = r.transaktion_id WHERE r.id=?",
+            (receipt_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"No receipt {receipt_id}")
+        if row["verifikation_id"] is not None:
+            raise InvalidState("Cannot delete a receipt once its transaktion is booked")
+        with self.conn:
+            self.conn.execute("DELETE FROM receipt WHERE id=?", (receipt_id,))
+        f = self._photos_dir() / row["filename"]
+        if f.exists():
+            f.unlink()
+
+    # ==================================================================
     # Internal helpers
     # ==================================================================
 
@@ -567,6 +1381,15 @@ class BookOps:
         n = int(self._config(config_key))
         self.ensure_account(n, _SYS_ACCOUNT_NAMES.get(config_key, f"Konto {n}"))
         return n
+
+    def system_accounts(self) -> dict[int, str]:
+        """The booking engine's BAS-konton (bank, moms, receivables, …), each
+        materialised into the chart and mapped {bas_konto: human label}. Lets the UI
+        show the otherwise-hidden system konton alongside the user's categories."""
+        out: dict[int, str] = {}
+        for key, label in _SYS_ACCOUNT_NAMES.items():
+            out[self._sys_account(key)] = label
+        return out
 
     def _check_category(self, category_id: int, expected_kind: str) -> None:
         row = self.conn.execute(
@@ -597,7 +1420,7 @@ class BookOps:
             (src_transaktion_id,),
         ).fetchone()
         lines = self.conn.execute(
-            "SELECT rate_code, ex_moms_ore, moms_ore, inc_moms_ore FROM moms_line "
+            "SELECT rate_code, category_id, ex_moms_ore, moms_ore, inc_moms_ore FROM moms_line "
             "WHERE transaktion_id=?", (src_transaktion_id,),
         ).fetchall()
         if src is None or not lines:
@@ -612,9 +1435,9 @@ class BookOps:
         rid = cur.lastrowid
         for ln in lines:
             self.conn.execute(
-                "INSERT INTO moms_line(transaktion_id, rate_code, ex_moms_ore, moms_ore, inc_moms_ore) "
-                "VALUES (?,?,?,?,?)",
-                (rid, ln["rate_code"], sign * ln["ex_moms_ore"],
+                "INSERT INTO moms_line(transaktion_id, rate_code, category_id, ex_moms_ore, "
+                "moms_ore, inc_moms_ore) VALUES (?,?,?,?,?,?)",
+                (rid, ln["rate_code"], ln["category_id"], sign * ln["ex_moms_ore"],
                  sign * ln["moms_ore"], sign * ln["inc_moms_ore"]),
             )
         return rid
@@ -643,9 +1466,9 @@ class BookOps:
                     ln["amount_ore"], rate_code, ln.get("inclusive", True)
                 )
                 self.conn.execute(
-                    "INSERT INTO moms_line(transaktion_id, rate_code, ex_moms_ore, "
-                    "moms_ore, inc_moms_ore) VALUES (?,?,?,?,?)",
-                    (transaktion_id, rate_code, ex, moms, inc),
+                    "INSERT INTO moms_line(transaktion_id, rate_code, category_id, ex_moms_ore, "
+                    "moms_ore, inc_moms_ore) VALUES (?,?,?,?,?,?)",
+                    (transaktion_id, rate_code, ln.get("category_id"), ex, moms, inc),
                 )
 
     def _insert_rut_claim(self, transaktion_id, customer_id, rut_amount_ore, year) -> int:

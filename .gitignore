@@ -9,3 +9,18 @@ data/
 
 # local demo/run data
 .run-data/
+
+# phone build: large prebuilt Pyodide runtime + wheels + generated backend zip
+# (assembled by tools/build_phone_assets.py at build time, not committed)
+backend/api/static/vendor/
+node_modules/
+
+# generated phone WebView bundle + Capacitor native projects
+phone/www/
+phone/android/
+phone/ios/
+
+# PyInstaller desktop build outputs
+/build/
+/dist/
+*.pdf

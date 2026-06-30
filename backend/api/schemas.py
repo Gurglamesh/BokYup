@@ -33,6 +33,16 @@ class RenameReq(BaseModel):
     display_name: str
 
 
+class ChangePassphraseReq(BaseModel):
+    old_passphrase: str
+    new_passphrase: str
+
+
+class RecoveryKeyReq(BaseModel):
+    passphrase: str
+    recovery_key: Optional[str] = None    # None => generate a strong random one
+
+
 class ExportReq(BaseModel):
     out_path: str
 
@@ -50,12 +60,14 @@ class CategoryReq(BaseModel):
     name: str
     kind: str                     # 'income' | 'expense'
     bas_konto: int
+    default_rate_code: Optional[str] = None   # default moms for lines on this category
     account_name: Optional[str] = None
 
 
 class CategoryUpdateReq(BaseModel):
     name: Optional[str] = None
     bas_konto: Optional[int] = None
+    default_rate_code: Optional[str] = None
     active: Optional[bool] = None
     account_name: Optional[str] = None
 
@@ -69,7 +81,12 @@ class CustomerReq(BaseModel):
     org_nr: Optional[str] = None
     contact_person: Optional[str] = None
     vat_nr: Optional[str] = None
-    address: Optional[str] = None
+    address: Optional[str] = None              # legacy single-line (composed from parts)
+    shipping_address: Optional[str] = None     # leveransadress (if different)
+    street: Optional[str] = None
+    zip_code: Optional[str] = None
+    city: Optional[str] = None
+    country: Optional[str] = None              # defaults to Sverige server-side
     email: Optional[str] = None
     phone: Optional[str] = None
 
@@ -83,6 +100,11 @@ class CustomerUpdateReq(BaseModel):
     contact_person: Optional[str] = None
     vat_nr: Optional[str] = None
     address: Optional[str] = None
+    shipping_address: Optional[str] = None
+    street: Optional[str] = None
+    zip_code: Optional[str] = None
+    city: Optional[str] = None
+    country: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
     active: Optional[bool] = None
@@ -148,3 +170,90 @@ class PeriodLockReq(BaseModel):
 
 class YearEndAccrualReq(BaseModel):
     fiscal_year_end: str          # YYYY-MM-DD (last day of the räkenskapsår)
+
+
+# ----- invoices (faktura) -------------------------------------------------
+
+class CompanyReq(BaseModel):
+    name: Optional[str] = None
+    org_nr: Optional[str] = None
+    vat_nr: Optional[str] = None
+    address: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    f_skatt: Optional[int] = None
+
+
+class AccountingMethodReq(BaseModel):
+    method: str                   # 'kontantmetod' | 'fakturametod'
+
+
+class LogoReq(BaseModel):
+    image_base64: str             # any common image; normalised to PNG server-side
+
+
+class PaymentMethodReq(BaseModel):
+    label: str                    # "Swish" | "Bankgiro" | "IBAN" | ...
+    value: str                    # the number / link
+    sort_order: int = 0
+
+
+class PaymentMethodUpdateReq(BaseModel):
+    label: Optional[str] = None
+    value: Optional[str] = None
+    sort_order: Optional[int] = None
+    active: Optional[int] = None
+
+
+class InvoiceLineReq(BaseModel):
+    description: str
+    quantity_centi: int           # quantity * 100 (1.50 -> 150)
+    unit_price_ore: int           # ex moms, per unit
+    rate_code: str
+    category_id: Optional[int] = None   # income account this line books to
+    unit: Optional[str] = None
+    rut_eligible: bool = False
+
+
+class RutRecipientReq(BaseModel):
+    first_name: str
+    last_name: str
+    personnummer: str
+    rut_amount_ore: int           # this person's share of the skattereduktion
+
+
+class PayInvoiceReq(BaseModel):
+    amount_ore: Optional[int] = None   # None = full outstanding
+    date: Optional[str] = None
+
+
+class RefundInvoiceReq(BaseModel):
+    amount_ore: int
+    date: Optional[str] = None
+    note: Optional[str] = None
+
+
+class CreditInvoiceReq(BaseModel):
+    amount_ore: Optional[int] = None   # None = full remaining
+    reason: Optional[str] = None
+    date: Optional[str] = None
+
+
+class CreateInvoiceReq(BaseModel):
+    customer_id: int
+    category_id: Optional[int] = None    # fallback account; lines may each set their own
+    invoice_date: str
+    due_date: str
+    lines: list[InvoiceLineReq]
+    recipients: Optional[list[RutRecipientReq]] = None
+    delivery_date: Optional[str] = None
+    payment_terms: Optional[str] = None
+    our_reference: Optional[str] = None
+    your_reference: Optional[str] = None
+    note: Optional[str] = None
+
+
+class ReceiptUploadReq(BaseModel):
+    image_base64: str             # the raw image bytes, base64-encoded
+    mime: str                     # e.g. 'image/jpeg', 'image/png'
+    original_format: Optional[str] = None   # 'paper' | 'digital'
