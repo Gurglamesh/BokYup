@@ -629,23 +629,30 @@ class BookOps:
         }
 
     def husavdrag_cap_status(self, customer_id: int, year: int) -> dict:
-        """Per-recipient RUT+ROT skattereduktion used in `year` vs the per-person cap.
+        """Per-recipient husavdrag used in `year` vs BOTH per-person caps.
 
         Sums this customer's RUT and ROT amounts across the year's (non-cancelled)
-        invoice recipients — the per-person view that matters for the combined
-        75 000 kr/person/year cap. (Plain non-invoice RUT incomes are tracked
-        separately by rut_cap_status on the income customer.)"""
+        invoice recipients and checks them against two limits (Skatteverket, verified
+        2026-06): the **combined** RUT+ROT cap (75 000 kr) AND the **ROT-only** sub-cap
+        (50 000 kr). (Plain non-invoice RUT incomes are tracked separately by
+        rut_cap_status on the income customer.)"""
         cap = int(self._config("rut_rot_cap_ore_per_customer_year"))
-        used = self.conn.execute(
-            "SELECT COALESCE(SUM(rr.rut_amount_ore + rr.rot_amount_ore), 0) "
+        rot_cap = int(self._config("rot_cap_ore_per_customer_year"))
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(rr.rut_amount_ore + rr.rot_amount_ore), 0) AS used, "
+            "COALESCE(SUM(rr.rot_amount_ore), 0) AS rot_used "
             "FROM rut_recipient rr JOIN invoice i ON i.id = rr.invoice_id "
             "WHERE rr.customer_id=? AND substr(i.invoice_date,1,4)=? AND i.cancelled_at IS NULL",
-            (customer_id, str(year))).fetchone()[0]
-        remaining = cap - used
+            (customer_id, str(year))).fetchone()
+        used, rot_used = row["used"], row["rot_used"]
         return {
             "customer_id": customer_id, "year": year,
-            "cap_ore": cap, "used_ore": used, "remaining_ore": remaining,
+            # combined RUT+ROT cap
+            "cap_ore": cap, "used_ore": used, "remaining_ore": cap - used,
             "over_cap": used > cap, "near_cap": used >= cap * 0.9,
+            # ROT-only sub-cap
+            "rot_cap_ore": rot_cap, "rot_used_ore": rot_used, "rot_remaining_ore": rot_cap - rot_used,
+            "rot_over_cap": rot_used > rot_cap, "rot_near_cap": rot_used >= rot_cap * 0.9,
         }
 
     # ==================================================================
@@ -1045,13 +1052,16 @@ class BookOps:
         year = int(invoice_date[:4])
         for cid in {rc["customer_id"] for rc in clean_recipients if rc["customer_id"]}:
             status = self.husavdrag_cap_status(cid, year)
-            if status["over_cap"] or status["near_cap"]:
+            if (status["over_cap"] or status["near_cap"]
+                    or status["rot_over_cap"] or status["rot_near_cap"]):
                 cust = self.get_customer(cid)
                 cap_warnings.append({
                     "customer_id": cid,
                     "name": f"{cust.get('first_name', '')} {cust.get('last_name', '')}".strip(),
                     "used_ore": status["used_ore"], "cap_ore": status["cap_ore"],
-                    "over_cap": status["over_cap"],
+                    "over_cap": status["over_cap"], "near_cap": status["near_cap"],
+                    "rot_used_ore": status["rot_used_ore"], "rot_cap_ore": status["rot_cap_ore"],
+                    "rot_over_cap": status["rot_over_cap"], "rot_near_cap": status["rot_near_cap"],
                 })
 
         return {"invoice_id": invoice_id, "invoice_number": number, "transaktion_id": tid,

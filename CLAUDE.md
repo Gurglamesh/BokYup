@@ -191,8 +191,9 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       category↔BAS, rut_claim, period_lock, rättelse via `verifikation.rattelse_of`),
       DB-level immutability triggers, personnummer Luhn + money (öre) helpers.
       DONE, all tests pass. NOTE: money stored as integer ören everywhere; the
-      RUT/ROT cap is editable config (default 75 000 kr — VERIFIED 2026-06: combined
-      ROT+RUT cap is 75 000 kr/person/year).
+      RUT/ROT caps are editable config (VERIFIED 2026-06: combined RUT+ROT
+      75 000 kr/person/year AND a ROT-only sub-cap of 50 000 kr/person/year —
+      `rut_rot_cap_ore_per_customer_year` + `rot_cap_ore_per_customer_year`).
 - [x] **Layer 4 — Core operations** (`db/operations.py`) + tests (`tests/test_operations.py`).
       Reference CRUD, kontantmetod pending→paid booking with balanced double-entry +
       unbroken verifikationsnummer, RUT state machine (2 verifikationer), rättelse via
@@ -337,6 +338,13 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       `create_invoice` `cap_warnings` (non-blocking) flag a recipient over/near the
       75 000 kr/person/year cap; `GET /customers/{id}/husavdrag-cap/{year}`. UI: RUT %/
       ROT % per recipient + live "kvar i år" cap notes + toast on issue. Tests pass (259).
+- [x] **ROT sub-cap (schema v12, 2026-06).** Husavdrag has TWO per-person/year limits:
+      the combined RUT+ROT cap (75 000 kr) AND a lower ROT-only sub-cap (50 000 kr,
+      config `rot_cap_ore_per_customer_year`). `husavdrag_cap_status` now reports both
+      (`rot_used_ore`/`rot_cap_ore`/`rot_over_cap`/`rot_near_cap`) so a ROT-only breach
+      is flagged even when the combined total is under 75 000; `create_invoice`
+      `cap_warnings` + the recipient editor's "kvar i år" note + the issue toast cover
+      both caps. Tests pass (260).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

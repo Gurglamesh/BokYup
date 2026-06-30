@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -415,13 +415,13 @@ END;
 # the rules change over time, so it lives here as editable config — NOT hardcoded
 # in logic (CLAUDE.md > RUT). VERIFY the current amount against Skatteverket; this
 # is only a starting default the user can change.
-# Combined ROT+RUT cap, shared per customer per year. VERIFIED 2026-06 against
-# Skatteverket: RUT max 75 000 kr/person/year; ROT 50 000 kr but ROT+RUT together
-# capped at 75 000 kr/person/year — so this single shared cap is correct. Still
-# config because the rules change. (ROT's subsidy rate is not modelled here; the
-# RUT/ROT amount is taken as user input.)
+# Husavdrag caps per customer per year. VERIFIED 2026-06 against Skatteverket:
+# RUT up to 75 000 kr/year, ROT up to 50 000 kr/year (its own lower sub-cap), and
+# RUT+ROT TOGETHER capped at 75 000 kr/year. So there are two limits: the shared
+# combined cap AND the ROT-only sub-cap. Both config because the rules change.
 _DEFAULT_CONFIG = {
-    "rut_rot_cap_ore_per_customer_year": "7500000",  # 75 000 kr (verified 2026-06)
+    "rut_rot_cap_ore_per_customer_year": "7500000",  # combined RUT+ROT, 75 000 kr
+    "rot_cap_ore_per_customer_year": "5000000",      # ROT sub-cap, 50 000 kr
     # Skattereduktion percentages on labour cost INCLUDING moms (rules change ->
     # config). RUT 50 %, ROT 30 % (verified 2026-06 against Skatteverket).
     "rut_reduction_pct": "50",
@@ -586,6 +586,9 @@ _MIGRATIONS: dict[int, str] = {
     """,
     11: """
         ALTER TABLE rut_recipient ADD COLUMN rot_share_pct_centi INTEGER;
+    """,
+    12: """
+        INSERT OR IGNORE INTO config(key, value) VALUES ('rot_cap_ore_per_customer_year', '5000000');
     """,
 }
 
