@@ -247,6 +247,7 @@ class InvoiceLineReq(BaseModel):
     reduction_type: Optional[str] = None   # 'rut' | 'rot' | None (husavdrag kind)
     rut_eligible: bool = False             # back-compat: True == reduction_type 'rut'
     article_id: Optional[int] = None       # catalog article this line came from
+    discount_pct_centi: int = 0            # per-line % rabatt * 100 (15 % -> 1500)
 
 
 class RutRecipientReq(BaseModel):

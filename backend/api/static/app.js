@@ -1018,7 +1018,8 @@ function potsFromLines(lines, rutPct, rotPct) {
   let rut = 0, rot = 0;
   for (const ln of lines) {
     if (!ln.reduction_type) continue;
-    const ex = Math.round((ln.quantity_centi || 0) * (ln.unit_price_ore || 0) / 100);
+    const gross = Math.round((ln.quantity_centi || 0) * (ln.unit_price_ore || 0) / 100);
+    const ex = gross - Math.round(gross * (ln.discount_pct_centi || 0) / 10000);
     const inc = ex + Math.round(ex * (RATE_PCT[ln.rate_code] || 0));
     const red = Math.round(inc * (ln.reduction_type === "rut" ? rutPct : rotPct) / 100);
     if (ln.reduction_type === "rut") rut += red; else rot += red;
@@ -1716,6 +1717,8 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles) {
     const unit = el("input", { type: "text", value: v.unit || "st", style: "width:54px" });
     const priceVal = v.unit_price_ore != null ? toKr(v.unit_price_ore) : "0,00";
     const price = el("input", { type: "text", value: priceVal, style: "width:96px", oninput: fire });
+    const discVal = v.discount_pct_centi ? String(v.discount_pct_centi / 100).replace(".", ",") : "";
+    const disc = el("input", { type: "text", value: discVal, placeholder: "0", style: "width:54px", oninput: fire });
     const rate = el("select", { onchange: fire }, ...RATE_OPTIONS.map((r) => el("option", { value: r }, rateLabel(r))));
     if (v.rate_code) rate.value = v.rate_code;
     const red = el("select", { onchange: fire },
@@ -1748,14 +1751,15 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles) {
     const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end;flex-wrap:wrap" },
       wrap("Artikel", pick), wrap("Beskrivning", desc), wrap("Kategori (BAS)", cat),
       wrap("Antal", qty), wrap("Enhet", unit), wrap("À-pris ex moms", price),
-      wrap("Moms", rate), wrap("Husavdrag", red), saveBtn,
+      wrap("% rabatt", disc), wrap("Moms", rate), wrap("Husavdrag", red), saveBtn,
       el("button", { class: "btn small ghost", onclick: (e) => { e.target.closest(".row").remove(); fire(); } }, "✕"));
-    row._desc = desc; row._cat = cat; row._unit = unit; row._price = price; row._rate = rate; row._red = red;
+    row._desc = desc; row._cat = cat; row._unit = unit; row._price = price; row._disc = disc; row._rate = rate; row._red = red;
     row._get = () => ({
       description: desc.value.trim(),
       category_id: cat.value ? parseInt(cat.value, 10) : null,
       quantity_centi: Math.round(parseFloat((qty.value || "0").replace(",", ".")) * 100),
       unit: unit.value || null, unit_price_ore: toOre(price.value),
+      discount_pct_centi: Math.round(parseFloat((disc.value || "0").replace(",", ".")) * 100) || 0,
       rate_code: rate.value, reduction_type: red.value || null, article_id: articleId,
     });
     rowsBox.appendChild(row);

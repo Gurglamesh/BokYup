@@ -1131,7 +1131,13 @@ class BookOps:
             self._check_category(line_cat, "income")
             qty_centi = int(ln["quantity_centi"])
             unit_price_ore = int(ln["unit_price_ore"])
-            ex = round(qty_centi * unit_price_ore / 100)
+            # Per-line percentage discount (rabatt): applied to the line total ex moms
+            # BEFORE moms is computed, so moms + husavdrag follow the discounted amount.
+            discount_pct_centi = int(ln.get("discount_pct_centi") or 0)
+            if not 0 <= discount_pct_centi <= 10000:
+                raise ValueError("Rabatt måste vara mellan 0 och 100 %")
+            gross_ex = round(qty_centi * unit_price_ore / 100)
+            ex = gross_ex - round(gross_ex * discount_pct_centi / 10000)
             _, moms, _ = compute_moms_figures(ex, rate_code, inclusive=False)
             # reduction_type: 'rut' | 'rot' | None (back-compat: a bare rut_eligible
             # flag from older callers means RUT).
@@ -1145,7 +1151,7 @@ class BookOps:
                 "quantity_centi": qty_centi, "unit": ln.get("unit"),
                 "unit_price_ore": unit_price_ore, "rate_code": rate_code,
                 "reduction_type": reduction_type, "rut_eligible": 1 if reduction_type else 0,
-                "article_id": ln.get("article_id"),
+                "article_id": ln.get("article_id"), "discount_pct_centi": discount_pct_centi,
                 "ex_moms_ore": ex, "moms_ore": moms,
             })
             agg[(line_cat, rate_code)] = agg.get((line_cat, rate_code), 0) + ex
@@ -1242,11 +1248,12 @@ class BookOps:
                 self.conn.execute(
                     "INSERT INTO invoice_line(invoice_id, line_no, description, category_id, "
                     "quantity_centi, unit, unit_price_ore, rate_code, rut_eligible, reduction_type, "
-                    "article_id, ex_moms_ore, moms_ore) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "article_id, discount_pct_centi, ex_moms_ore, moms_ore) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (invoice_id, cl["line_no"], cl["description"], cl["category_id"],
                      cl["quantity_centi"], cl["unit"], cl["unit_price_ore"], cl["rate_code"],
                      cl["rut_eligible"], cl["reduction_type"], cl["article_id"],
-                     cl["ex_moms_ore"], cl["moms_ore"]))
+                     cl["discount_pct_centi"], cl["ex_moms_ore"], cl["moms_ore"]))
             for r in clean_recipients:
                 self.conn.execute(
                     "INSERT INTO rut_recipient(invoice_id, customer_id, first_name, last_name, "
@@ -1443,7 +1450,8 @@ class BookOps:
         inv["lines"] = [dict(r) for r in self.conn.execute(
             "SELECT il.line_no, il.description, il.category_id, c.name AS category_name, "
             "c.bas_konto AS category_bas_konto, il.quantity_centi, il.unit, il.unit_price_ore, "
-            "il.rate_code, il.rut_eligible, il.reduction_type, il.ex_moms_ore, il.moms_ore "
+            "il.rate_code, il.rut_eligible, il.reduction_type, il.discount_pct_centi, "
+            "il.ex_moms_ore, il.moms_ore "
             "FROM invoice_line il LEFT JOIN category c ON c.id = il.category_id "
             "WHERE il.invoice_id=? ORDER BY il.line_no", (invoice_id,)).fetchall()]
         inv["recipients"] = [{

@@ -579,6 +579,43 @@ class TestInvoices:
                                           "unit_price_ore": 10000, "rate_code": "25"}])
         assert inv2["invoice_number"] == 2
 
+    def test_line_percentage_discount(self, ops):
+        cat, kid = self._setup(ops)
+        # qty 2 * 1000 kr = 2000 kr ex; 15 % rabatt -> 1700 kr ex; moms 25 % = 425 kr
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Konsult", "quantity_centi": 200, "unit_price_ore": 100000,
+                    "rate_code": "25", "discount_pct_centi": 1500}])
+        assert inv["ex_moms_ore"] == 170000
+        assert inv["moms_ore"] == 42500
+        assert inv["inc_moms_ore"] == 212500
+        line = ops.get_invoice(inv["invoice_id"])["lines"][0]
+        assert line["discount_pct_centi"] == 1500
+        assert line["unit_price_ore"] == 100000        # list price kept for the PDF
+        assert line["ex_moms_ore"] == 170000           # stored discounted
+
+    def test_discount_out_of_range_rejected(self, ops):
+        cat, kid = self._setup(ops)
+        with pytest.raises(ValueError):
+            ops.create_invoice(
+                customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+                lines=[{"description": "x", "quantity_centi": 100, "unit_price_ore": 1000,
+                        "rate_code": "25", "discount_pct_centi": 12000}])
+
+    def test_discount_on_rut_line_reduces_husavdrag(self, ops):
+        cat = ops.create_category("Städ", "income", 3001)
+        kid = ops.create_customer("private", first_name="Anna", last_name="A",
+                                  personnummer="811218-9876")
+        # 10 000 kr ex labour, 20 % rabatt -> 8 000 ex -> 10 000 inc moms; RUT 50 % = 5 000
+        inv = ops.create_invoice(
+            customer_id=kid, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 1000000,
+                    "rate_code": "25", "category_id": cat, "reduction_type": "rut",
+                    "discount_pct_centi": 2000}],
+            recipients=[{"customer_id": kid, "rut_share_pct": 100}])
+        assert inv["ex_moms_ore"] == 800000
+        assert inv["rut_total_ore"] == 500000          # 50 % of the discounted inc-moms labour
+
     def test_invoice_is_pending_then_books_when_paid(self, ops):
         cat, kid = self._setup(ops)
         inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",

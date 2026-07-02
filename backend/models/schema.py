@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -345,7 +345,8 @@ CREATE TABLE invoice_line (
     rut_eligible   INTEGER NOT NULL DEFAULT 0,        -- derived: 1 when reduction_type set
     reduction_type TEXT CHECK (reduction_type IN ('rut','rot')),  -- husavdrag kind (NULL = none)
     article_id     INTEGER REFERENCES article(id),    -- catalog article this line came from
-    ex_moms_ore    INTEGER NOT NULL,                  -- line total ex moms
+    discount_pct_centi INTEGER NOT NULL DEFAULT 0,    -- per-line % rabatt * 100 (15 % -> 1500)
+    ex_moms_ore    INTEGER NOT NULL,                  -- line total ex moms, AFTER discount
     moms_ore       INTEGER NOT NULL
 );
 
@@ -665,6 +666,9 @@ _MIGRATIONS: dict[int, str] = {
         ALTER TABLE rut_claim ADD COLUMN shortfall_invoice_id INTEGER;
         INSERT OR IGNORE INTO config(key, value) VALUES ('account_ores_kronutjamning', '3740');
         INSERT OR IGNORE INTO config(key, value) VALUES ('rut_skv_rounding_tolerance_ore', '49');
+    """,
+    16: """
+        ALTER TABLE invoice_line ADD COLUMN discount_pct_centi INTEGER NOT NULL DEFAULT 0;
     """,
 }
 

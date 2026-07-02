@@ -143,6 +143,11 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     for ln in lines:
         qty = f"{_qty(ln['quantity_centi'])} {ln.get('unit') or ''}".strip()
         desc = ln["description"]
+        disc = ln.get("discount_pct_centi") or 0
+        if disc:
+            # à-pris stays the list price; belopp is discounted — spell out the rabatt.
+            pct = (f"{disc / 100:.2f}".rstrip("0").rstrip(".")).replace(".", ",")
+            desc += f"  (−{pct} % rabatt)"
         if ln.get("reduction_type"):
             desc += f"  ({ln['reduction_type'].upper()})"     # mark RUT/ROT eligible lines
         cells = [(desc, 0.40, "L"), (qty, 0.10, "R"),

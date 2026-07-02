@@ -459,6 +459,21 @@ class TestInvoices:
         assert got["buyer"]["first_name"] == "Anna"
         assert got["payment_methods"][0]["label"] == "Swish"
 
+    def test_create_invoice_line_discount(self, client, book):
+        cat, kid = self._setup(client, book)
+        # 1 000 kr ex, 15 % rabatt -> 850 ex; moms 25 % = 212.50; inc = 1 062.50
+        resp = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "Konsult", "quantity_centi": 100, "unit_price_ore": 100000,
+                       "rate_code": "25", "discount_pct_centi": 1500}]})
+        assert resp.status_code == 201
+        inv = resp.json()
+        assert inv["ex_moms_ore"] == 85000 and inv["inc_moms_ore"] == 106250
+        line = client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()["lines"][0]
+        assert line["discount_pct_centi"] == 1500
+        assert line["unit_price_ore"] == 100000     # list price kept for the PDF
+
     def test_invoice_with_rut_household_split(self, client, book):
         cat, kid = self._setup(client, book)
         # ex 1 000 000 @ 25% -> inc 1 250 000; RUT pot = 50% incl moms = 625 000.

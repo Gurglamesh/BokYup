@@ -405,6 +405,16 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       `skatteverket_received_ore`/`shortfall_invoice_id`. UI `rutSkvPayFlow`: amount field →
       preview → 3740 rounding note or a partial-confirmation dialog with editable reference
       text (creates + downloads the follow-up). Every verifikation balances. Tests pass (276).
+- [x] **Per-line percentage discount (rabatt) on invoice lines (schema v16, 2026-06).**
+      Each invoice article line carries a `discount_pct_centi` (% × 100, e.g. 15 % → 1500);
+      `create_invoice` applies it to the line total ex moms BEFORE moms so moms + the
+      RUT/ROT husavdrag pots follow the discounted amount (validated 0–100 %). The list
+      à-pris (`unit_price_ore`) is kept unchanged; only `ex_moms_ore` is stored discounted.
+      `get_invoice` exposes it and the faktura PDF annotates the line "(−15 % rabatt)"
+      (à-pris stays list price, Belopp is discounted). API `InvoiceLineReq.discount_pct_centi`
+      (the Pydantic model must carry it or it is silently dropped). UI: a "% rabatt" input
+      per row in the line editor (feeds the live RUT/ROT pot preview). Tests pass (280);
+      browser-smoke-tested end-to-end through the faktura form.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
