@@ -364,6 +364,23 @@ class AppFacade:
                      "SELECT id, series, ver_number, ver_date, text, posted, rattelse_of "
                      "FROM verifikation ORDER BY ver_number")
 
+    def h_verifikationer_full(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        return ops.verifikationer_full(q.get("start"), q.get("end"))
+
+    def h_huvudbok(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        return ops.huvudbok(q.get("start"), q.get("end"))
+
+    def h_manual_verifikation(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        # The UI works in debit/credit columns; the ledger stores signed amounts.
+        lines = [{"bas_konto": ln["bas_konto"],
+                  "amount_ore": int(ln.get("debit_ore") or 0) - int(ln.get("credit_ore") or 0),
+                  "account_name": ln.get("account_name"), "text": ln.get("text")}
+                 for ln in b["postings"]]
+        return ops.add_manual_verifikation(b["ver_date"], b["text"], lines, b.get("reg_date"))
+
     def h_list_transaktioner(self, p, b, q):
         ops = self._ops(p["book_id"])
         cols = ("SELECT id, direction, status, trans_date, payment_date, category_id, "
@@ -602,6 +619,9 @@ _route("POST", "/books/{book_id}/verifikationer/{verifikation_id}/reverse", "h_r
 _route("POST", "/books/{book_id}/period-locks", "h_lock_period", 201)
 _route("POST", "/books/{book_id}/year-end-accruals", "h_year_end_accruals", 201)
 _route("GET", "/books/{book_id}/verifikationer", "h_list_verifikationer")
+_route("GET", "/books/{book_id}/verifikationer-full", "h_verifikationer_full")
+_route("GET", "/books/{book_id}/huvudbok", "h_huvudbok")
+_route("POST", "/books/{book_id}/verifikationer/manual", "h_manual_verifikation", 201)
 _route("GET", "/books/{book_id}/transaktioner", "h_list_transaktioner")
 
 _route("POST", "/books/{book_id}/transaktioner/{transaktion_id}/receipts", "h_upload_receipt", 201)

@@ -906,6 +906,104 @@ class BookOps:
                 self._clone_transaktion_for_report(src["id"], vid, ver_date, -1, "rättelse")
         return {"verifikation_id": vid, "ver_number": number}
 
+    def verifikationer_full(self, start: Optional[str] = None,
+                            end: Optional[str] = None) -> list[dict]:
+        """
+        Grundbok (journal): every verifikation with its konteringar (postings). Optional
+        inclusive ver_date range. Postings are ordered debit-first for readability.
+        """
+        where, args = [], []
+        if start:
+            where.append("ver_date >= ?"); args.append(start)
+        if end:
+            where.append("ver_date <= ?"); args.append(end)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        vers = [dict(r) for r in self.conn.execute(
+            "SELECT id, series, ver_number, ver_date, registration_date, text, posted, "
+            "rattelse_of FROM verifikation" + clause + " ORDER BY ver_number", args)]
+        for v in vers:
+            v["postings"] = [dict(r) for r in self.conn.execute(
+                "SELECT p.bas_konto, a.name AS konto_namn, p.amount_ore, p.text "
+                "FROM posting p JOIN account a ON a.bas_konto = p.bas_konto "
+                "WHERE p.verifikation_id=? ORDER BY p.amount_ore DESC, p.id", (v["id"],))]
+        return vers
+
+    def huvudbok(self, start: Optional[str] = None, end: Optional[str] = None) -> list[dict]:
+        """
+        Huvudbok (general ledger): per BAS-konto, every posting in ver-number order with
+        a running saldo, plus per-account debit/credit sums and closing saldo. Optional
+        inclusive ver_date range (a range gives the period's movements, not a true IB).
+        """
+        where, args = [], []
+        if start:
+            where.append("v.ver_date >= ?"); args.append(start)
+        if end:
+            where.append("v.ver_date <= ?"); args.append(end)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        rows = self.conn.execute(
+            "SELECT p.bas_konto, a.name AS konto_namn, v.id AS ver_id, v.series, "
+            "v.ver_number, v.ver_date, v.text AS ver_text, p.amount_ore, p.text "
+            "FROM posting p JOIN verifikation v ON v.id = p.verifikation_id "
+            "JOIN account a ON a.bas_konto = p.bas_konto" + clause +
+            " ORDER BY p.bas_konto, v.ver_number, p.id", args).fetchall()
+        accounts: dict[int, dict] = {}
+        for r in rows:
+            acc = accounts.get(r["bas_konto"])
+            if acc is None:
+                acc = accounts[r["bas_konto"]] = {
+                    "bas_konto": r["bas_konto"], "konto_namn": r["konto_namn"],
+                    "debit_ore": 0, "credit_ore": 0, "saldo_ore": 0, "lines": []}
+            amt = r["amount_ore"]
+            acc["saldo_ore"] += amt
+            if amt >= 0:
+                acc["debit_ore"] += amt
+            else:
+                acc["credit_ore"] += -amt
+            acc["lines"].append({
+                "ver_id": r["ver_id"], "ver": f"{r['series']}{r['ver_number']}",
+                "ver_date": r["ver_date"], "ver_text": r["ver_text"],
+                "amount_ore": amt, "saldo_ore": acc["saldo_ore"], "text": r["text"]})
+        return [accounts[k] for k in sorted(accounts)]
+
+    def add_manual_verifikation(self, ver_date: str, text: str, lines: list[dict],
+                                reg_date: Optional[str] = None) -> dict:
+        """
+        Post a MANUAL verifikation (a hand-entered journal entry, independent of
+        invoices/transaktioner) — for corrections that the automated flows can't make,
+        e.g. fixing a booking after a code bug. Still a normal legal verifikation: it
+        gets the next unbroken number, must balance (debit = credit), respects period
+        locks, and is immutable once posted (rätta it with a rättelse if wrong).
+
+        `lines` = [{bas_konto, amount_ore (signed: debit>0/credit<0), text?, account_name?}].
+        Unknown konton are auto-created (name from account_name or "Konto N").
+        """
+        if not text or not text.strip():
+            raise ValueError("Ange en verifikationstext")
+        postings: list[tuple[int, int, Optional[str]]] = []
+        total = 0
+        for ln in lines or []:
+            amt = int(ln["amount_ore"])
+            if amt == 0:
+                continue
+            konto = int(ln["bas_konto"])
+            name = ln.get("account_name") or self._account_name(konto) or f"Konto {konto}"
+            self.ensure_account(konto, name)
+            postings.append((konto, amt, (ln.get("text") or None)))
+            total += amt
+        if len(postings) < 2:
+            raise ValueError("En verifikation behöver minst två konteringsrader med belopp")
+        if total != 0:
+            raise ValueError(f"Debet och kredit balanserar inte (differens {total} öre)")
+        with self.conn:
+            vid, number = self._post_verifikation(
+                ver_date, reg_date or ver_date, text.strip(), postings)
+        return {"verifikation_id": vid, "ver_number": number}
+
+    def _account_name(self, bas_konto: int) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT name FROM account WHERE bas_konto=?", (bas_konto,)).fetchone()
+        return row["name"] if row else None
+
     # ==================================================================
     # Year-end accrual (bokslut) — kontantmetod must book unpaid invoices
     # ==================================================================

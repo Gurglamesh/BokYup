@@ -421,6 +421,19 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       over the invoice customer + linked household members, kept in sync as rows/relations
       reload (`row._whoWrap` tracks the wrapper for `replaceWith`). Frontend-only;
       browser-smoke-tested (both pickers) and web tests pass.
+- [x] **Huvudbok/grundbok preview + manual journal entry (2026-06).** A new **"Huvudbok"**
+      tab previews the bookkeeping: **grundbok** (`GET /verifikationer-full` →
+      `verifikationer_full`, each verifikation with its konteringar) and **huvudbok**
+      (`GET /huvudbok` → `huvudbok`, per BAS-konto with running saldo + debit/credit sums),
+      both with an optional ver_date range. **Manual verifikationer** can be posted directly
+      from the page (`POST /verifikationer/manual` → `add_manual_verifikation`), independent
+      of invoices/transaktioner — for correcting something by hand (e.g. after a code bug).
+      A manual entry gets the next unbroken number, must balance (debet = kredit, validated
+      → 400), respects period locks (→ 409), auto-creates unknown konton (prompting for a
+      name), and is immutable once posted (rätta with a rättelse). The UI (`manualVerForm`)
+      is a debit/credit row editor with a live balance indicator; the API takes debit/credit
+      columns and stores signed amounts. Tests pass (283); browser-smoke-tested (both views +
+      posting a balanced manual verifikation).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

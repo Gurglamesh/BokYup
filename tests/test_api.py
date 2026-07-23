@@ -194,6 +194,45 @@ class TestBookkeeping:
         assert rev.status_code == 201
         assert rev.json()["ver_number"] == 2
 
+    def test_manual_verifikation_and_ledger(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Material", "kind": "expense", "bas_konto": 5460}).json()["id"]
+        client.post(f"/books/{book}/expenses",
+                    json={"category_id": cat, "lines": [{"rate_code": "25", "amount_ore": 1250}],
+                          "trans_date": "2026-02-01", "paid_date": "2026-02-01"})
+        # a balanced manual correction: move 100 kr 5460 -> 5410 (new konto, gets a name)
+        res = client.post(f"/books/{book}/verifikationer/manual", json={
+            "ver_date": "2026-02-05", "text": "Omföring",
+            "postings": [{"bas_konto": 5460, "credit_ore": 10000},
+                         {"bas_konto": 5410, "debit_ore": 10000,
+                          "account_name": "Förbrukningsinventarier"}]})
+        assert res.status_code == 201
+        assert res.json()["ver_number"] == 2
+        # grundbok shows the manual ver with its postings
+        full = client.get(f"/books/{book}/verifikationer-full").json()
+        manual = [v for v in full if v["ver_number"] == 2][0]
+        assert len(manual["postings"]) == 2
+        # huvudbok groups by konto with saldo
+        hb = {a["bas_konto"]: a for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[5410]["saldo_ore"] == 10000
+        assert hb[5460]["saldo_ore"] == 1000 - 10000    # 12.50 booked minus 100 moved out
+
+    def test_manual_verifikation_must_balance_400(self, client, book):
+        resp = client.post(f"/books/{book}/verifikationer/manual", json={
+            "ver_date": "2026-02-05", "text": "Fel",
+            "postings": [{"bas_konto": 1930, "debit_ore": 10000},
+                         {"bas_konto": 3001, "credit_ore": 5000}]})
+        assert resp.status_code == 400
+
+    def test_manual_verifikation_period_lock_409(self, client, book):
+        client.post(f"/books/{book}/period-locks",
+                    json={"period_start": "2026-01-01", "period_end": "2026-03-31"})
+        resp = client.post(f"/books/{book}/verifikationer/manual", json={
+            "ver_date": "2026-02-05", "text": "Sent",
+            "postings": [{"bas_konto": 1930, "debit_ore": 10000},
+                         {"bas_konto": 1510, "credit_ore": 10000}]})
+        assert resp.status_code == 409
+
     def test_year_end_accrual(self, client, book):
         cat = client.post(f"/books/{book}/categories",
                           json={"name": "Försäljning", "kind": "income", "bas_konto": 3001}).json()["id"]

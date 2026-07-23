@@ -315,6 +315,19 @@ def _build_router():
     def list_verifikationer(book_id: str, request: Request):
         return fac(request).h_list_verifikationer({"book_id": book_id}, {}, {})
 
+    @r.get("/books/{book_id}/verifikationer-full")
+    def verifikationer_full(book_id: str, request: Request, start: str = None, end: str = None):
+        return fac(request).h_verifikationer_full(
+            {"book_id": book_id}, {}, {"start": start, "end": end})
+
+    @r.get("/books/{book_id}/huvudbok")
+    def huvudbok(book_id: str, request: Request, start: str = None, end: str = None):
+        return fac(request).h_huvudbok({"book_id": book_id}, {}, {"start": start, "end": end})
+
+    @r.post("/books/{book_id}/verifikationer/manual", status_code=201)
+    def manual_verifikation(book_id: str, body: sc.ManualVerifikationReq, request: Request):
+        return fac(request).h_manual_verifikation({"book_id": book_id}, body.model_dump(), {})
+
     @r.get("/books/{book_id}/transaktioner")
     def list_transaktioner(book_id: str, request: Request, include_synthetic: bool = False):
         return fac(request).h_list_transaktioner(

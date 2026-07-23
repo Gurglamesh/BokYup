@@ -280,6 +280,7 @@ const SECTIONS = [
   ["categories", "BAS-konton"],
   ["rut", "RUT"],
   ["verifikat", "Verifikat"],
+  ["huvudbok", "Huvudbok"],
   ["reports", "Rapporter"],
   ["bokslut", "Bokslut"],
   ["settings", "Inställningar"],
@@ -650,6 +651,81 @@ const SECTION_RENDERERS = {
         el("th", {}, ""), el("th", {}, ""))),
       el("tbody", {}, rows),
     ));
+  },
+
+  // ----- huvudbok / grundbok preview + manual journal entry -----
+  async huvudbok(panel) {
+    const accounts = await api("GET", `/books/${bid()}/accounts`);
+    panel.appendChild(el("h2", {}, "Bokföring (huvudbok / grundbok)"));
+    panel.appendChild(el("p", { class: "muted" },
+      "Förhandsgranska bokföringen. Grundbok = verifikationer med konteringar i "
+      + "nummerordning; Huvudbok = per konto med saldo. Manuella verifikationer bokförs "
+      + "direkt här (fristående från fakturor) — t.ex. för att rätta något manuellt."));
+
+    const start = el("input", { type: "date", value: "" });
+    const end = el("input", { type: "date", value: "" });
+    const viewSel = el("select", {},
+      el("option", { value: "grundbok" }, "Grundbok (verifikationer)"),
+      el("option", { value: "huvudbok" }, "Huvudbok (per konto)"));
+    const out = el("div", {});
+    panel.appendChild(el("div", { class: "row" },
+      wrap("Vy", viewSel), wrap("Från (valfritt)", start), wrap("Till (valfritt)", end),
+      el("div", { style: "align-self:flex-end" },
+        el("button", { class: "btn", onclick: () => guard(draw) }, "Visa")),
+      el("div", { style: "align-self:flex-end" },
+        el("button", { class: "btn brand", onclick: () => guard(() => manualVerForm(panel, accounts)) },
+          "+ Ny manuell verifikation"))));
+    panel.appendChild(out);
+
+    const qs = () => {
+      const p = [];
+      if (start.value) p.push("start=" + start.value);
+      if (end.value) p.push("end=" + end.value);
+      return p.length ? "?" + p.join("&") : "";
+    };
+    async function draw() {
+      out.innerHTML = "";
+      if (viewSel.value === "huvudbok") {
+        const data = await api("GET", `/books/${bid()}/huvudbok${qs()}`);
+        if (!data.length) { out.appendChild(el("p", { class: "muted" }, "Inga konteringar.")); return; }
+        for (const a of data) {
+          out.appendChild(el("h3", { style: "margin-top:18px" },
+            `${a.bas_konto} ${a.konto_namn} `,
+            el("span", { class: "muted", style: "font-weight:400" },
+              `— saldo ${toKr(a.saldo_ore)} kr (debet ${toKr(a.debit_ore)} / kredit ${toKr(a.credit_ore)})`)));
+          out.appendChild(el("table", {},
+            el("thead", {}, el("tr", {},
+              el("th", {}, "Ver"), el("th", {}, "Datum"), el("th", {}, "Text"),
+              el("th", { class: "num" }, "Debet"), el("th", { class: "num" }, "Kredit"),
+              el("th", { class: "num" }, "Saldo"))),
+            el("tbody", {}, a.lines.map((l) => el("tr", {},
+              el("td", { class: "num" }, l.ver), el("td", {}, l.ver_date),
+              el("td", {}, l.text || l.ver_text || ""),
+              el("td", { class: "num" }, l.amount_ore > 0 ? toKr(l.amount_ore) : ""),
+              el("td", { class: "num" }, l.amount_ore < 0 ? toKr(-l.amount_ore) : ""),
+              el("td", { class: "num" }, toKr(l.saldo_ore)))))));
+        }
+      } else {
+        const vers = await api("GET", `/books/${bid()}/verifikationer-full${qs()}`);
+        if (!vers.length) { out.appendChild(el("p", { class: "muted" }, "Inga verifikationer.")); return; }
+        for (const v of vers) {
+          out.appendChild(el("h3", { style: "margin-top:18px" },
+            `${v.series}${v.ver_number} `,
+            el("span", { class: "muted", style: "font-weight:400" }, `${v.ver_date} — ${v.text || ""}`),
+            v.rattelse_of ? el("span", { class: "pill", style: "margin-left:6px" }, "rättelse") : null));
+          out.appendChild(el("table", {},
+            el("thead", {}, el("tr", {},
+              el("th", {}, "Konto"), el("th", {}, "Text"),
+              el("th", { class: "num" }, "Debet"), el("th", { class: "num" }, "Kredit"))),
+            el("tbody", {}, v.postings.map((p) => el("tr", {},
+              el("td", {}, `${p.bas_konto} ${p.konto_namn}`),
+              el("td", {}, p.text || ""),
+              el("td", { class: "num" }, p.amount_ore > 0 ? toKr(p.amount_ore) : ""),
+              el("td", { class: "num" }, p.amount_ore < 0 ? toKr(-p.amount_ore) : ""))))));
+        }
+      }
+    }
+    await draw();
   },
 
   // ----- bokslut (period locking + year-end accruals) -----
@@ -1242,6 +1318,95 @@ async function rutSkvPayFlow(claimId, claimedOre, defaultNote) {
   toast(interp === "rounding" && received_ore != null
     ? "Husavdrag bokfört (öresavrundning mot 3740)." : "Husavdrag bokfört.");
   renderWorkspace();
+}
+
+// Manual journal entry (manuell verifikation): a balanced, hand-entered verifikation
+// independent of invoices — for fixing something manually. Takes over the section panel.
+async function manualVerForm(panel, accounts) {
+  const known = new Map((accounts || []).map((a) => [String(a.bas_konto), a.name]));
+  panel.innerHTML = "";
+  panel.appendChild(el("h2", {}, "Ny manuell verifikation"));
+  panel.appendChild(el("p", { class: "muted" },
+    "En manuell verifikation får nästa lediga verifikationsnummer, måste balansera "
+    + "(debet = kredit) och kan inte ändras efteråt (rätta med en rättelse). Belopp i kronor."));
+
+  const dList = el("datalist", { id: "manual-konto-list" },
+    ...(accounts || []).map((a) => el("option", { value: String(a.bas_konto) }, `${a.bas_konto} ${a.name}`)));
+  panel.appendChild(dList);
+
+  const today = new Date().toISOString().slice(0, 10);
+  const verDate = el("input", { type: "date", value: today });
+  const text = el("input", { type: "text", placeholder: "T.ex. Omföring materialkostnad", style: "min-width:280px" });
+  panel.appendChild(el("div", { class: "row" },
+    wrap("Verifikationsdatum", verDate), wrap("Verifikationstext", text)));
+
+  const rowsBox = el("div", {});
+  const balance = el("div", { class: "muted", style: "margin:8px 0;font-weight:600" });
+  function recompute() {
+    let dsum = 0, ksum = 0;
+    for (const r of rowsBox.children) {
+      dsum += r._debit(); ksum += r._credit();
+    }
+    const diff = dsum - ksum;
+    balance.textContent = `Debet ${toKr(dsum)} kr · Kredit ${toKr(ksum)} kr · `
+      + (diff === 0 ? "balanserar ✓" : `differens ${toKr(diff)} kr`);
+    balance.style.color = diff === 0 ? "" : "var(--danger)";
+  }
+  function addRow(v) {
+    v = v || {};
+    const konto = el("input", { type: "text", list: "manual-konto-list", placeholder: "konto",
+      style: "width:90px", value: v.konto || "", oninput: recompute });
+    const debit = el("input", { type: "text", placeholder: "0,00", style: "width:96px", oninput: recompute });
+    const credit = el("input", { type: "text", placeholder: "0,00", style: "width:96px", oninput: recompute });
+    const ptext = el("input", { type: "text", placeholder: "radtext (valfri)", style: "width:180px" });
+    const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end" },
+      wrap("Konto", konto), wrap("Debet", debit), wrap("Kredit", credit), wrap("Text", ptext),
+      el("button", { class: "btn small ghost", onclick: (e) => { e.target.closest(".row").remove(); recompute(); } }, "✕"));
+    row._konto = konto; row._ptext = ptext;
+    row._debit = () => (debit.value.trim() ? toOre(debit.value) : 0);
+    row._credit = () => (credit.value.trim() ? toOre(credit.value) : 0);
+    rowsBox.appendChild(row);
+  }
+  addRow(); addRow();
+  panel.appendChild(rowsBox);
+  panel.appendChild(el("div", {},
+    el("button", { class: "btn small ghost", onclick: () => { addRow(); recompute(); } }, "+ Rad")));
+  panel.appendChild(balance);
+  recompute();
+
+  panel.appendChild(el("div", { style: "margin-top:14px" },
+    el("button", { class: "btn brand", onclick: () => guard(submit) }, "Bokför verifikation"),
+    el("button", { class: "btn ghost", style: "margin-left:8px",
+      onclick: () => { state.section = "huvudbok"; renderWorkspace(); } }, "Avbryt")));
+
+  async function submit() {
+    if (!text.value.trim()) { toast("Ange en verifikationstext", true); return; }
+    const postings = [];
+    for (const r of rowsBox.children) {
+      const k = r._konto.value.trim();
+      const d = r._debit(), c = r._credit();
+      if (!k && !d && !c) continue;                 // skip blank rows
+      if (!k) { toast("Fyll i konto på alla rader med belopp", true); return; }
+      if (d && c) { toast(`Konto ${k}: ange antingen debet eller kredit, inte båda`, true); return; }
+      if (!d && !c) { toast(`Konto ${k}: ange ett belopp`, true); return; }
+      const p = { bas_konto: parseInt(k, 10), debit_ore: d, credit_ore: c, text: r._ptext.value.trim() || null };
+      if (!known.has(k)) {                          // new konto -> name it
+        const nf = await modal(`Nytt konto ${k} — ange kontonamn`,
+          [{ name: "name", label: "Kontonamn", value: "" }], "OK");
+        if (nf && nf.name.trim()) p.account_name = nf.name.trim();
+      }
+      postings.push(p);
+    }
+    if (postings.length < 2) { toast("En verifikation behöver minst två rader", true); return; }
+    const dsum = postings.reduce((s, p) => s + p.debit_ore, 0);
+    const ksum = postings.reduce((s, p) => s + p.credit_ore, 0);
+    if (dsum !== ksum) { toast(`Balanserar inte (differens ${toKr(dsum - ksum)} kr)`, true); return; }
+    const res = await api("POST", `/books/${bid()}/verifikationer/manual`,
+      { ver_date: verDate.value, text: text.value.trim(), postings });
+    toast(`Verifikation ${res.ver_number} bokförd`);
+    state.section = "huvudbok";
+    renderWorkspace();
+  }
 }
 
 async function reverseFlow(verId, verLabel) {

@@ -173,6 +173,21 @@ class ReverseReq(BaseModel):
     reg_date: Optional[str] = None
 
 
+class ManualPostingReq(BaseModel):
+    bas_konto: int
+    debit_ore: int = 0
+    credit_ore: int = 0
+    account_name: Optional[str] = None   # name if this konto is not yet in the chart
+    text: Optional[str] = None
+
+
+class ManualVerifikationReq(BaseModel):
+    ver_date: str
+    text: str
+    reg_date: Optional[str] = None
+    postings: list[ManualPostingReq]
+
+
 class PeriodLockReq(BaseModel):
     period_start: str
     period_end: str
