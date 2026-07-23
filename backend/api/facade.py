@@ -507,6 +507,10 @@ class AppFacade:
         self._ops(p["book_id"]).update_payment_method(int(p["payment_method_id"]), **_clean(b))
         return {"id": int(p["payment_method_id"])}
 
+    def h_delete_payment_method(self, p, b, q):
+        self._ops(p["book_id"]).delete_payment_method(int(p["payment_method_id"]))
+        return {"deleted": True}
+
     # ---- invoices (faktura) ----
     def h_create_invoice(self, p, b, q):
         return self._ops(p["book_id"]).create_invoice(
@@ -666,6 +670,7 @@ _route("DELETE", "/books/{book_id}/logo", "h_delete_logo")
 _route("GET", "/books/{book_id}/payment-methods", "h_list_payment_methods")
 _route("POST", "/books/{book_id}/payment-methods", "h_create_payment_method", 201)
 _route("PATCH", "/books/{book_id}/payment-methods/{payment_method_id}", "h_update_payment_method")
+_route("DELETE", "/books/{book_id}/payment-methods/{payment_method_id}", "h_delete_payment_method")
 _route("GET", "/books/{book_id}/invoice-drafts", "h_list_drafts")
 _route("POST", "/books/{book_id}/invoice-drafts", "h_create_draft", 201)
 _route("GET", "/books/{book_id}/invoice-drafts/{draft_id}", "h_get_draft")

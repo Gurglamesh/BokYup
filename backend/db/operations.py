@@ -1211,6 +1211,12 @@ class BookOps:
             self.conn.execute(f"UPDATE payment_method SET {sets} WHERE id=?",
                               (*data.values(), payment_method_id))
 
+    def delete_payment_method(self, payment_method_id: int) -> None:
+        """Remove a payment method. Safe: issued invoices carry their own frozen
+        payment-method snapshot, so deleting one never changes an existing faktura."""
+        with self.conn:
+            self.conn.execute("DELETE FROM payment_method WHERE id=?", (payment_method_id,))
+
     # ==================================================================
     # Invoices (faktura) — issued as a pending income; numbered sequentially
     # ==================================================================

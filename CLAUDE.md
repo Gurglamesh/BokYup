@@ -463,6 +463,12 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       (modal() now supports `type:"file"` returning the File); the RUT tab shows the Begäran
       column + a "📎 Kvittens" view/upload (`rutKvittensFlow`). Tests pass (285);
       browser-smoke-tested (reference + PDF kvittens through the real modal).
+- [x] **Edit/delete payment methods in Inställningar (2026-06).** The Betalsätt list was
+      read-only; each row now has **Ändra** (edit name + number/länk), **Aktivera/Inaktivera**,
+      and **Ta bort**. Backend already had `update_payment_method`; added
+      `delete_payment_method` + `DELETE /payment-methods/{id}` (safe — issued invoices carry
+      their own frozen payment-method snapshot, so editing/removing never changes an existing
+      faktura). Tests pass (286); browser-smoke-tested editing a betalsätt's name + number.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

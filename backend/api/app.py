@@ -431,6 +431,11 @@ def _build_router():
         return fac(request).h_update_payment_method(
             {"book_id": book_id, "payment_method_id": payment_method_id}, body.model_dump(), {})
 
+    @r.delete("/books/{book_id}/payment-methods/{payment_method_id}")
+    def delete_payment_method(book_id: str, payment_method_id: int, request: Request):
+        return fac(request).h_delete_payment_method(
+            {"book_id": book_id, "payment_method_id": payment_method_id}, {}, {})
+
     # ---- invoices (faktura) ----
     @r.post("/books/{book_id}/invoices", status_code=201)
     def create_invoice(book_id: str, body: sc.CreateInvoiceReq, request: Request):

@@ -951,9 +951,17 @@ const SECTION_RENDERERS = {
 
     // --- Payment methods ---
     panel.appendChild(el("h3", {}, "Betalsätt"));
-    panel.appendChild(el("p", { class: "muted" }, "T.ex. Swish, Bankgiro, IBAN — namn + nummer/länk."));
-    panel.appendChild(simpleTable(["Betalsätt", "Nummer/länk", "Aktiv"],
-      methods.map((m) => [m.label, m.value, m.active ? "Ja" : "Nej"])));
+    panel.appendChild(el("p", { class: "muted" }, "T.ex. Swish, Bankgiro, IBAN — namn + nummer/länk. "
+      + "Redigering påverkar inte redan skapade fakturor (de har egna kopior)."));
+    const pmActions = (m) => el("span", { style: "display:inline-flex;gap:4px" },
+      editBtn(() => guard(() => editPaymentMethod(m))),
+      el("button", { class: "btn small ghost", onclick: () => guard(() => togglePaymentMethod(m)) },
+        m.active ? "Inaktivera" : "Aktivera"),
+      el("button", { class: "btn small ghost danger", onclick: () => guard(() => deletePaymentMethod(m)) }, "Ta bort"));
+    panel.appendChild(simpleTable(["Betalsätt", "Nummer/länk", "Aktiv", ""],
+      methods.map((m) => [m.label, m.value,
+        el("span", { class: "pill " + (m.active ? "paid" : "") }, m.active ? "Ja" : "Nej"),
+        pmActions(m)])));
     panel.appendChild(el("div", { style: "margin:6px 0 22px" },
       el("button", { class: "btn small", onclick: () => guard(addPaymentMethod) }, "+ Nytt betalsätt")));
 
@@ -973,6 +981,28 @@ const SECTION_RENDERERS = {
       if (!f || !f.label || !f.value) return;
       await api("POST", `/books/${bid()}/payment-methods`, { label: f.label, value: f.value });
       toast("Betalsätt sparat");
+      renderWorkspace();
+    }
+    async function editPaymentMethod(m) {
+      const f = await modal("Ändra betalsätt", [
+        { name: "label", label: "Namn (t.ex. Swish, Bankgiro)", value: m.label },
+        { name: "value", label: "Nummer/länk", value: m.value },
+      ], "Spara");
+      if (!f || !f.label || !f.value) return;
+      await api("PATCH", `/books/${bid()}/payment-methods/${m.id}`, { label: f.label, value: f.value });
+      toast("Betalsätt uppdaterat");
+      renderWorkspace();
+    }
+    async function togglePaymentMethod(m) {
+      await api("PATCH", `/books/${bid()}/payment-methods/${m.id}`, { active: m.active ? 0 : 1 });
+      toast(m.active ? "Betalsätt inaktiverat" : "Betalsätt aktiverat");
+      renderWorkspace();
+    }
+    async function deletePaymentMethod(m) {
+      const f = await modal(`Ta bort betalsättet "${m.label}"?`, [], "Ta bort");
+      if (!f) return;
+      await api("DELETE", `/books/${bid()}/payment-methods/${m.id}`);
+      toast("Betalsätt borttaget");
       renderWorkspace();
     }
 

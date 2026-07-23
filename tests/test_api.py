@@ -515,6 +515,21 @@ class TestInvoices:
         assert client.get(f"/books/{book}/company").json()["name"] == "Min Firma AB"
         assert client.get(f"/books/{book}/payment-methods").json()[0]["label"] == "Swish"
 
+    def test_edit_and_delete_payment_method(self, client, book):
+        pid = client.post(f"/books/{book}/payment-methods",
+                          json={"label": "Swish", "value": "111"}).json()["id"]
+        # edit name + number
+        client.patch(f"/books/{book}/payment-methods/{pid}",
+                     json={"label": "Bankgiro", "value": "123-4567"})
+        m = client.get(f"/books/{book}/payment-methods").json()[0]
+        assert m["label"] == "Bankgiro" and m["value"] == "123-4567"
+        # inactivate
+        client.patch(f"/books/{book}/payment-methods/{pid}", json={"active": 0})
+        assert client.get(f"/books/{book}/payment-methods").json()[0]["active"] == 0
+        # delete
+        assert client.delete(f"/books/{book}/payment-methods/{pid}").status_code == 200
+        assert client.get(f"/books/{book}/payment-methods").json() == []
+
     def test_create_list_get_invoice(self, client, book):
         cat, kid = self._setup(client, book)
         resp = client.post(f"/books/{book}/invoices", json={
