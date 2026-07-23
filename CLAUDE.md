@@ -415,6 +415,12 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       (the Pydantic model must carry it or it is silently dropped). UI: a "% rabatt" input
       per row in the line editor (feeds the live RUT/ROT pot preview). Tests pass (280);
       browser-smoke-tested end-to-end through the faktura form.
+- [x] **Searchable RUT/ROT recipient picker (frontend, 2026-06).** The faktura form's
+      top **Kund** picker was already a `searchableSelect`; the **RUT/ROT recipient**
+      person picker (`recipientsEditor.peopleOptions`) now is too — a "Sök person…" filter
+      over the invoice customer + linked household members, kept in sync as rows/relations
+      reload (`row._whoWrap` tracks the wrapper for `replaceWith`). Frontend-only;
+      browser-smoke-tested (both pickers) and web tests pass.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

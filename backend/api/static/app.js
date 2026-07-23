@@ -1801,12 +1801,14 @@ function recipientsEditor(opts) {
   const capCache = new Map();      // `${cid}:${year}` -> cap status
   const custCache = new Map();     // kundnummer -> customer (for personnummer prefill)
 
+  // A filterable person picker (searchableSelect): the "— välj person —" placeholder
+  // plus the invoice customer + their linked household members. Returns {element,
+  // select} so callers keep the native select API (.value / .onchange / rebuild).
   function peopleOptions(selected) {
-    const opts = [el("option", { value: "" }, "— välj person —"),
-      ...people.map((p) => el("option", { value: p.kundnummer }, p.name))];
-    const sel = el("select", {}, ...opts);
-    if (selected != null) sel.value = String(selected);
-    return sel;
+    return searchableSelect(
+      [{ value: "", label: "— välj person —" },
+        ...people.map((p) => ({ value: p.kundnummer, label: p.name }))],
+      selected, "Sök person…");
   }
 
   // When a customer is picked, prefill the personnummer from their kundkort if it is
@@ -1828,7 +1830,8 @@ function recipientsEditor(opts) {
 
   function addRow(v) {
     v = v || {};
-    const who = peopleOptions(v.customer_id);
+    const whoSel = peopleOptions(v.customer_id);
+    const who = whoSel.select;
     const pnr = el("input", { type: "text", placeholder: "ÅÅMMDD-XXXX", style: "width:120px",
       value: v.personnummer || "" });
     const rutShare = el("input", { type: "text", value: v.rut_share_pct != null ? String(v.rut_share_pct) : "100",
@@ -1838,10 +1841,11 @@ function recipientsEditor(opts) {
     const out = el("span", { class: "muted", style: "align-self:center" }, "—");
     const cap = el("span", { class: "muted", style: "align-self:center;font-size:12px" }, "");
     const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end" },
-      wrap("Person", who), wrap("Personnummer", pnr),
+      wrap("Person", whoSel.element), wrap("Personnummer", pnr),
       wrap("RUT %", rutShare), wrap("ROT %", rotShare), wrap("Belopp", out), wrap("Tak", cap),
       el("button", { class: "btn small ghost", onclick: (e) => { e.target.closest(".row").remove(); recompute(); } }, "✕"));
-    row._who = who; row._pnr = pnr; row._rut = rutShare; row._rot = rotShare; row._out = out; row._cap = cap;
+    row._who = who; row._whoWrap = whoSel.element;
+    row._pnr = pnr; row._rut = rutShare; row._rot = rotShare; row._out = out; row._cap = cap;
     who.onchange = onWhoChange(row);
     rowsBox.appendChild(row);
     if (v.customer_id) prefillPnr(row);
@@ -1923,9 +1927,10 @@ function recipientsEditor(opts) {
     for (const row of rowsBox.children) {
       const prev = row._who.value;
       const fresh = peopleOptions(prev);
-      fresh.onchange = onWhoChange(row);
-      row._who.replaceWith(fresh);
-      row._who = fresh;
+      fresh.select.onchange = onWhoChange(row);
+      row._whoWrap.replaceWith(fresh.element);
+      row._who = fresh.select;
+      row._whoWrap = fresh.element;
     }
     refreshCaps();
   }
