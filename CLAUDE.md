@@ -174,7 +174,8 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
 
 1. **Momsdeklaration helper** (most frequent — quarterly/monthly). Falls almost
    directly out of the BAS-konto + moms-rate data.
-2. **Simplified deklaration** building block (NE-blankett direction).
+2. **Simplified deklaration** building block (NE-blankett direction). DONE as the
+   **Förenklat årsbokslut (SKV 2150)** tab — see build log.
 3. **SIE export** (Swedish standard; every accounting program + revisor accepts it).
    Design data to be SIE-compatible from the start even before the exporter exists.
 
@@ -434,6 +435,21 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       is a debit/credit row editor with a live balance indicator; the API takes debit/credit
       columns and stores signed amounts. Tests pass (283); browser-smoke-tested (both views +
       posting a balanced manual verifikation).
+- [x] **Förenklat årsbokslut (SKV 2150) tab (2026-06).** A new **"Årsbokslut"** tab renders
+      the enskild-näringsidkare simplified year-end form: the ledger's BAS-konto balances
+      are mapped into the blankett's boxes — balansräkning **B1–B16**, resultaträkning
+      **R1–R11**, and **U1–U4** upplysningar. `backend/reports/arsbokslut.py`
+      (`forenklat_arsbokslut`) reads the raw `posting` table (so it captures invoices,
+      manual verifikationer, moms and rättelser alike): balansräkning uses the CUMULATIVE
+      saldo up to the fiscal-year end, resultaträkning the year's movement. Sign-aware
+      (assets/costs debit-positive; equity/liabilities/income credit-positive); moms
+      accounts (2600–2669) are netted and placed by sign (skuld→B14 / fordran→B8); **B10
+      eget kapital includes årets resultat (R11)** so the two summa boxes reconcile exactly
+      (`balanserar`, guaranteed because every verifikation balances). Each box lists its
+      contributing konton (hover tooltip) for transparency — it's a **help/preview**, not
+      filed. API `GET /reports/arsbokslut?start=&end=`. The BAS→box ranges follow the
+      standard kopplingstabell (4xxx→R5, 5xxx–6xxx→R6, 7xxx→R7, 78xx→R9/R10, 8xxx→R4/R8;
+      1xxx assets, 2xxx equity/skuld). Tests pass (284); browser-smoke-tested.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

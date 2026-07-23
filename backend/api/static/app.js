@@ -282,6 +282,7 @@ const SECTIONS = [
   ["verifikat", "Verifikat"],
   ["huvudbok", "Huvudbok"],
   ["reports", "Rapporter"],
+  ["arsbokslut", "Årsbokslut"],
   ["bokslut", "Bokslut"],
   ["settings", "Inställningar"],
 ];
@@ -724,6 +725,95 @@ const SECTION_RENDERERS = {
               el("td", { class: "num" }, p.amount_ore < 0 ? toKr(-p.amount_ore) : ""))))));
         }
       }
+    }
+    await draw();
+  },
+
+  // ----- Förenklat årsbokslut (SKV 2150) -----
+  async arsbokslut(panel) {
+    const company = await api("GET", `/books/${bid()}/company`).catch(() => ({}));
+    const year = new Date().getFullYear();
+    const fyStart = el("input", { type: "date", value: `${year}-01-01` });
+    const fyEnd = el("input", { type: "date", value: `${year}-12-31` });
+    const out = el("div", {});
+    panel.appendChild(el("h2", {}, "Förenklat årsbokslut (SKV 2150)"));
+    panel.appendChild(el("p", { class: "muted" },
+      "Enskilda näringsidkare. Värdena hämtas ur din bokföring och placeras i "
+      + "blankettens rutor (B1–B16, R1–R11). Detta är ett hjälpmedel — kontrollera mot "
+      + "din kontoplan. Årsbokslutet lämnas inte in, men sparas i 7 år. Håll muspekaren "
+      + "över en ruta för att se vilka konton som ingår."));
+    panel.appendChild(el("div", { class: "row" },
+      wrap("Räkenskapsår fr.o.m.", fyStart), wrap("t.o.m.", fyEnd),
+      el("div", { style: "align-self:flex-end" },
+        el("button", { class: "btn brand", onclick: () => guard(draw) }, "Visa årsbokslut"))));
+    panel.appendChild(out);
+
+    // A single box row: number, label, amount (right-aligned); title lists the konton.
+    const boxRow = (b, opts = {}) => {
+      const accs = (b.accounts || []).filter((a) => a.amount_ore)
+        .map((a) => `${a.bas_konto != null ? a.bas_konto + " " : ""}${a.name}: ${toKr(a.amount_ore)}`).join("\n");
+      return el("tr", { title: accs || "Inga konton" },
+        el("td", { class: "num", style: "width:44px;color:var(--muted,#888)" }, b.box),
+        el("td", {}, b.label),
+        el("td", { class: "num", style: "width:120px;font-variant-numeric:tabular-nums" + (opts.bold ? ";font-weight:700" : "") },
+          b.value_ore || opts.showZero ? toKr(b.value_ore) : ""));
+    };
+    const sumRow = (label, ore) => el("tr", { style: "border-top:2px solid var(--border,#ccc)" },
+      el("td", {}, ""), el("td", { style: "font-weight:700" }, label),
+      el("td", { class: "num", style: "font-weight:700;font-variant-numeric:tabular-nums" }, toKr(ore) + " ="));
+    const groupHead = (t) => el("tr", {}, el("td", { colspan: "3", style: "padding-top:10px;font-weight:600;color:var(--muted,#666)" }, t));
+    const mkTable = (...rows) => el("table", { style: "width:100%" }, el("tbody", {}, rows.flat()));
+
+    async function draw() {
+      out.innerHTML = "";
+      const r = await api("GET", `/books/${bid()}/reports/arsbokslut`
+        + `?start=${fyStart.value}&end=${fyEnd.value}`);
+      const B = r.balans, R = r.resultat, U = r.upplysningar;
+
+      // Header block (name / org / räkenskapsår)
+      out.appendChild(el("div", { class: "box", style: "margin-top:14px" },
+        el("div", { class: "row" },
+          el("div", {}, el("div", { class: "k" }, "Namn"), el("div", { class: "v" }, company.name || "—")),
+          el("div", {}, el("div", { class: "k" }, "Person-/organisationsnummer"), el("div", { class: "v" }, company.org_nr || "—")),
+          el("div", {}, el("div", { class: "k" }, "Räkenskapsår"), el("div", { class: "v" }, `${r.fiscal_year_start} – ${r.fiscal_year_end}`)))));
+
+      const balanserar = el("div", { class: "box", style: "margin-top:12px;font-weight:600;color:" + (r.balanserar ? "var(--ok,#2a7)" : "var(--danger,#c33)") },
+        r.balanserar ? "✓ Balansräkningen balanserar (summa tillgångar = summa eget kapital och skulder)."
+          : `⚠ Balansräkningen balanserar inte — differens ${toKr(r.diff_ore)} kr.`);
+
+      // Two columns: Balansräkning | Resultaträkning
+      const balans = el("div", { style: "flex:1;min-width:320px" },
+        el("h3", {}, "Balansräkning"),
+        mkTable(
+          groupHead("Anläggningstillgångar"),
+          ["B1", "B2", "B3", "B4", "B5"].map((k) => boxRow(B[k])),
+          groupHead("Omsättningstillgångar"),
+          ["B6", "B7", "B8", "B9"].map((k) => boxRow(B[k])),
+          sumRow("Summa tillgångar", r.summa_tillgangar_ore),
+          groupHead("Eget kapital"), boxRow(B.B10),
+          groupHead("Obeskattade reserver"), boxRow(B.B11),
+          groupHead("Skulder"),
+          ["B13", "B14", "B15", "B16"].map((k) => boxRow(B[k])),
+          sumRow("Summa eget kapital och skulder", r.summa_ek_skulder_ore)));
+
+      const resultat = el("div", { style: "flex:1;min-width:320px" },
+        el("h3", {}, "Resultaträkning"),
+        mkTable(
+          groupHead("Intäkter"),
+          ["R1", "R2", "R3", "R4"].map((k) => boxRow(R[k])),
+          groupHead("Kostnader"),
+          ["R5", "R6", "R7", "R8"].map((k) => boxRow(R[k])),
+          groupHead("Avskrivningar"),
+          ["R9", "R10"].map((k) => boxRow(R[k])),
+          groupHead("Årets resultat"), boxRow(R.R11, { bold: true, showZero: true })),
+        el("h3", { style: "margin-top:18px" }, "Upplysningar"),
+        mkTable(["U1", "U2", "U3", "U4"].map((k) =>
+          el("tr", { }, el("td", { class: "num", style: "width:44px;color:var(--muted,#888)" }, k),
+            el("td", {}, U[k].label),
+            el("td", { class: "num", style: "width:120px" }, U[k].value_ore ? toKr(U[k].value_ore) : "")))));
+
+      out.appendChild(balanserar);
+      out.appendChild(el("div", { class: "row", style: "gap:28px;align-items:flex-start;margin-top:10px" }, balans, resultat));
     }
     await draw();
   },

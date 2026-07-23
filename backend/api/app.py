@@ -362,6 +362,10 @@ def _build_router():
     def report_result(book_id: str, start: str, end: str, request: Request):
         return fac(request).h_report_result({"book_id": book_id}, {}, {"start": start, "end": end})
 
+    @r.get("/books/{book_id}/reports/arsbokslut")
+    def report_arsbokslut(book_id: str, start: str, end: str, request: Request):
+        return fac(request).h_report_arsbokslut({"book_id": book_id}, {}, {"start": start, "end": end})
+
     @r.get("/books/{book_id}/reports/sie", response_class=PlainTextResponse)
     def report_sie(book_id: str, request: Request, company_name: str = "", org_nr: str = "",
                    fiscal_year_start: str = "", fiscal_year_end: str = ""):

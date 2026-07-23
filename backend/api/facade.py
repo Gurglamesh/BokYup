@@ -29,6 +29,7 @@ from typing import Any, Callable, Optional
 from backend.db.manager import DatabaseManager
 from backend.db.operations import BookOps
 from backend.models import schema as S
+from backend.reports import arsbokslut as arsbokslut_report
 from backend.reports import result as result_report
 from backend.reports import sie as sie_report
 from backend.reports import vat as vat_report
@@ -429,6 +430,10 @@ class AppFacade:
         ops = self._ops(p["book_id"])
         return result_report.result_report(ops.conn, q["start"], q["end"])
 
+    def h_report_arsbokslut(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        return arsbokslut_report.forenklat_arsbokslut(ops.conn, q["start"], q["end"])
+
     def h_report_sie(self, p, b, q):
         ops = self._ops(p["book_id"])
         text = sie_report.export_sie(
@@ -631,6 +636,7 @@ _route("DELETE", "/books/{book_id}/receipts/{receipt_id}", "h_delete_receipt")
 
 _route("GET", "/books/{book_id}/reports/momsdeklaration", "h_report_moms")
 _route("GET", "/books/{book_id}/reports/result", "h_report_result")
+_route("GET", "/books/{book_id}/reports/arsbokslut", "h_report_arsbokslut")
 _route("GET", "/books/{book_id}/reports/sie", "h_report_sie")
 
 _route("GET", "/books/{book_id}/accounting-method", "h_get_accounting_method")

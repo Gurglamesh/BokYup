@@ -421,6 +421,40 @@ class TestReports:
                          params={"start": "2026-01-01", "end": "2026-03-31"}).json()
         assert rep["boxes"]["10"] == 250
 
+    def test_forenklat_arsbokslut(self, client, book):
+        inc = client.post(f"/books/{book}/categories",
+                          json={"name": "Tjänster", "kind": "income", "bas_konto": 3011}).json()["id"]
+        exp = client.post(f"/books/{book}/categories",
+                          json={"name": "Material", "kind": "expense", "bas_konto": 5460}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "ACME AB"}).json()["kundnummer"]
+        # sale 10 000 + moms, paid
+        client.post(f"/books/{book}/incomes",
+                    json={"customer_id": kid, "category_id": inc,
+                          "lines": [{"rate_code": "25", "amount_ore": 1250000}],
+                          "trans_date": "2026-03-01", "paid_date": "2026-03-05"})
+        # expense 2 000 + moms, paid
+        client.post(f"/books/{book}/expenses",
+                    json={"category_id": exp, "lines": [{"rate_code": "25", "amount_ore": 250000}],
+                          "trans_date": "2026-04-01", "paid_date": "2026-04-02"})
+        # buy an inventarie via a manual verifikation (bank -> 1220)
+        client.post(f"/books/{book}/verifikationer/manual", json={
+            "ver_date": "2026-05-01", "text": "Inköp inventarie",
+            "postings": [{"bas_konto": 1220, "debit_ore": 400000, "account_name": "Inventarier"},
+                         {"bas_konto": 1930, "credit_ore": 400000}]})
+
+        ab = client.get(f"/books/{book}/reports/arsbokslut",
+                        params={"start": "2026-01-01", "end": "2026-12-31"}).json()
+        assert ab["resultat"]["R1"]["value_ore"] == 1000000     # income ex-moms
+        assert ab["resultat"]["R6"]["value_ore"] == 200000      # material -> övriga externa
+        assert ab["arets_resultat_ore"] == 800000
+        assert ab["balans"]["B4"]["value_ore"] == 400000        # maskiner/inventarier
+        assert ab["balans"]["B9"]["value_ore"] == 600000        # bank 12500-2500-4000
+        assert ab["balans"]["B10"]["value_ore"] == 800000       # eget kapital = result
+        assert ab["balans"]["B14"]["value_ore"] == 200000       # moms skuld 2500-500
+        assert ab["summa_tillgangar_ore"] == ab["summa_ek_skulder_ore"]
+        assert ab["balanserar"] is True
+
     def test_sie_export_plaintext(self, client, book):
         cat = client.post(f"/books/{book}/categories",
                           json={"name": "Försäljning", "kind": "income",
