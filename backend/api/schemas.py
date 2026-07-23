@@ -162,6 +162,7 @@ class SkatteverketPaymentReq(BaseModel):
     received_ore: Optional[int] = None          # actual amount Skatteverket paid out
     mode: Optional[str] = None                  # None=auto | 'rounding' | 'partial'
     relation_note: Optional[str] = None         # custom reference text on the follow-up
+    reference: Optional[str] = None             # name of the RUT/ROT begäran (e.g. "RUT1")
 
 
 class SkatteverketPreviewReq(BaseModel):

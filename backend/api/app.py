@@ -289,6 +289,16 @@ def _build_router():
         return fac(request).h_skatteverket_preview(
             {"book_id": book_id, "rut_claim_id": rut_claim_id}, body.model_dump(), {})
 
+    @r.post("/books/{book_id}/rut/{rut_claim_id}/receipt", status_code=201)
+    def upload_rut_receipt(book_id: str, rut_claim_id: int, body: sc.ReceiptUploadReq, request: Request):
+        return fac(request).h_upload_rut_receipt(
+            {"book_id": book_id, "rut_claim_id": rut_claim_id}, body.model_dump(), {})
+
+    @r.get("/books/{book_id}/rut/{rut_claim_id}/receipts")
+    def list_rut_receipts(book_id: str, rut_claim_id: int, request: Request):
+        return fac(request).h_list_rut_receipts(
+            {"book_id": book_id, "rut_claim_id": rut_claim_id}, {}, {})
+
     @r.get("/books/{book_id}/customers/{kundnummer}/rut-cap/{year}")
     def rut_cap(book_id: str, kundnummer: int, year: int, request: Request):
         return fac(request).h_rut_cap(

@@ -111,6 +111,8 @@ function modal(title, fields, okLabel = "OK") {
         input = el("select", {});
         for (const o of f.options) input.appendChild(el("option", { value: o.value }, o.label));
         if (f.value !== undefined) input.value = f.value;
+      } else if (f.type === "file") {
+        input = el("input", { type: "file", accept: f.accept || "image/*" });
       } else {
         input = el("input", { type: f.type || "text", value: f.value ?? "" });
       }
@@ -129,7 +131,7 @@ function modal(title, fields, okLabel = "OK") {
     };
     $("#modal-ok").onclick = () => {
       const out = {};
-      for (const [k, v] of Object.entries(inputs)) out[k] = v.value;
+      for (const [k, v] of Object.entries(inputs)) out[k] = v.type === "file" ? (v.files[0] || null) : v.value;
       close(out);
     };
     $("#modal-cancel").onclick = () => close(null);
@@ -606,21 +608,30 @@ const SECTION_RENDERERS = {
       panel.appendChild(el("p", { class: "muted" }, "Inga RUT-ärenden ännu."));
       return;
     }
-    const rows = claims.map((c) => el("tr", {},
-      el("td", {}, String(c.id)),
-      el("td", {}, custName[c.customer_id] || ("Kund " + c.customer_id)),
-      el("td", { class: "num" }, toKr(c.rut_amount_ore) + " kr"),
-      el("td", {}, el("span", { class: "pill " + (c.state === "skatteverket_paid" ? "paid" : c.state === "customer_paid" ? "" : "pending") },
-        STATE_LABEL[c.state] || c.state)),
-      el("td", {}, c.customer_payment_date || "—"),
-      el("td", {}, c.skatteverket_payment_date || "—"),
-      el("td", { class: "num" }, c.state === "customer_paid"
-        ? el("button", { class: "btn small", onclick: () => guard(() => rutSkvPayFlow(c.id, c.rut_amount_ore)) }, "Bokför SKV-utbetalning")
-        : ""),
-    ));
+    const rows = claims.map((c) => {
+      const actions = el("td", { class: "num" });
+      if (c.state === "customer_paid") {
+        actions.appendChild(el("button", { class: "btn small",
+          onclick: () => guard(() => rutSkvPayFlow(c.id, c.rut_amount_ore)) }, "Bokför SKV-utbetalning"));
+      } else if (c.state === "skatteverket_paid") {
+        actions.appendChild(el("button", { class: "btn small ghost",
+          onclick: () => guard(() => rutKvittensFlow(c)) }, "📎 Kvittens"));
+      }
+      return el("tr", {},
+        el("td", {}, String(c.id)),
+        el("td", {}, custName[c.customer_id] || ("Kund " + c.customer_id)),
+        el("td", {}, c.skatteverket_reference || ""),
+        el("td", { class: "num" }, toKr(c.rut_amount_ore) + " kr"),
+        el("td", {}, el("span", { class: "pill " + (c.state === "skatteverket_paid" ? "paid" : c.state === "customer_paid" ? "" : "pending") },
+          STATE_LABEL[c.state] || c.state)),
+        el("td", {}, c.customer_payment_date || "—"),
+        el("td", {}, c.skatteverket_payment_date || "—"),
+        actions);
+    });
     panel.appendChild(el("table", {},
       el("thead", {}, el("tr", {},
-        el("th", {}, "Nr"), el("th", {}, "Kund"), el("th", { class: "num" }, "Belopp"),
+        el("th", {}, "Nr"), el("th", {}, "Kund"), el("th", {}, "Begäran"),
+        el("th", { class: "num" }, "Belopp"),
         el("th", {}, "Status"), el("th", {}, "Kund betald"), el("th", {}, "SKV betald"), el("th", {}, ""))),
       el("tbody", {}, rows),
     ));
@@ -1358,16 +1369,57 @@ async function payFlow(txId) {
   renderWorkspace();
 }
 
+// Upload Skatteverket's kvittens (image or PDF) for a RUT/ROT payout, encrypted.
+async function uploadKvittens(claimId, file) {
+  if (!file) return;
+  try {
+    await api("POST", `/books/${bid()}/rut/${claimId}/receipt`,
+      { image_base64: await blobToBase64(file), mime: file.type || "application/octet-stream" });
+  } catch (e) {
+    toast("Kvittensen kunde inte laddas upp: " + (e.message || e), true);
+  }
+}
+
+// View (or add) the Skatteverket kvittens stored for a RUT/ROT payout.
+async function rutKvittensFlow(claim) {
+  const list = await api("GET", `/books/${bid()}/rut/${claim.id}/receipts`);
+  async function addOne() {
+    const f = await modal("Ladda upp kvittens från Skatteverket",
+      [{ name: "kvittens", label: "Bild eller PDF", type: "file", accept: "image/*,application/pdf" }],
+      "Ladda upp");
+    if (!f || !f.kvittens) return;
+    await uploadKvittens(claim.id, f.kvittens);
+    toast("Kvittens sparad"); renderWorkspace();
+  }
+  if (list.length === 0) { await addOne(); return; }
+  const body = el("div", {});
+  for (const rc of list) {
+    body.appendChild(el("div", { class: "modal-actions", style: "justify-content:space-between;align-items:center" },
+      el("span", { class: "muted" }, `${rc.mime} · ${Math.round(rc.byte_size / 1024)} kB`),
+      el("button", { class: "btn small", onclick: () =>
+        showPdf(`/books/${bid()}/receipts/${rc.id}`, `Kvittens RUT ${claim.id}`) }, "Öppna")));
+  }
+  body.appendChild(el("div", { style: "margin-top:8px" },
+    el("button", { class: "btn small ghost", onclick: () => guard(addOne) }, "+ Ladda upp fler")));
+  const ov = overlay(el("h3", {}, "Kvittens från Skatteverket"), body,
+    el("div", { class: "modal-actions" }, el("button", { class: "btn", onclick: () => ov.close() }, "Stäng")));
+}
+
 async function rutSkvPayFlow(claimId, claimedOre, defaultNote) {
   // Step 1: enter the date + the amount Skatteverket actually paid (defaults to the
-  // claimed husavdrag). The user can override, e.g. when the payout was reduced.
+  // claimed husavdrag), a reference (the RUT/ROT begäran name, e.g. "RUT1"), and the
+  // kvittens from Skatteverket (stored encrypted).
   const f = await modal("Bokför Skatteverkets utbetalning", [
     { name: "payment_date", label: "Utbetalningsdatum", type: "date", value: new Date().toISOString().slice(0, 10) },
     { name: "received", label: "Mottaget belopp (kr)",
       value: claimedOre != null ? toKr(claimedOre) : "" },
+    { name: "reference", label: "RUT/ROT-begäran (namn, t.ex. RUT1)", value: "" },
+    { name: "kvittens", label: "Kvittens från Skatteverket (bild/PDF, valfri)",
+      type: "file", accept: "image/*,application/pdf" },
   ], "Fortsätt");
   if (!f) return;
   const received_ore = f.received === "" ? null : toOre(f.received);
+  const reference = f.reference && f.reference.trim() ? f.reference.trim() : null;
 
   // Step 2: ask the backend how it reads the amount (rounding vs partial vs overpaid).
   let interp = "rounding";
@@ -1395,7 +1447,8 @@ async function rutSkvPayFlow(claimId, claimedOre, defaultNote) {
       if (!c) return;
       const res = await api("POST", `/books/${bid()}/rut/${claimId}/skatteverket-payment`,
         { payment_date: f.payment_date, received_ore, mode: "partial",
-          relation_note: c.relation_note || null });
+          relation_note: c.relation_note || null, reference });
+      await uploadKvittens(claimId, f.kvittens);
       toast(`Husavdrag delbetalt. Uppföljningsfaktura skapad (${toKr(shortfall)} kr till kunden).`);
       renderWorkspace();
       if (res.shortfall_invoice_id) invoicePdf(res.shortfall_invoice_id);
@@ -1404,7 +1457,8 @@ async function rutSkvPayFlow(claimId, claimedOre, defaultNote) {
   }
   // exact or within öresavrundning -> book straight (diff, if any, lands on 3740).
   await api("POST", `/books/${bid()}/rut/${claimId}/skatteverket-payment`,
-    { payment_date: f.payment_date, received_ore });
+    { payment_date: f.payment_date, received_ore, reference });
+  await uploadKvittens(claimId, f.kvittens);
   toast(interp === "rounding" && received_ore != null
     ? "Husavdrag bokfört (öresavrundning mot 3740)." : "Husavdrag bokfört.");
   renderWorkspace();

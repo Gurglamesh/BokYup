@@ -450,6 +450,19 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       filed. API `GET /reports/arsbokslut?start=&end=`. The BAS→box ranges follow the
       standard kopplingstabell (4xxx→R5, 5xxx–6xxx→R6, 7xxx→R7, 78xx→R9/R10, 8xxx→R4/R8;
       1xxx assets, 2xxx equity/skuld). Tests pass (284); browser-smoke-tested.
+- [x] **RUT/ROT payout: begäran-referens + Skatteverket-kvittens (schema v17, 2026-06).**
+      When booking the Skatteverket husavdrag payout the user now enters a **reference**
+      (the RUT/ROT begäran name, e.g. "RUT1" — stored on `rut_claim.skatteverket_reference`
+      and appended to the verifikation text) and can **upload Skatteverket's kvittens**
+      (image/PDF), stored **DEK-encrypted** like any receipt. `receipt` gained a nullable
+      `rut_claim_id` tag: `attach_rut_receipt` files the kvittens under the claim's sale
+      transaktion (so it travels in the `.buyn` bundle) but `list_receipts` excludes it, and
+      `list_rut_receipts` lists it. API: `register_rut_skatteverket_payment` takes
+      `reference`; `POST /rut/{id}/receipt` + `GET /rut/{id}/receipts`; `rut-claims` exposes
+      the reference. UI: `rutSkvPayFlow` gained a reference field + a kvittens file input
+      (modal() now supports `type:"file"` returning the File); the RUT tab shows the Begäran
+      column + a "📎 Kvittens" view/upload (`rutKvittensFlow`). Tests pass (285);
+      browser-smoke-tested (reference + PDF kvittens through the real modal).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

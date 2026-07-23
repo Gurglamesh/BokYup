@@ -329,7 +329,22 @@ class AppFacade:
         return ops.register_rut_skatteverket_payment(
             int(p["rut_claim_id"]), b["payment_date"],
             received_ore=b.get("received_ore"), mode=b.get("mode"),
-            relation_note=b.get("relation_note"))
+            relation_note=b.get("relation_note"), reference=b.get("reference"))
+
+    def h_upload_rut_receipt(self, p, b, q):
+        import base64
+        import binascii
+        ops = self._ops(p["book_id"])
+        try:
+            data = base64.b64decode(b["image_base64"], validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("image_base64 is not valid base64")
+        if not data:
+            raise ValueError("empty file")
+        return ops.attach_rut_receipt(int(p["rut_claim_id"]), data, b.get("mime", "image/jpeg"))
+
+    def h_list_rut_receipts(self, p, b, q):
+        return self._ops(p["book_id"]).list_rut_receipts(int(p["rut_claim_id"]))
 
     def h_skatteverket_preview(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -344,8 +359,8 @@ class AppFacade:
         return _rows(ops,
                      "SELECT id, transaktion_id, customer_id, rut_amount_ore, state, "
                      "customer_payment_date, skatteverket_payment_date, "
-                     "skatteverket_received_ore, shortfall_invoice_id, claim_year "
-                     "FROM rut_claim ORDER BY id")
+                     "skatteverket_received_ore, shortfall_invoice_id, "
+                     "skatteverket_reference, claim_year FROM rut_claim ORDER BY id")
 
     def h_reverse_verifikation(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -619,6 +634,8 @@ _route("POST", "/books/{book_id}/incomes", "h_record_income", 201)
 _route("POST", "/books/{book_id}/transaktioner/{transaktion_id}/pay", "h_register_payment")
 _route("POST", "/books/{book_id}/rut/{rut_claim_id}/skatteverket-payment", "h_rut_skatteverket_payment")
 _route("POST", "/books/{book_id}/rut/{rut_claim_id}/skatteverket-preview", "h_skatteverket_preview")
+_route("POST", "/books/{book_id}/rut/{rut_claim_id}/receipt", "h_upload_rut_receipt", 201)
+_route("GET", "/books/{book_id}/rut/{rut_claim_id}/receipts", "h_list_rut_receipts")
 _route("GET", "/books/{book_id}/rut-claims", "h_list_rut_claims")
 _route("POST", "/books/{book_id}/verifikationer/{verifikation_id}/reverse", "h_reverse_verifikation", 201)
 _route("POST", "/books/{book_id}/period-locks", "h_lock_period", 201)

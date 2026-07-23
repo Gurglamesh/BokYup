@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -219,6 +219,7 @@ CREATE TABLE rut_claim (
     skatteverket_verifikation_id INTEGER REFERENCES verifikation(id),
     skatteverket_received_ore INTEGER,  -- actual amount paid out (may differ from claimed)
     shortfall_invoice_id      INTEGER REFERENCES invoice(id),  -- follow-up if SKV underpaid
+    skatteverket_reference    TEXT,     -- name of the RUT/ROT begäran (e.g. "RUT1")
     claim_year                INTEGER NOT NULL,  -- for the per-customer/year cap
     created_at                TEXT NOT NULL
 );
@@ -238,6 +239,7 @@ CREATE TABLE period_lock (
 CREATE TABLE receipt (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     transaktion_id  INTEGER NOT NULL REFERENCES transaktion(id),
+    rut_claim_id    INTEGER REFERENCES rut_claim(id),  -- set: Skatteverket kvittens for a claim
     filename        TEXT NOT NULL,      -- name inside <db>.photos/ (ciphertext file)
     mime            TEXT NOT NULL,
     original_format TEXT CHECK (original_format IN ('paper','digital')),
@@ -669,6 +671,10 @@ _MIGRATIONS: dict[int, str] = {
     """,
     16: """
         ALTER TABLE invoice_line ADD COLUMN discount_pct_centi INTEGER NOT NULL DEFAULT 0;
+    """,
+    17: """
+        ALTER TABLE rut_claim ADD COLUMN skatteverket_reference TEXT;
+        ALTER TABLE receipt ADD COLUMN rut_claim_id INTEGER;
     """,
 }
 

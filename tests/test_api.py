@@ -701,6 +701,40 @@ class TestInvoices:
         assert paid.status_code == 201
         assert paid.json()["outstanding_ore"] == 0
 
+    def test_skatteverket_reference_and_kvittens(self, client, book):
+        import base64
+        cat, kid = self._setup(client, book)
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 1000000,
+                       "rate_code": "25", "reduction_type": "rut"}],
+            "recipients": [{"customer_id": kid, "share_pct": 100}]}).json()
+        client.post(f"/books/{book}/transaktioner/{inv['transaktion_id']}/pay",
+                    json={"payment_date": "2026-03-10"})
+        claim_id = [x for x in client.get(f"/books/{book}/invoices").json()
+                    if x["id"] == inv["invoice_id"]][0]["rut_claim_id"]
+        # book the payout with a reference name (the RUT begäran)
+        client.post(f"/books/{book}/rut/{claim_id}/skatteverket-payment",
+                    json={"payment_date": "2026-04-15", "reference": "RUT1"})
+        claim = [c for c in client.get(f"/books/{book}/rut-claims").json() if c["id"] == claim_id][0]
+        assert claim["skatteverket_reference"] == "RUT1"
+        # upload Skatteverket's kvittens (a small PDF) and list it back
+        raw = b"%PDF-1.4 fake kvittens"
+        up = client.post(f"/books/{book}/rut/{claim_id}/receipt",
+                         json={"image_base64": base64.b64encode(raw).decode(),
+                               "mime": "application/pdf"})
+        assert up.status_code == 201
+        receipts = client.get(f"/books/{book}/rut/{claim_id}/receipts").json()
+        assert len(receipts) == 1 and receipts[0]["mime"] == "application/pdf"
+        # the raw bytes come back decrypted intact
+        rid = receipts[0]["id"]
+        got = client.get(f"/books/{book}/receipts/{rid}")
+        assert got.content == raw
+        # it does NOT leak into the sale transaktion's own receipt list
+        sale = client.get(f"/books/{book}/transaktioner/{inv['transaktion_id']}/receipts").json()
+        assert all(r["id"] != rid for r in sale)
+
     def test_draft_payload_encrypted_at_rest(self, client, book, tmp_path):
         cat, kid = self._setup(client, book)
         client.post(f"/books/{book}/invoice-drafts", json={"payload": {

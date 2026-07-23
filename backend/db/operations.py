@@ -699,7 +699,8 @@ class BookOps:
     def register_rut_skatteverket_payment(self, rut_claim_id: int, payment_date: str,
                                           received_ore: Optional[int] = None, *,
                                           mode: Optional[str] = None,
-                                          relation_note: Optional[str] = None) -> dict:
+                                          relation_note: Optional[str] = None,
+                                          reference: Optional[str] = None) -> dict:
         """
         Book the Skatteverket payout of a RUT/ROT claim as its own verifikation. The
         claim must already be 'customer_paid'.
@@ -767,6 +768,8 @@ class BookOps:
             postings.append((self._sys_account("account_kundfordran"),
                              diff, "kvarstående fordran kund"))
             text = "Husavdrag delvis utbetalt av Skatteverket"
+        if reference and reference.strip():
+            text += f" ({reference.strip()})"
 
         shortfall_invoice_id = None
         with self.conn:
@@ -777,12 +780,31 @@ class BookOps:
             self.conn.execute(
                 "UPDATE rut_claim SET state='skatteverket_paid', skatteverket_payment_date=?, "
                 "skatteverket_verifikation_id=?, skatteverket_received_ore=?, "
-                "shortfall_invoice_id=? WHERE id=?",
-                (payment_date, vid, received, shortfall_invoice_id, rut_claim_id),
+                "shortfall_invoice_id=?, skatteverket_reference=? WHERE id=?",
+                (payment_date, vid, received, shortfall_invoice_id,
+                 (reference.strip() if reference and reference.strip() else None), rut_claim_id),
             )
         return {"verifikation_id": vid, "ver_number": number, "interpretation": interp,
                 "claimed_ore": claimed, "received_ore": received, "difference_ore": diff,
                 "shortfall_invoice_id": shortfall_invoice_id}
+
+    def attach_rut_receipt(self, rut_claim_id: int, data: bytes, mime: str) -> dict:
+        """
+        Store Skatteverket's kvittens for a RUT/ROT payout, encrypted with the book DEK.
+        It is tagged with the claim (and filed under the claim's sale transaktion so it
+        travels in the .buyn bundle like any receipt).
+        """
+        claim = self.conn.execute(
+            "SELECT transaktion_id FROM rut_claim WHERE id=?", (rut_claim_id,)).fetchone()
+        if claim is None:
+            raise KeyError(f"No rut_claim {rut_claim_id}")
+        return self.attach_receipt(claim["transaktion_id"], data, mime,
+                                   original_format="digital", rut_claim_id=rut_claim_id)
+
+    def list_rut_receipts(self, rut_claim_id: int) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT id, rut_claim_id, mime, byte_size, created_at FROM receipt "
+            "WHERE rut_claim_id=? ORDER BY id", (rut_claim_id,)).fetchall()]
 
     def _create_husavdrag_shortfall_invoice(self, claim, shortfall_ore: int,
                                             date: str, relation_note: Optional[str]) -> int:
@@ -1948,11 +1970,13 @@ class BookOps:
         return bundle._photos_dir(Path(self.session.record.db_path))
 
     def attach_receipt(self, transaktion_id: int, data: bytes, mime: str,
-                       original_format: Optional[str] = None) -> dict:
+                       original_format: Optional[str] = None,
+                       rut_claim_id: Optional[int] = None) -> dict:
         """
         Store a receipt photo for a transaktion: the bytes are encrypted with the
         book DEK and written as a file in `<db>.photos/`; a `receipt` row indexes it.
         The plaintext never touches disk. Returns the new receipt's metadata.
+        `rut_claim_id` (set only by attach_rut_receipt) tags a Skatteverket kvittens.
         """
         if self.conn.execute(
             "SELECT 1 FROM transaktion WHERE id=?", (transaktion_id,)
@@ -1969,18 +1993,21 @@ class BookOps:
 
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO receipt(transaktion_id, filename, mime, original_format, "
-                "byte_size, sha256, created_at) VALUES (?,?,?,?,?,?,?)",
-                (transaktion_id, filename, mime, original_format,
+                "INSERT INTO receipt(transaktion_id, rut_claim_id, filename, mime, "
+                "original_format, byte_size, sha256, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (transaktion_id, rut_claim_id, filename, mime, original_format,
                  len(data), hashlib.sha256(enc).hexdigest(), _now()),
             )
         return {"id": cur.lastrowid, "transaktion_id": transaktion_id,
+                "rut_claim_id": rut_claim_id,
                 "filename": filename, "mime": mime, "byte_size": len(data)}
 
     def list_receipts(self, transaktion_id: int) -> list[dict]:
+        # Only the transaktion's own receipts; a Skatteverket kvittens (rut_claim_id set)
+        # is listed via list_rut_receipts instead.
         return [dict(r) for r in self.conn.execute(
             "SELECT id, transaktion_id, mime, original_format, byte_size, created_at "
-            "FROM receipt WHERE transaktion_id=? ORDER BY id",
+            "FROM receipt WHERE transaktion_id=? AND rut_claim_id IS NULL ORDER BY id",
             (transaktion_id,),
         ).fetchall()]
 
