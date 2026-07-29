@@ -242,6 +242,15 @@ def _build_router():
         return fac(request).h_unlink_customer(
             {"book_id": book_id, "kundnummer": kundnummer, "other_kundnummer": other_kundnummer}, {}, {})
 
+    @r.get("/books/{book_id}/customers/{kundnummer}/support")
+    def get_support(book_id: str, kundnummer: int, request: Request):
+        return fac(request).h_get_support({"book_id": book_id, "kundnummer": kundnummer}, {}, {})
+
+    @r.post("/books/{book_id}/customers/{kundnummer}/support", status_code=201)
+    def add_support_entry(book_id: str, kundnummer: int, body: sc.SupportEntryReq, request: Request):
+        return fac(request).h_add_support_entry(
+            {"book_id": book_id, "kundnummer": kundnummer}, body.model_dump(), {})
+
     @r.get("/books/{book_id}/reduction-config")
     def reduction_config(book_id: str, request: Request):
         return fac(request).h_reduction_config({"book_id": book_id}, {}, {})

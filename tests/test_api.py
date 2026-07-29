@@ -515,6 +515,29 @@ class TestInvoices:
         assert client.get(f"/books/{book}/company").json()["name"] == "Min Firma AB"
         assert client.get(f"/books/{book}/payment-methods").json()[0]["label"] == "Swish"
 
+    def test_support_time_bank(self, client, book):
+        cat, kid = self._setup(client, book)
+        # inc 1 249 kr -> 30 min support
+        client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-15",
+            "due_date": "2026-04-15",
+            "lines": [{"description": "IT", "quantity_centi": 100,
+                       "unit_price_ore": round(124900 / 1.25), "rate_code": "25"}]})
+        s = client.get(f"/books/{book}/customers/{kid}/support").json()
+        assert s["earned_active_minutes"] == 30 and s["remaining_minutes"] == 30
+        assert len(s["active_invoices"]) == 1
+        # quick-deduct 60, then add 20 -> remaining 30-60+20 = -10
+        assert client.post(f"/books/{book}/customers/{kid}/support",
+                           json={"minutes": 60, "kind": "deduction"}).status_code == 201
+        client.post(f"/books/{book}/customers/{kid}/support",
+                    json={"minutes": 20, "kind": "addition", "note": "bonus"})
+        s = client.get(f"/books/{book}/customers/{kid}/support").json()
+        assert s["remaining_minutes"] == -10
+        assert len(s["ledger"]) == 2 and s["ledger"][0]["kind"] == "addition"
+        # the PDF carries the support text block
+        pdf = client.get(f"/books/{book}/invoices/1/pdf")
+        assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
+
     def test_edit_and_delete_payment_method(self, client, book):
         pid = client.post(f"/books/{book}/payment-methods",
                           json={"label": "Swish", "value": "111"}).json()["id"]

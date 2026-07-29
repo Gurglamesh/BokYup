@@ -211,6 +211,12 @@ class CompanyReq(BaseModel):
     f_skatt: Optional[int] = None
 
 
+class SupportEntryReq(BaseModel):
+    minutes: int                  # positive amount
+    kind: str                     # 'deduction' | 'addition'
+    note: Optional[str] = None
+
+
 class AccountingMethodReq(BaseModel):
     method: str                   # 'kontantmetod' | 'fakturametod'
 

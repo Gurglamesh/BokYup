@@ -579,6 +579,50 @@ class TestInvoices:
                                           "unit_price_ore": 10000, "rate_code": "25"}])
         assert inv2["invoice_number"] == 2
 
+    def test_support_minutes_earned_and_expiry(self, ops):
+        cat, kid = self._setup(ops)
+        # inc = 124 900 öre (1 249 kr) -> floor(1249/500)=2 -> 30 min; expiry +36 months
+        ex = round(124900 / 1.25)
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-15",
+            due_date="2026-04-15",
+            lines=[{"description": "IT", "quantity_centi": 100, "unit_price_ore": ex, "rate_code": "25"}])
+        assert inv["inc_moms_ore"] == 124900
+        assert inv["support_minutes_earned"] == 30
+        assert inv["support_expiry_date"] == "2029-03-15"
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["support_minutes_earned"] == 30 and got["support_expiry_date"] == "2029-03-15"
+
+    def test_support_balance_expiry_and_ledger(self, ops):
+        cat, kid = self._setup(ops)
+        # two active invoices: 30 min + 15 min = 45 earned
+        ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-15",
+            due_date="2026-04-15",
+            lines=[{"description": "A", "quantity_centi": 100, "unit_price_ore": round(124900/1.25), "rate_code": "25"}])
+        ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-04-01",
+            due_date="2026-05-01",
+            lines=[{"description": "B", "quantity_centi": 100, "unit_price_ore": round(60000/1.25), "rate_code": "25"}])
+        assert ops.support_balance(kid)["remaining_minutes"] == 45
+        # deduct 15 + 30, add 10 -> net used 35 -> remaining 10
+        ops.record_support_entry(kid, 15, "deduction", "Felsökning")
+        ops.record_support_entry(kid, 30, "deduction")
+        ops.record_support_entry(kid, 10, "addition", "Goodwill")
+        bal = ops.support_balance(kid)
+        assert bal["used_minutes"] == 35 and bal["remaining_minutes"] == 10
+        assert len(ops.list_support_ledger(kid)) == 3
+        # an expired invoice drops out of the active earned sum
+        ops.conn.execute("UPDATE invoice SET support_expiry_date='2020-01-01' "
+                         "WHERE invoice_number=1")
+        ops.conn.commit()
+        # now only the 15-min invoice is active; earned 15, used 35 -> remaining -20
+        assert ops.support_balance(kid)["earned_active_minutes"] == 15
+
+    def test_support_entry_validation(self, ops):
+        cat, kid = self._setup(ops)
+        with pytest.raises(ValueError):
+            ops.record_support_entry(kid, 0, "deduction")
+        with pytest.raises(ValueError):
+            ops.record_support_entry(kid, 15, "bogus")
+
     def test_line_percentage_discount(self, ops):
         cat, kid = self._setup(ops)
         # qty 2 * 1000 kr = 2000 kr ex; 15 % rabatt -> 1700 kr ex; moms 25 % = 425 kr

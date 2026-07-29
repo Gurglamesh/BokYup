@@ -472,6 +472,8 @@ const SECTION_RENDERERS = {
     const actions = (c) => el("span", { style: "display:inline-flex;gap:4px" },
       el("button", { class: "btn small ghost", title: "Skapa faktura till denna kund",
         onclick: () => newInvoiceForCustomer(c.kundnummer) }, "Ny faktura"),
+      el("button", { class: "btn small ghost", title: "Gratis distanssupport – saldo & uttag",
+        onclick: () => guard(() => supportFlow(c)) }, "Support"),
       editBtn(() => guard(() => editCustomerFlow(c.kundnummer))),
       c.type === "private"
         ? el("button", { class: "btn small ghost", onclick: () => guard(() => householdFlow(c)) }, "Hushåll")
@@ -1755,6 +1757,88 @@ async function householdFlow(c) {
   await new Promise((resolve) => {
     $("#modal-ok").onclick = () => { $("#modal-backdrop").classList.add("hidden"); resolve(); };
     $("#modal-cancel").onclick = () => { $("#modal-backdrop").classList.add("hidden"); resolve(); };
+  });
+}
+
+// Gratis distanssupport: a customer's support-time balance, quick deductions,
+// manual additions, and the full history — the customer's "support profile".
+async function supportFlow(c) {
+  const name = c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer);
+  const body = $("#modal-body");
+  $("#modal-title").textContent = `Distanssupport – ${name}`;
+  const fmt = (m) => `${m} min` + (Math.abs(m) >= 60 ? ` (${(m / 60).toFixed(1).replace(".", ",")} h)` : "");
+
+  async function render() {
+    const s = await api("GET", `/books/${bid()}/customers/${c.kundnummer}/support`);
+    body.innerHTML = "";
+    body.appendChild(el("div", { class: "box", style: "text-align:center;margin-bottom:10px" },
+      el("div", { class: "muted" }, "Kvarvarande supporttid"),
+      el("div", { style: "font-size:28px;font-weight:800" }, fmt(s.remaining_minutes)),
+      el("div", { class: "muted", style: "font-size:12px" },
+        `Intjänat (giltigt): ${fmt(s.earned_active_minutes)} · Använt netto: ${fmt(s.used_minutes)}`)));
+
+    async function entry(minutes, kind, note) {
+      await api("POST", `/books/${bid()}/customers/${c.kundnummer}/support`, { minutes, kind, note: note || null });
+      toast(kind === "deduction" ? `Drog av ${minutes} min` : `Lade till ${minutes} min`);
+      render();
+    }
+
+    // quick-deduct buttons
+    body.appendChild(el("div", { class: "muted", style: "margin:4px 0" }, "Dra av tid:"));
+    body.appendChild(el("div", { class: "row", style: "gap:6px" },
+      ...[15, 30, 60].map((mn) => el("button", { class: "btn",
+        onclick: () => guard(() => entry(mn, "deduction")) }, `− ${mn} min`))));
+
+    // manual add (free value) + optional note
+    const addMin = el("input", { type: "text", placeholder: "minuter", style: "width:90px" });
+    const addNote = el("input", { type: "text", placeholder: "anteckning (valfri)", style: "min-width:160px" });
+    body.appendChild(el("div", { class: "row", style: "gap:6px;margin-top:10px;align-items:flex-end" },
+      wrap("Lägg till tid", addMin), wrap("Notering", addNote),
+      el("button", { class: "btn brand", onclick: () => guard(async () => {
+        const m = parseInt((addMin.value || "").replace(/\D/g, ""), 10);
+        if (!m || m <= 0) { toast("Ange ett antal minuter", true); return; }
+        await entry(m, "addition", addNote.value.trim());
+      }) }, "+ Lägg till")));
+
+    // history
+    body.appendChild(el("h3", { style: "margin:14px 0 4px" }, "Historik"));
+    if (!s.ledger.length) {
+      body.appendChild(el("p", { class: "muted" }, "Inga uttag eller tillägg ännu."));
+    } else {
+      body.appendChild(el("table", { style: "width:100%" },
+        el("thead", {}, el("tr", {},
+          el("th", {}, "Tidpunkt"), el("th", {}, "Typ"),
+          el("th", { class: "num" }, "Minuter"), el("th", {}, "Notering"))),
+        el("tbody", {}, s.ledger.map((l) => el("tr", {},
+          el("td", {}, (l.created_at || "").slice(0, 16).replace("T", " ")),
+          el("td", {}, l.kind === "deduction" ? "Uttag" : "Tillägg"),
+          el("td", { class: "num", style: "color:" + (l.kind === "deduction" ? "var(--danger,#c33)" : "var(--ok,#2a7)") },
+            (l.kind === "deduction" ? "−" : "+") + l.minutes),
+          el("td", {}, l.note || ""))))));
+    }
+
+    // per-invoice breakdown (transparency)
+    if (s.active_invoices.length) {
+      body.appendChild(el("h3", { style: "margin:14px 0 4px" }, "Intjänat per faktura (giltiga)"));
+      body.appendChild(el("table", { style: "width:100%" },
+        el("thead", {}, el("tr", {},
+          el("th", {}, "Faktura"), el("th", {}, "Datum"), el("th", { class: "num" }, "Belopp"),
+          el("th", { class: "num" }, "Minuter"), el("th", {}, "Giltig t.o.m."))),
+        el("tbody", {}, s.active_invoices.map((iv) => el("tr", {},
+          el("td", {}, String(iv.invoice_number)), el("td", {}, iv.invoice_date),
+          el("td", { class: "num" }, toKr(iv.inc_moms_ore) + " kr"),
+          el("td", { class: "num" }, String(iv.support_minutes_earned)),
+          el("td", {}, iv.support_expiry_date || ""))))));
+    }
+  }
+  await render();
+  $("#modal-ok").textContent = "Stäng";
+  $("#modal-cancel").style.display = "none";
+  $("#modal-backdrop").classList.remove("hidden");
+  await new Promise((resolve) => {
+    const close = () => { $("#modal-backdrop").classList.add("hidden"); $("#modal-cancel").style.display = ""; resolve(); };
+    $("#modal-ok").onclick = close;
+    $("#modal-cancel").onclick = close;
   });
 }
 

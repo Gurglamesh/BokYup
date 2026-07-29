@@ -469,6 +469,22 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       `delete_payment_method` + `DELETE /payment-methods/{id}` (safe — issued invoices carry
       their own frozen payment-method snapshot, so editing/removing never changes an existing
       faktura). Tests pass (286); browser-smoke-tested editing a betalsätt's name + number.
+- [x] **Gratis distanssupport — support-time bank (schema v18, 2026-06).** Each invoice
+      earns free remote-support time: **15 min per full 500 kr of the invoice total**
+      (round down; remainder under 500 kr earns nothing — 1 249 kr → 30 min), valid **36
+      months** from the invoice date. `create_invoice` computes + stores
+      `invoice.support_minutes_earned` + `support_expiry_date` (`support_minutes_earned()`
+      + `_add_months()` helpers; husavdrag follow-up invoices earn 0). **Per-customer
+      balance** `support_balance(customer_id)` = Σ earned from that customer's still-valid
+      invoices − net used, where used = deductions − additions from a new **`support_ledger`**
+      table (kind deduction|addition, minutes, note, timestamp). `record_support_entry` +
+      `list_support_ledger`. API `GET/POST /customers/{id}/support`. The faktura **PDF**
+      renders the fixed magIT support text block at the bottom (`_support_text`, with the
+      earned minutes + expiry substituted; skipped when no expiry, i.e. follow-ups). UI: a
+      **"Support"** button per customer opens the support profile — remaining time, three
+      quick-deduct buttons (15/30/60), a free-value add field + note, the full history log,
+      and a per-invoice earned breakdown. Migration backfills existing (non-follow-up)
+      invoices. Tests pass (290); browser-smoke-tested (deduct + add + history).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

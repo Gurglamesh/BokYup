@@ -132,6 +132,29 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Support-time (gratis distanssupport) constants: 15 minutes per full 500 kr.
+SUPPORT_STEP_ORE = 50000            # 500 kr
+SUPPORT_MINUTES_PER_STEP = 15
+
+
+def support_minutes_earned(total_inc_ore: int) -> int:
+    """15 minutes for every full 500 kr of the invoice total (round down; any
+    remainder under 500 kr earns nothing). E.g. 1 249 kr -> 30 min, not 37,5."""
+    if total_inc_ore <= 0:
+        return 0
+    return (total_inc_ore // SUPPORT_STEP_ORE) * SUPPORT_MINUTES_PER_STEP
+
+
+def _add_months(iso_date: str, months: int) -> str:
+    """Add whole months to a YYYY-MM-DD date, clamping the day to the target month's
+    last day (e.g. 2024-02-29 + 36 months -> 2027-02-28)."""
+    import calendar
+    y, m, d = (int(x) for x in iso_date[:10].split("-"))
+    total = (m - 1) + months
+    y2, m2 = y + total // 12, total % 12 + 1
+    return f"{y2:04d}-{m2:02d}-{min(d, calendar.monthrange(y2, m2)[1]):02d}"
+
+
 def _compose_address(street, zip_code, city, country) -> str:
     """Build a single-line display address from structured parts (zip + city on one
     line, country only if not Sweden)."""
@@ -416,6 +439,64 @@ class BookOps:
         enc = d.pop("personnummer_enc", None)
         d["personnummer"] = self.session.decrypt_text(enc) if enc else None
         return d
+
+    # ---- gratis distanssupport (free remote-support time bank) -----------------
+
+    def support_balance(self, customer_id: int) -> dict:
+        """
+        A customer's remaining support time: the sum of `support_minutes_earned` from
+        their invoices whose support is still valid (expiry in the future) MINUS the net
+        used (deductions − additions from the ledger). Expired invoices drop out of the
+        earned sum. Also returns the contributing invoices for transparency.
+        """
+        self.get_customer(customer_id)                 # 404 if unknown
+        today = _now()[:10]
+        earned_rows = self.conn.execute(
+            "SELECT invoice_number, invoice_date, inc_moms_ore, support_minutes_earned, "
+            "support_expiry_date FROM invoice WHERE customer_id=? AND husavdrag_shortfall_ore=0 "
+            "AND support_minutes_earned>0 ORDER BY invoice_number", (customer_id,)).fetchall()
+        active = [dict(r) for r in earned_rows if (r["support_expiry_date"] or "") >= today]
+        earned_active = sum(r["support_minutes_earned"] for r in active)
+        ded = self.conn.execute(
+            "SELECT COALESCE(SUM(minutes),0) FROM support_ledger WHERE customer_id=? "
+            "AND kind='deduction'", (customer_id,)).fetchone()[0]
+        add = self.conn.execute(
+            "SELECT COALESCE(SUM(minutes),0) FROM support_ledger WHERE customer_id=? "
+            "AND kind='addition'", (customer_id,)).fetchone()[0]
+        used = ded - add
+        return {
+            "customer_id": customer_id,
+            "earned_active_minutes": earned_active,
+            "used_minutes": used,                      # net (deductions − additions)
+            "deductions_minutes": ded,
+            "additions_minutes": add,
+            "remaining_minutes": earned_active - used,
+            "active_invoices": active,
+        }
+
+    def record_support_entry(self, customer_id: int, minutes: int, kind: str,
+                             note: Optional[str] = None) -> dict:
+        """Log a manual support deduction (customer used time) or addition (bonus time
+        outside the invoice logic). `minutes` is a positive amount; `kind` gives the
+        direction. Returns the created ledger entry."""
+        self.get_customer(customer_id)                 # 404 if unknown
+        if kind not in ("deduction", "addition"):
+            raise ValueError("kind must be 'deduction' or 'addition'")
+        minutes = int(minutes)
+        if minutes <= 0:
+            raise ValueError("minutes must be > 0")
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO support_ledger(customer_id, minutes, kind, note, created_at) "
+                "VALUES (?,?,?,?,?)", (customer_id, minutes, kind, note, _now()))
+        return {"id": cur.lastrowid, "customer_id": customer_id, "minutes": minutes,
+                "kind": kind, "note": note}
+
+    def list_support_ledger(self, customer_id: int) -> list[dict]:
+        """The full support history for a customer (newest first)."""
+        return [dict(r) for r in self.conn.execute(
+            "SELECT id, minutes, kind, note, created_at FROM support_ledger "
+            "WHERE customer_id=? ORDER BY id DESC", (customer_id,)).fetchall()]
 
     # ---- household relations (symmetric customer links, for RUT/ROT) ----------
 
@@ -1359,16 +1440,23 @@ class BookOps:
         pm_snapshot = json.dumps(self.list_payment_methods(active_only=True), default=str)
         number = self._next_invoice_number()
 
+        # "Gratis distanssupport": 15 min per full 500 kr of the invoice total (round
+        # down), valid 36 months from the invoice date.
+        support_minutes = support_minutes_earned(inc_total)
+        support_expiry = _add_months(invoice_date, 36)
+
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO invoice(invoice_number, customer_id, transaktion_id, invoice_date, "
                 "due_date, delivery_date, payment_terms, buyer_snapshot_enc, seller_snapshot, "
                 "payment_methods_snapshot, our_reference, your_reference, note, ex_moms_ore, "
-                "moms_ore, inc_moms_ore, rut_total_ore, rot_total_ore, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "moms_ore, inc_moms_ore, rut_total_ore, rot_total_ore, "
+                "support_minutes_earned, support_expiry_date, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (number, customer_id, tid, invoice_date, due_date, delivery_date, payment_terms,
                  buyer_snapshot_enc, seller_snapshot, pm_snapshot, our_reference, your_reference,
-                 note, ex_total, moms_total, inc_total, rut_total, rot_total, _now()))
+                 note, ex_total, moms_total, inc_total, rut_total, rot_total,
+                 support_minutes, support_expiry, _now()))
             invoice_id = cur.lastrowid
             for cl in computed:
                 self.conn.execute(
@@ -1411,7 +1499,8 @@ class BookOps:
         return {"invoice_id": invoice_id, "invoice_number": number, "transaktion_id": tid,
                 "ex_moms_ore": ex_total, "moms_ore": moms_total, "inc_moms_ore": inc_total,
                 "rut_total_ore": rut_total, "rot_total_ore": rot_total,
-                "husavdrag_ore": husavdrag, "cap_warnings": cap_warnings}
+                "husavdrag_ore": husavdrag, "cap_warnings": cap_warnings,
+                "support_minutes_earned": support_minutes, "support_expiry_date": support_expiry}
 
     # ---- invoice drafts (unissued, editable; books nothing until create_invoice) ----
 

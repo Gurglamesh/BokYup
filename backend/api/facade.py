@@ -254,6 +254,19 @@ class AppFacade:
         ops = self._ops(p["book_id"])
         return ops.get_customer(int(p["kundnummer"]))
 
+    # ---- gratis distanssupport (support time bank) ----
+    def h_get_support(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        cid = int(p["kundnummer"])
+        bal = ops.support_balance(cid)
+        bal["ledger"] = ops.list_support_ledger(cid)
+        return bal
+
+    def h_add_support_entry(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        return ops.record_support_entry(int(p["kundnummer"]), int(b["minutes"]),
+                                        b["kind"], b.get("note"))
+
     def h_create_customer(self, p, b, q):
         ops = self._ops(p["book_id"])
         data = _clean(b)
@@ -620,6 +633,8 @@ _route("DELETE", "/books/{book_id}/categories/{category_id}", "h_delete_category
 
 _route("GET", "/books/{book_id}/customers", "h_list_customers")
 _route("GET", "/books/{book_id}/customers/{kundnummer}/rut-cap/{year}", "h_rut_cap")
+_route("GET", "/books/{book_id}/customers/{kundnummer}/support", "h_get_support")
+_route("POST", "/books/{book_id}/customers/{kundnummer}/support", "h_add_support_entry", 201)
 _route("GET", "/books/{book_id}/customers/{kundnummer}/husavdrag-cap/{year}", "h_husavdrag_cap")
 _route("GET", "/books/{book_id}/customers/{kundnummer}/relations", "h_list_customer_relations")
 _route("POST", "/books/{book_id}/customers/{kundnummer}/relations", "h_link_customer", 201)

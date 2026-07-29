@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -303,6 +303,9 @@ CREATE TABLE invoice (
     parent_invoice_id        INTEGER REFERENCES invoice(id),
     relation_note            TEXT,                  -- free-text reference to the original
     husavdrag_shortfall_ore  INTEGER NOT NULL DEFAULT 0,  -- >0 marks a follow-up; settles 1510, no moms
+    -- "gratis distanssupport": earned support time per invoice (magIT support offer).
+    support_minutes_earned   INTEGER NOT NULL DEFAULT 0,  -- 15 min per full 500 kr of the total
+    support_expiry_date      TEXT,                  -- invoice_date + 36 months
     created_at               TEXT NOT NULL
 );
 
@@ -397,6 +400,18 @@ CREATE TABLE customer_relation (
     UNIQUE (customer_a, customer_b)
 );
 
+-- ----- free remote-support time bank (per customer): manual deductions when the
+-- customer uses support, and manual additions outside the automatic invoice logic.
+-- Earned time lives on the invoice (support_minutes_earned); this logs consumption.
+CREATE TABLE support_ledger (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id INTEGER NOT NULL REFERENCES customer(kundnummer),
+    minutes     INTEGER NOT NULL,        -- always positive; `kind` gives the direction
+    kind        TEXT NOT NULL CHECK (kind IN ('deduction','addition')),
+    note        TEXT,
+    created_at  TEXT NOT NULL
+);
+
 -- ----- indexes ------------------------------------------------------------
 CREATE INDEX idx_verifikation_date   ON verifikation(ver_date);
 CREATE INDEX idx_posting_ver         ON posting(verifikation_id);
@@ -410,6 +425,7 @@ CREATE INDEX idx_invoice_number      ON invoice(invoice_number);
 CREATE INDEX idx_invoice_line_inv    ON invoice_line(invoice_id);
 CREATE INDEX idx_rut_recipient_inv   ON rut_recipient(invoice_id);
 CREATE INDEX idx_invoice_event_inv   ON invoice_event(invoice_id);
+CREATE INDEX idx_support_ledger_cust ON support_ledger(customer_id);
 """
 
 # ---------------------------------------------------------------------------
@@ -675,6 +691,23 @@ _MIGRATIONS: dict[int, str] = {
     17: """
         ALTER TABLE rut_claim ADD COLUMN skatteverket_reference TEXT;
         ALTER TABLE receipt ADD COLUMN rut_claim_id INTEGER;
+    """,
+    18: """
+        ALTER TABLE invoice ADD COLUMN support_minutes_earned INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE invoice ADD COLUMN support_expiry_date TEXT;
+        CREATE TABLE IF NOT EXISTS support_ledger (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL REFERENCES customer(kundnummer),
+            minutes     INTEGER NOT NULL,
+            kind        TEXT NOT NULL CHECK (kind IN ('deduction','addition')),
+            note        TEXT,
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_support_ledger_cust ON support_ledger(customer_id);
+        UPDATE invoice SET
+            support_minutes_earned = (inc_moms_ore / 50000) * 15,
+            support_expiry_date = date(invoice_date, '+36 months')
+            WHERE husavdrag_shortfall_ore = 0;
     """,
 }
 

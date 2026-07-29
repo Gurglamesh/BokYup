@@ -238,6 +238,17 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     if invoice.get("note"):
         pdf.set_xy(pdf.l_margin, ty + 2); pdf.multi_cell(W, 5, _s(invoice["note"])); ty = pdf.get_y()
 
+    # ---- gratis distanssupport text block ------------------------------------
+    if invoice.get("support_expiry_date"):
+        ty += 6
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 4, _s("Gratis distanssupport")); ty += 4
+        pdf.set_font("Helvetica", "", 7.5)
+        pdf.set_xy(pdf.l_margin, ty)
+        pdf.multi_cell(W, 3.5, _s(_support_text(
+            invoice.get("support_minutes_earned") or 0, invoice["support_expiry_date"])))
+        ty = pdf.get_y()
+
     # ---- seller block: a footer under the payment methods --------------------
     parts = []
     if seller.get("org_nr"):
@@ -260,6 +271,22 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         pdf.set_xy(pdf.l_margin, fy + 11); pdf.cell(0, 4, _s(contact))
 
     return bytes(pdf.output())
+
+
+def _support_text(minutes: int, expiry_date: str) -> str:
+    """The 'gratis distanssupport' block, with the earned minutes + expiry inserted."""
+    return (
+        "Som betald kund hos magIT erbjuds du kostnadsfri enkel support på distans. "
+        "Supporttiden beräknas som 15 minuter för varje fullt 500-kronorsbelopp av "
+        "fakturerat belopp (överskjutande belopp under 500 kr ger ingen ytterligare tid), "
+        "giltigt i 36 månader från fakturadatum. Tiden räknas per påbörjade 15 minuter vid "
+        "uttag och kan nyttjas vid flera tillfällen tills tillgänglig tid är förbrukad eller "
+        "giltighetstiden löpt ut. Erbjudandet gäller enklare support (felsökning, rådgivning, "
+        "mindre justeringar) och omfattar inte mer omfattande arbete eller besök på plats. "
+        "Erbjudandet upphör i förtid endast om verksamheten upphör (t.ex. vid konkurs). "
+        f"Denna faktura ger: {minutes} minuter distanssupport, giltigt till {expiry_date}. "
+        "Kontakta mig för att få uppgift om hur mycket supporttid du har kvar totalt."
+    )
 
 
 def _kv(pdf, x, y, w, label, value, bold=False):
