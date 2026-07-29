@@ -41,6 +41,25 @@ def test_render_plain_invoice(ops):
     assert pdf[:4] == b"%PDF" and len(pdf) > 800
 
 
+def test_render_invoice_with_line_discount(ops):
+    # One discounted line + one without: exercises the per-line rabatt sub-line and
+    # the "Total rabatt" summary row (red). Non-discounted line shows no rabatt field.
+    ops.set_company(name="Firma AB", org_nr="556677-8899")
+    cat = ops.create_category("Tjänster", "income", 3001, default_rate_code="25")
+    kid = ops.create_customer("business", company_name="Köpare AB")
+    inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+        due_date="2026-03-31",
+        lines=[{"description": "Konsult", "quantity_centi": 200, "unit_price_ore": 100000,
+                "rate_code": "25", "discount_pct_centi": 1500},
+               {"description": "Material", "quantity_centi": 100, "unit_price_ore": 50000,
+                "rate_code": "25"}])
+    full = ops.get_invoice(inv["invoice_id"])
+    assert full["ex_moms_ore"] == 170000 + 50000        # line 1 discounted, line 2 not
+    assert full["lines"][0]["discount_pct_centi"] == 1500
+    pdf = render_invoice_pdf(full)
+    assert pdf[:4] == b"%PDF" and len(pdf) > 800
+
+
 def test_render_credit_note(ops):
     ops.set_company(name="Räksmörgås AB", org_nr="556677-8899")
     cat = ops.create_category("Tjänster", "income", 3001)

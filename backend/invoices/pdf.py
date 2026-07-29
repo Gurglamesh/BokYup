@@ -140,16 +140,17 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         pdf.cell(W * frac, 7, _s(title), border="B", align=align, fill=True)
     ty += 7
     pdf.set_font("Helvetica", "", 9)
+    total_rabatt = 0
     for ln in lines:
         qty = f"{_qty(ln['quantity_centi'])} {ln.get('unit') or ''}".strip()
         desc = ln["description"]
-        disc = ln.get("discount_pct_centi") or 0
-        if disc:
-            # à-pris stays the list price; belopp is discounted — spell out the rabatt.
-            pct = (f"{disc / 100:.2f}".rstrip("0").rstrip(".")).replace(".", ",")
-            desc += f"  (−{pct} % rabatt)"
         if ln.get("reduction_type"):
             desc += f"  ({ln['reduction_type'].upper()})"     # mark RUT/ROT eligible lines
+        disc = ln.get("discount_pct_centi") or 0
+        # Ordinary line total (à-pris × antal, before rabatt); Belopp is the net.
+        gross_ex = round(ln["quantity_centi"] * ln["unit_price_ore"] / 100)
+        rabatt = gross_ex - ln["ex_moms_ore"]
+        total_rabatt += rabatt
         cells = [(desc, 0.40, "L"), (qty, 0.10, "R"),
                  (_kr(ln["unit_price_ore"]), 0.16, "R"),
                  (_RATE_LABEL.get(ln["rate_code"], ln["rate_code"]), 0.12, "R"),
@@ -158,6 +159,14 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         for val, frac, align in cells:
             pdf.cell(W * frac, 6, _s(val), border="B", align=align)
         ty += 6
+        # A rabatt sub-line, only for lines that actually carry a discount (in red).
+        if disc:
+            pct = (f"{disc / 100:.2f}".rstrip("0").rstrip(".")).replace(".", ",")
+            pdf.set_font("Helvetica", "", 8); pdf.set_text_color(200, 0, 0)
+            pdf.set_xy(pdf.l_margin + W * 0.02, ty)
+            pdf.cell(0, 4, _s(f"Rabatt {pct} %  (ord. {_kr(gross_ex)})  −{_kr(rabatt)} kr"))
+            pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 9)
+            ty += 4
 
     # ---- moms summary per rate + totals -------------------------------------
     by_rate: dict[str, list[int]] = {}
@@ -167,6 +176,11 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     ty += 4
     rx = pdf.l_margin + W * 0.55
     rw = W * 0.45
+    # Total rabatt (summed over all lines), only shown when a discount exists — in red.
+    if total_rabatt:
+        pdf.set_text_color(200, 0, 0)
+        _kv(pdf, rx, ty, rw, "Total rabatt", "-" + _kr(total_rabatt) + " kr"); ty += 6
+        pdf.set_text_color(0, 0, 0)
     for rate, (ex, mm) in sorted(by_rate.items()):
         _kv(pdf, rx, ty, rw, f"Moms {_RATE_LABEL.get(rate, rate)} (underlag {_kr(ex)})", _kr(mm))
         ty += 6
