@@ -526,13 +526,14 @@ class TestInvoices:
         s = client.get(f"/books/{book}/customers/{kid}/support").json()
         assert s["earned_active_minutes"] == 30 and s["remaining_minutes"] == 30
         assert len(s["active_invoices"]) == 1
-        # quick-deduct 60, then add 20 -> remaining 30-60+20 = -10
+        # quick-deduct 60, then add 20 -> net used 40 vs earned 30; remaining floors at 0
         assert client.post(f"/books/{book}/customers/{kid}/support",
                            json={"minutes": 60, "kind": "deduction"}).status_code == 201
         client.post(f"/books/{book}/customers/{kid}/support",
                     json={"minutes": 20, "kind": "addition", "note": "bonus"})
         s = client.get(f"/books/{book}/customers/{kid}/support").json()
-        assert s["remaining_minutes"] == -10
+        assert s["remaining_minutes"] == 0        # floored, though net used (40) > earned (30)
+        assert s["used_minutes"] == 40            # the real over-use is still visible
         assert len(s["ledger"]) == 2 and s["ledger"][0]["kind"] == "addition"
         # the PDF carries the support text block
         pdf = client.get(f"/books/{book}/invoices/1/pdf")

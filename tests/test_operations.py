@@ -613,8 +613,10 @@ class TestInvoices:
         ops.conn.execute("UPDATE invoice SET support_expiry_date='2020-01-01' "
                          "WHERE invoice_number=1")
         ops.conn.commit()
-        # now only the 15-min invoice is active; earned 15, used 35 -> remaining -20
-        assert ops.support_balance(kid)["earned_active_minutes"] == 15
+        # now only the 15-min invoice is active; earned 15, used 35 -> remaining floors at 0
+        bal2 = ops.support_balance(kid)
+        assert bal2["earned_active_minutes"] == 15 and bal2["used_minutes"] == 35
+        assert bal2["remaining_minutes"] == 0
 
     def test_support_entry_validation(self, ops):
         cat, kid = self._setup(ops)

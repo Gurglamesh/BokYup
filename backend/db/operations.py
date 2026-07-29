@@ -470,7 +470,9 @@ class BookOps:
             "used_minutes": used,                      # net (deductions − additions)
             "deductions_minutes": ded,
             "additions_minutes": add,
-            "remaining_minutes": earned_active - used,
+            # Floored at 0: over-using a customer's time is allowed (the ledger records
+            # it in full) but the balance never shows negative.
+            "remaining_minutes": max(0, earned_active - used),
             "active_invoices": active,
         }
 
