@@ -60,6 +60,24 @@ def test_render_invoice_with_line_discount(ops):
     assert pdf[:4] == b"%PDF" and len(pdf) > 800
 
 
+def test_render_ores_rounding(ops):
+    # inc 658,75 -> the faktura shows an "Öresavrundning" row and a whole-krona total,
+    # while underlag/moms stay exact (per Skatteverket). Uses _round_krona/_pay_block.
+    from backend.invoices.pdf import _round_krona
+    assert _round_krona(65875) == 65900 and _round_krona(65831) == 65800
+    ops.set_company(name="Firma AB", org_nr="556677-8899")
+    cat = ops.create_category("Försäljning", "income", 3001, default_rate_code="25")
+    kid = ops.create_customer("business", company_name="Köpare AB")
+    inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+        due_date="2026-03-31",
+        lines=[{"description": "Vara", "quantity_centi": 100, "unit_price_ore": 52700,
+                "rate_code": "25"}])
+    full = ops.get_invoice(inv["invoice_id"])
+    assert full["inc_moms_ore"] == 65875        # not whole kronor
+    pdf = render_invoice_pdf(full)
+    assert pdf[:4] == b"%PDF" and len(pdf) > 800
+
+
 def test_render_credit_note(ops):
     ops.set_company(name="Räksmörgås AB", org_nr="556677-8899")
     cat = ops.create_category("Tjänster", "income", 3001)

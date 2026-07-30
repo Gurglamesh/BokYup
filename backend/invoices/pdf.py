@@ -31,6 +31,15 @@ def _qty(centi: int) -> str:
     return f"{centi / 100:.2f}".replace(".", ",")
 
 
+def _round_krona(ore: int) -> int:
+    """Öresavrundning (avrundningslagen): to the nearest whole krona, 1–49 öre down,
+    50–99 up. Mirrors backend.db.operations._round_to_krona (kept local so the PDF
+    renderer stays import-light under Pyodide)."""
+    if ore >= 0:
+        return ((ore + 50) // 100) * 100
+    return -(((-ore + 50) // 100) * 100)
+
+
 def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     """Return PDF bytes for the dict returned by BookOps.get_invoice().
 
@@ -231,12 +240,11 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
             _kv(pdf, rx, ty, rw, "Begärd skattereduktion RUT", _kr(rut_total)); ty += 6
         if rot_total:
             _kv(pdf, rx, ty, rw, "Begärd skattereduktion ROT", _kr(rot_total)); ty += 6
-        _kv(pdf, rx, ty, rw, "Att betala", _kr(invoice["inc_moms_ore"] - husavdrag), bold=True)
-        ty += 8
+        ty = _pay_block(pdf, rx, ty, rw, "Att betala", invoice["inc_moms_ore"] - husavdrag)
     else:
         pay_label = "Att återfå" if is_credit else "Att betala"
         pay_amount = -invoice["inc_moms_ore"] if is_credit else invoice["inc_moms_ore"]
-        _kv(pdf, rx, ty, rw, pay_label, _kr(pay_amount), bold=True); ty += 8
+        ty = _pay_block(pdf, rx, ty, rw, pay_label, pay_amount)
 
     # ---- payment methods + terms --------------------------------------------
     ty += 4
@@ -307,6 +315,18 @@ def _kv(pdf, x, y, w, label, value, bold=False):
     pdf.set_font("Helvetica", "B" if bold else "", 9)
     pdf.set_xy(x, y); pdf.cell(w * 0.6, 6, _s(label))
     pdf.set_xy(x + w * 0.6, y); pdf.cell(w * 0.4, 6, _s(value), align="R")
+
+
+def _pay_block(pdf, rx, ty, rw, label, exact_ore):
+    """Render the summa att betala with öresavrundning: if the exact amount is not
+    already whole kronor, show a separate "Öresavrundning" row (the moms/underlag are
+    NOT rounded — per Skatteverket's ställningstagande) and the rounded total."""
+    rounded = _round_krona(exact_ore)
+    diff = rounded - exact_ore
+    if diff:
+        _kv(pdf, rx, ty, rw, "Öresavrundning", _kr(diff)); ty += 6
+    _kv(pdf, rx, ty, rw, label, _kr(rounded), bold=True)
+    return ty + 8
 
 
 def _s(text) -> str:

@@ -485,6 +485,27 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       quick-deduct buttons (15/30/60), a free-value add field + note, the full history log,
       and a per-invoice earned breakdown. Migration backfills existing (non-follow-up)
       invoices. Tests pass (290); browser-smoke-tested (deduct + add + history).
+- [x] **Per-line rabatt shown on the faktura PDF (2026-07).** A discounted invoice line
+      now renders a red sub-line "Rabatt N % (ord. X) −Y kr" (ordinary line total,
+      discount %, and rabatt amount); the à-pris stays the list price and Belopp is the
+      net. A red **"Total rabatt"** row appears in the summary (before moms), only when at
+      least one line carries a discount. Display-only — booking unchanged (`invoices/
+      pdf.py`).
+- [x] **Öresavrundning enligt avrundningslagen (2026-07).** A faktura's *summa att betala*
+      is rounded to whole kronor (1–49 öre down, 50–99 up; `_round_to_krona`). Per
+      Skatteverkets ställningstagande the avrundning may **never** touch the
+      beskattningsunderlag or momsbeloppet — those stay exact; the öre difference is booked
+      to **3740 Öres- och kronutjämning** (config `account_ores_kronutjamning`), matching
+      Skatteverket's own example (527 kr ex → 1510/1930 659, 3001 −527, 2610 −131,75, 3740
+      −0,25). **Kontantmetod** rounds at payment (bank = whole kronor, income+moms exact,
+      3740 = diff — `_book_kontant_recognition(..., ores_ore=)` shaves the öre; applied when
+      a payment closes the invoice, so partials stay exact). **Fakturametod** books the
+      kundfordran incl. öre at issue and realises the öresutjämning at payment (same end
+      state). **RUT/ROT**: only the *kundens del* (inc − husavdrag) is rounded; 1513
+      Skatteverkets del stays exact and the register_payment/SKV-payout flow is otherwise
+      unchanged. Öresavrundning applies to **fakturor only** — plain (non-invoice) incomes
+      book exact. The faktura PDF shows an **"Öresavrundning"** row + the whole-krona *Att
+      betala* (`_pay_block`). Every verifikation balances. Tests pass (297).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

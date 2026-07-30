@@ -1192,3 +1192,90 @@ class TestPartialSettlement:
         for v in ops.conn.execute("SELECT id FROM verifikation"):
             assert sum(p["amount_ore"] for p in ops.conn.execute(
                 "SELECT amount_ore FROM posting WHERE verifikation_id=?", (v["id"],))) == 0
+
+
+class TestOresavrundning:
+    """Öresavrundning (avrundningslagen): the customer's summa att betala is rounded to
+    whole kronor, but per Skatteverket the beskattningsunderlag and moms are NEVER
+    rounded — the öre difference goes to 3740 Öres- och kronutjämning."""
+
+    def _net(self, ops):
+        return {r["bas_konto"]: r["s"] for r in ops.conn.execute(
+            "SELECT bas_konto, SUM(amount_ore) s FROM posting GROUP BY bas_konto")}
+
+    def _cust(self, ops):
+        return ops.create_customer("business", company_name="Kund AB")
+
+    def test_round_helper_direction(self):
+        from backend.db.operations import _round_to_krona
+        assert _round_to_krona(0) == 0
+        assert _round_to_krona(31) == 0 and _round_to_krona(49) == 0        # 1-49 down
+        assert _round_to_krona(50) == 100 and _round_to_krona(99) == 100    # 50-99 up
+        assert _round_to_krona(558469) == 558500 and _round_to_krona(558431) == 558400
+        assert _round_to_krona(-31) == 0 and _round_to_krona(-70) == -100
+
+    def test_fakturametod_matches_skatteverket_example(self, ops):
+        # SKV example: 527 kr ex, 25 % moms 131,75 -> inc 658,75 -> öresutjämnas till 659.
+        ops.set_accounting_method("fakturametod")
+        cat = ops.create_category("Försäljning", "income", 3001, default_rate_code="25")
+        inv = ops.create_invoice(customer_id=self._cust(ops), category_id=cat,
+            invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Vara", "quantity_centi": 100, "unit_price_ore": 52700,
+                    "rate_code": "25"}])
+        assert ops.get_invoice(inv["invoice_id"])["inc_moms_ore"] == 65875
+        ops.pay_invoice(inv["invoice_id"], date="2026-03-15")
+        net = self._net(ops)
+        assert net[3001] == -52700              # beskattningsunderlag EXACT
+        assert net[2610] == -13175              # moms EXACT (131,75)
+        assert net[1930] == 65900               # bank = 659 kr (rounded)
+        assert net[3740] == -25                 # öresutjämning 0,25 kr kredit
+        assert net[1510] == 0                   # kundfordran cleared
+        for v in ops.conn.execute("SELECT id FROM verifikation"):
+            assert sum(p["amount_ore"] for p in ops.conn.execute(
+                "SELECT amount_ore FROM posting WHERE verifikation_id=?", (v["id"],))) == 0
+
+    def test_kontantmetod_rounds_at_payment(self, ops):
+        # inc 5584,69 (Anna) -> att betala 5585,00; base/moms exact, öre -> 3740.
+        cat = ops.create_category("Trädgård", "income", 3001, default_rate_code="25")
+        inv = ops.create_invoice(customer_id=self._cust(ops), category_id=cat,
+            invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Växter", "quantity_centi": 100, "unit_price_ore": 350000, "rate_code": "25"},
+                   {"description": "Plantering", "quantity_centi": 100, "unit_price_ore": 72000, "rate_code": "25"},
+                   {"description": "Mil", "quantity_centi": 100, "unit_price_ore": 24775, "rate_code": "25"}])
+        assert ops.get_invoice(inv["invoice_id"])["inc_moms_ore"] == 558469
+        ops.pay_invoice(inv["invoice_id"], date="2026-03-15")
+        net = self._net(ops)
+        assert net[3001] == -446775 and net[2610] == -111694    # underlag + moms EXACT
+        assert net[1930] == 558500                              # bank = 5585,00
+        assert net[3740] == 558469 - 558500                     # öresutjämning +0,31 debet
+
+    def test_rut_customer_part_rounded_husavdrag_exact(self, ops):
+        cat = ops.create_category("Städ", "income", 3011, default_rate_code="25")
+        kid = ops.create_customer("private", first_name="Anna", last_name="S",
+                                  personnummer="811218-9876")
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+            due_date="2026-03-31",
+            lines=[{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 446775,
+                    "rate_code": "25", "reduction_type": "rut"}],
+            recipients=[{"first_name": "Anna", "last_name": "S", "personnummer": "811218-9876",
+                         "share_pct": 100}])
+        full = ops.get_invoice(inv["invoice_id"])
+        rut = full["rut_total_ore"]; cust_exact = full["inc_moms_ore"] - rut
+        r = ops.register_payment(full["transaktion_id"], "2026-03-10")
+        p = {row["bas_konto"]: row["amount_ore"] for row in ops.conn.execute(
+            "SELECT bas_konto, amount_ore FROM posting WHERE verifikation_id=?", (r["verifikation_id"],))}
+        from backend.db.operations import _round_to_krona
+        assert p[1930] == _round_to_krona(cust_exact)           # kundens del rounded
+        assert p[1513] == rut                                   # Skatteverkets del EXACT
+        assert p[3011] == -446775 and p[2610] == -111694        # underlag + moms EXACT
+        assert p[3740] == cust_exact - _round_to_krona(cust_exact)
+        assert sum(p.values()) == 0
+
+    def test_whole_krona_invoice_has_no_ores_posting(self, ops):
+        cat = ops.create_category("T", "income", 3001, default_rate_code="25")
+        # ex 100000 @ 25 % -> inc 125000 (already whole kronor)
+        inv = ops.create_invoice(customer_id=self._cust(ops), category_id=cat,
+            invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "X", "quantity_centi": 100, "unit_price_ore": 100000, "rate_code": "25"}])
+        ops.pay_invoice(inv["invoice_id"], date="2026-03-15")
+        assert 3740 not in self._net(ops)                       # no öresavrundning needed

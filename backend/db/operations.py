@@ -145,6 +145,15 @@ def support_minutes_earned(total_inc_ore: int) -> int:
     return (total_inc_ore // SUPPORT_STEP_ORE) * SUPPORT_MINUTES_PER_STEP
 
 
+def _round_to_krona(ore: int) -> int:
+    """Öresavrundning: round an öre amount to the nearest whole krona (0–49 öre down,
+    50–99 öre up). The faktura requests whole kronor; the booked amount is this final,
+    already-rounded amount (no separate 3740 posting in this flow — see CLAUDE.md)."""
+    if ore >= 0:
+        return ((ore + 50) // 100) * 100
+    return -(((-ore + 50) // 100) * 100)
+
+
 def _add_months(iso_date: str, months: int) -> str:
     """Add whole months to a YYYY-MM-DD date, clamping the day to the target month's
     last day (e.g. 2024-02-29 + 36 months -> 2027-02-28)."""
@@ -705,12 +714,19 @@ class BookOps:
         # Fakturametod: the invoice was already booked at issue (kundfordran). Payment
         # only settles the receivable (bank <- kundfordran); income/moms already booked.
         if t["verifikation_id"] is not None:
-            cust_part = inc - rut
+            # Fakturametod: settle the kundfordran (booked exact at issue). Öresavrundning
+            # — the customer pays whole kronor, so the bank gets the rounded amount and the
+            # öre difference clears against 3740 (moms/underlag untouched, per Skatteverket).
+            cust_exact = inc - rut
+            round_cust = _round_to_krona(cust_exact)
             postings = []
-            if cust_part:
-                postings.append((self._sys_account("account_bank"), cust_part, "inbetalning"))
-                postings.append((self._sys_account("account_kundfordran"), -cust_part,
+            if cust_exact:
+                postings.append((self._sys_account("account_bank"), round_cust, "inbetalning"))
+                postings.append((self._sys_account("account_kundfordran"), -cust_exact,
                                  "kvitta kundfordran"))
+                if round_cust != cust_exact:
+                    postings.append((self._sys_account("account_ores_kronutjamning"),
+                                     cust_exact - round_cust, "öresavrundning"))
             with self.conn:
                 vid, number = self._post_verifikation(
                     payment_date, payment_date, "Betalning faktura", postings)
@@ -730,10 +746,25 @@ class BookOps:
                 postings.append((self._sys_account("account_ingaende_moms"), sum_moms, "ingående moms"))
             postings.append((self._sys_account("account_bank"), -inc, "betalning"))
             text = "Utgift"
-        else:  # 'out' — sale
-            postings = [(self._sys_account("account_bank"), inc - rut, "inbetalning")]
-            if rut:
-                postings.append((self._sys_account("account_rut_fordran"), rut, "husavdrag fordran"))
+        elif rut:  # 'out' — RUT/ROT faktura: öresavrundning on the customer's summa att betala
+            # Per avrundningslagen the customer pays whole kronor, but per Skatteverket's
+            # ställningstagande the avrundning may NOT touch the beskattningsunderlag or the
+            # moms — those stay exact. The öre difference goes to 3740 Öres- och
+            # kronutjämning, exactly like the "Öresavrundning"-raden on the faktura.
+            cust_exact = inc - rut          # kundens del (Skatteverkets del = rut on 1513)
+            round_cust = _round_to_krona(cust_exact)
+            postings = [(self._sys_account("account_bank"), round_cust, "inbetalning"),
+                        (self._sys_account("account_rut_fordran"), rut, "husavdrag fordran")]
+            postings.extend((k, -ex_k, "försäljning") for k, ex_k in income_splits)
+            for rate_code, m in moms_by_rate.items():
+                if m and rate_code in _UTG_MOMS_KEY:
+                    postings.append((self._sys_account(_UTG_MOMS_KEY[rate_code]), -m, f"utgående moms {rate_code}%"))
+            if round_cust != cust_exact:
+                postings.append((self._sys_account("account_ores_kronutjamning"),
+                                 cust_exact - round_cust, "öresavrundning"))
+            text = "Försäljning"
+        else:  # 'out' — plain sale (not a faktura): booked exact, no öresavrundning
+            postings = [(self._sys_account("account_bank"), inc, "inbetalning")]
             postings.extend((k, -ex_k, "försäljning") for k, ex_k in income_splits)
             for rate_code, m in moms_by_rate.items():
                 if m and rate_code in _UTG_MOMS_KEY:
@@ -1743,17 +1774,24 @@ class BookOps:
         date = date or _now()[:10]
         tid = inv["transaktion_id"]
         text = f"Betalning faktura {inv['invoice_number']}"
+        # Öresavrundning: when this payment settles the invoice in full, the customer pays
+        # a whole-krona summa att betala. The öre difference (never the underlag/moms) is
+        # shaved off the bank into 3740; a partly-paid invoice books exact until it closes.
+        closes = amount == bal["outstanding_ore"]
+        ores = inv["inc_moms_ore"] - _round_to_krona(inv["inc_moms_ore"]) if closes else 0
 
         if self.get_accounting_method() == "fakturametod":
-            postings = [(self._sys_account("account_bank"), amount, "inbetalning"),
+            postings = [(self._sys_account("account_bank"), amount - ores, "inbetalning"),
                         (self._sys_account("account_kundfordran"), -amount, "kvitta kundfordran")]
+            if ores:
+                postings.append((self._sys_account("account_ores_kronutjamning"), ores, "öresavrundning"))
             with self.conn:
                 vid, num = self._post_verifikation(date, date, text, postings)
                 self._record_invoice_event(invoice_id, "payment", amount, date, vid)
                 self._sync_invoice_paid(invoice_id, tid, date)
         else:  # kontantmetod: recognise income + moms proportionally as cash arrives
             vid, num = self._book_kontant_recognition(tid, bal["paid_ore"], amount,
-                                                      inv["inc_moms_ore"], date, +1, text)
+                                                      inv["inc_moms_ore"], date, +1, text, ores_ore=ores)
             with self.conn:
                 self._record_invoice_event(invoice_id, "payment", amount, date, vid)
                 self._sync_invoice_paid(invoice_id, tid, date)
@@ -2017,17 +2055,21 @@ class BookOps:
                      sign * s["moms_s"], sign * (s["ex_s"] + s["moms_s"])))
 
     def _book_kontant_recognition(self, transaktion_id, recognized_before, amount, total_inc,
-                                  date, sign, text) -> tuple[int, int]:
+                                  date, sign, text, ores_ore=0) -> tuple[int, int]:
         """Kontantmetod: book bank +/- amount against income + moms recognised for the
         proportional slice (income split per line category), plus the report-clone.
-        Returns (verifikation_id, number)."""
+        `ores_ore` (öresavrundning) shaves that many öre off the bank into 3740 so the
+        customer pays whole kronor while income + moms stay exact. Returns (vid, number)."""
         slices = self._recognition_slice(transaktion_id, recognized_before, amount, total_inc)
-        postings = [(self._sys_account("account_bank"), sign * amount, "inbetalning")]
+        postings = [(self._sys_account("account_bank"), sign * (amount - ores_ore), "inbetalning")]
         for konto, ex in sorted(self._group_income(transaktion_id, slices).items()):
             postings.append((konto, -sign * ex, "försäljning"))
         for rate_code, moms in sorted(self._group_moms(slices).items()):
             postings.append((self._sys_account(_UTG_MOMS_KEY[rate_code]), -sign * moms,
                              f"utgående moms {rate_code}%"))
+        if ores_ore:
+            postings.append((self._sys_account("account_ores_kronutjamning"),
+                             sign * ores_ore, "öresavrundning"))
         with self.conn:
             vid, num = self._post_verifikation(date, date, text, postings)
             self._book_recognition_clone(transaktion_id, vid, date, slices, sign, "fakturabetalning")
@@ -2041,6 +2083,9 @@ class BookOps:
         payment settles the receivable. Must be a sale (direction 'out').
         """
         ex, moms_by_rate, inc = self._sum_moms(transaktion_id)
+        # The receivable is booked EXACT at issue (fakturametod moms lands in the
+        # invoice's period). Öresavrundning happens at payment: the bank gets the
+        # whole-krona amount and the öre difference goes to 3740 (see register_payment).
         cust_part = inc - rut_ore
         postings = []
         if cust_part:
