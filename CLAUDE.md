@@ -506,6 +506,25 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       unchanged. Öresavrundning applies to **fakturor only** — plain (non-invoice) incomes
       book exact. The faktura PDF shows an **"Öresavrundning"** row + the whole-krona *Att
       betala* (`_pay_block`). Every verifikation balances. Tests pass (297).
+- [x] **Skatt-flik: uppskattad årsskatt till Skatteverket (schema v19, 2026-07).** A
+      **"Skatt"** tab estimates, for a fiscal year, what an **enskild näringsidkare** should
+      set aside for Skatteverket, broken down per tax: **moms** (net utgående − ingående
+      from the momsdeklaration), **egenavgifter**, **kommunal** and **statlig** inkomstskatt.
+      `reports/tax.py` (`tax_estimate`) reads the year's moms and the **årets resultat** (the
+      förenklat årsbokslut's `arets_resultat_ore`, off the raw posting table so manual
+      verifikationer + öresavrundning are included) and applies the NE/INK1 flow:
+      schablonavdrag för egenavgifter (25 %) → egenavgifter (28,97 %) on the reduced
+      underlag → taxerad näringsinkomst − grundavdrag → kommunalskatt; statlig 20 % over
+      brytpunkten. **All rates are editable config** (they change yearly / per kommun; centi-
+      percent + öre) — `egenavgift_pct_centi`, `egenavgift_schablon_pct_centi`,
+      `kommunal_skattesats_pct_centi`, `statlig_skatt_pct_centi`, `statlig_brytpunkt_ore`,
+      `grundavdrag_ore` (2025/2026 defaults; migration 19 seeds existing books).
+      `BookOps.tax_estimate/get_tax_config/set_tax_config`; API `GET /reports/tax`,
+      `GET/PUT /tax-config`. UI: the tab shows the överskott→beskattningsbar steps, a
+      per-tax breakdown + "att sätta undan totalt", and a collapsible editor for the rates.
+      It is a **hjälpmedel/uppskattning**, not a deklaration (grundavdrag, jobbskatteavdrag
+      and final egenavgifter are reconciled in INK1/slutskattebeskedet); AB and skattetabell-
+      upload are possible follow-ups. Tests pass (302).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

@@ -469,6 +469,29 @@ class TestReports:
         assert resp.status_code == 200
         assert "#VER A 1 20260210" in resp.text
 
+    def test_tax_estimate_and_config(self, client, book):
+        cfg = client.get(f"/books/{book}/tax-config").json()
+        assert cfg["kommunal_skattesats_pct_centi"] == 3237      # default
+        # edit a rate
+        upd = client.put(f"/books/{book}/tax-config",
+                         json={"kommunal_skattesats_pct_centi": 3000}).json()
+        assert upd["kommunal_skattesats_pct_centi"] == 3000
+        # a sale, then the year-end estimate
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Försäljning", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "ACME AB"}).json()["kundnummer"]
+        client.post(f"/books/{book}/incomes",
+                    json={"customer_id": kid, "category_id": cat,
+                          "lines": [{"rate_code": "25", "amount_ore": 50000000}],
+                          "trans_date": "2026-03-01", "paid_date": "2026-03-01"})
+        est = client.get(f"/books/{book}/reports/tax",
+                         params={"start": "2026-01-01", "end": "2026-12-31"}).json()
+        assert est["overskott_ore"] == 40000000                 # ex-moms income
+        assert est["moms_ore"] == 10000000                      # utgående, no purchases
+        assert [l["key"] for l in est["lines"]] == ["moms", "egenavgifter", "kommunalskatt", "statlig"]
+        assert est["total_ore"] > 0
+
 
 # ---------------------------------------------------------------------------
 # Export / import over the API

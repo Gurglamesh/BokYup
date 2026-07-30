@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -501,6 +501,16 @@ _DEFAULT_CONFIG = {
     # than this many ören, treat it as pure rounding and book the diff to 3740. A
     # larger underpayment is a partial payout (a follow-up receivable on the customer).
     "rut_skv_rounding_tolerance_ore": "49",  # 0,49 kr
+    # Year-end tax estimate for an ENSKILD NÄRINGSIDKARE (the "Skatt"-tab). All rates
+    # are editable config because they change yearly and vary by kommun. Percentages are
+    # stored as centi-percent (28,97 % -> 2897); money as öre. Defaults ~2025/2026 — the
+    # user must set their own kommunal skattesats and check the year's values.
+    "egenavgift_pct_centi": "2897",              # egenavgifter 28,97 %
+    "egenavgift_schablon_pct_centi": "2500",     # schablonavdrag för egenavgifter 25 %
+    "kommunal_skattesats_pct_centi": "3237",     # genomsnittlig kommunalskatt (set your kommun)
+    "statlig_skatt_pct_centi": "2000",           # statlig inkomstskatt 20 % över brytpunkten
+    "statlig_brytpunkt_ore": "64310000",         # brytpunkt statlig skatt (643 100 kr, 2025)
+    "grundavdrag_ore": "1650000",                # grundavdrag (schablon, 16 500 kr — editable)
 }
 
 
@@ -708,6 +718,14 @@ _MIGRATIONS: dict[int, str] = {
             support_minutes_earned = (inc_moms_ore / 50000) * 15,
             support_expiry_date = date(invoice_date, '+36 months')
             WHERE husavdrag_shortfall_ore = 0;
+    """,
+    19: """
+        INSERT OR IGNORE INTO config(key, value) VALUES ('egenavgift_pct_centi', '2897');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('egenavgift_schablon_pct_centi', '2500');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('kommunal_skattesats_pct_centi', '3237');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('statlig_skatt_pct_centi', '2000');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('statlig_brytpunkt_ore', '64310000');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('grundavdrag_ore', '1650000');
     """,
 }
 

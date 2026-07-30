@@ -462,6 +462,16 @@ class AppFacade:
         ops = self._ops(p["book_id"])
         return arsbokslut_report.forenklat_arsbokslut(ops.conn, q["start"], q["end"])
 
+    def h_report_tax(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        return ops.tax_estimate(q["start"], q["end"])
+
+    def h_get_tax_config(self, p, b, q):
+        return self._ops(p["book_id"]).get_tax_config()
+
+    def h_set_tax_config(self, p, b, q):
+        return self._ops(p["book_id"]).set_tax_config(b or {})
+
     def h_report_sie(self, p, b, q):
         ops = self._ops(p["book_id"])
         text = sie_report.export_sie(
@@ -673,6 +683,9 @@ _route("DELETE", "/books/{book_id}/receipts/{receipt_id}", "h_delete_receipt")
 _route("GET", "/books/{book_id}/reports/momsdeklaration", "h_report_moms")
 _route("GET", "/books/{book_id}/reports/result", "h_report_result")
 _route("GET", "/books/{book_id}/reports/arsbokslut", "h_report_arsbokslut")
+_route("GET", "/books/{book_id}/reports/tax", "h_report_tax")
+_route("GET", "/books/{book_id}/tax-config", "h_get_tax_config")
+_route("PUT", "/books/{book_id}/tax-config", "h_set_tax_config")
 _route("GET", "/books/{book_id}/reports/sie", "h_report_sie")
 
 _route("GET", "/books/{book_id}/accounting-method", "h_get_accounting_method")

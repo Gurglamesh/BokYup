@@ -1241,6 +1241,32 @@ class BookOps:
                 "INSERT INTO config(key, value) VALUES ('bokforingsmetod', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (method,))
 
+    # ---- year-end tax estimate (enskild näringsidkare) --------------------------
+    def tax_estimate(self, fy_start: str, fy_end: str) -> dict:
+        """Estimate the year's tax owed to Skatteverket, broken down per tax."""
+        from backend.reports import tax as tax_report
+        return tax_report.tax_estimate(self.conn, fy_start, fy_end)
+
+    def get_tax_config(self) -> dict:
+        """The editable tax rates used by the estimate (config, integer öre / centi-%)."""
+        from backend.reports import tax as tax_report
+        return {k: int(self._config(k)) for k in tax_report.CONFIG_KEYS}
+
+    def set_tax_config(self, updates: dict) -> dict:
+        """Update one or more tax-rate config values (whitelisted, non-negative ints)."""
+        from backend.reports import tax as tax_report
+        with self.conn:
+            for key, val in updates.items():
+                if key not in tax_report.CONFIG_KEYS:
+                    raise ValueError(f"Unknown tax config key: {key}")
+                iv = int(val)
+                if iv < 0:
+                    raise ValueError(f"{key} cannot be negative")
+                self.conn.execute(
+                    "INSERT INTO config(key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(iv)))
+        return self.get_tax_config()
+
     def get_company(self) -> dict:
         row = self.conn.execute(
             "SELECT id, name, org_nr, vat_nr, address, email, phone, f_skatt, updated_at, "

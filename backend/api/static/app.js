@@ -285,6 +285,7 @@ const SECTIONS = [
   ["huvudbok", "Huvudbok"],
   ["reports", "Rapporter"],
   ["arsbokslut", "Årsbokslut"],
+  ["skatt", "Skatt"],
   ["bokslut", "Bokslut"],
   ["settings", "Inställningar"],
 ];
@@ -743,6 +744,83 @@ const SECTION_RENDERERS = {
   },
 
   // ----- Förenklat årsbokslut (SKV 2150) -----
+  async skatt(panel) {
+    const year = new Date().getFullYear();
+    const fyStart = el("input", { type: "date", value: `${year}-01-01` });
+    const fyEnd = el("input", { type: "date", value: `${year}-12-31` });
+    const out = el("div", {});
+    panel.appendChild(el("h2", {}, "Skatt att betala (uppskattning)"));
+    panel.appendChild(el("p", { class: "muted" },
+      "Enskild näringsidkare. En uppskattning av vad som bör sättas undan till "
+      + "Skatteverket för räkenskapsåret — moms, egenavgifter och inkomstskatt — "
+      + "beräknad ur din bokföring och satserna nedan. Detta är ett hjälpmedel, inte en "
+      + "deklaration: grundavdrag, jobbskatteavdrag och de slutliga egenavgifterna stäms "
+      + "av i INK1/slutskattebeskedet."));
+    panel.appendChild(el("div", { class: "row" },
+      wrap("Räkenskapsår fr.o.m.", fyStart), wrap("t.o.m.", fyEnd),
+      el("div", { style: "align-self:flex-end" },
+        el("button", { class: "btn brand", onclick: () => guard(draw) }, "Visa"))));
+
+    // --- editable tax rates (config; percentages stored as centi-percent) ---
+    const cfg = await api("GET", `/books/${bid()}/tax-config`);
+    const numIn = (v) => el("input", { type: "number", step: "0.01", value: String(v / 100), style: "width:110px" });
+    const fEA = numIn(cfg.egenavgift_pct_centi), fSch = numIn(cfg.egenavgift_schablon_pct_centi);
+    const fKom = numIn(cfg.kommunal_skattesats_pct_centi), fStat = numIn(cfg.statlig_skatt_pct_centi);
+    const fBryt = numIn(cfg.statlig_brytpunkt_ore), fGrund = numIn(cfg.grundavdrag_ore);
+    panel.appendChild(el("details", { style: "margin:14px 0" },
+      el("summary", { style: "cursor:pointer;font-weight:600" }, "Skattesatser (redigerbara)"),
+      el("p", { class: "muted" },
+        "Satserna ändras årligen och varierar per kommun — kontrollera dina värden hos "
+        + "Skatteverket. Ange procent (t.ex. 32,37) och kronor."),
+      el("div", { class: "row" },
+        wrap("Egenavgifter %", fEA), wrap("Schablonavdrag %", fSch),
+        wrap("Kommunalskatt %", fKom), wrap("Statlig skatt %", fStat)),
+      el("div", { class: "row" },
+        wrap("Brytpunkt statlig (kr)", fBryt), wrap("Grundavdrag (kr)", fGrund),
+        el("div", { style: "align-self:flex-end" },
+          el("button", { class: "btn", onclick: () => guard(save) }, "Spara satser")))));
+    panel.appendChild(out);
+
+    const pctc = (inp) => Math.round(parseFloat(inp.value || "0") * 100);   // % -> centi-percent
+    async function save() {
+      await api("PUT", `/books/${bid()}/tax-config`, {
+        egenavgift_pct_centi: pctc(fEA), egenavgift_schablon_pct_centi: pctc(fSch),
+        kommunal_skattesats_pct_centi: pctc(fKom), statlig_skatt_pct_centi: pctc(fStat),
+        statlig_brytpunkt_ore: pctc(fBryt), grundavdrag_ore: pctc(fGrund),
+      });
+      toast("Skattesatser sparade");
+      await draw();
+    }
+
+    const pctLabel = (c) => c == null ? "" :
+      (c / 100).toLocaleString("sv-SE", { minimumFractionDigits: 0, maximumFractionDigits: 2 }) + " %";
+    const kv = (k, ore) => el("div", {}, el("div", { class: "k" }, k), el("div", { class: "v" }, toKr(ore) + " kr"));
+    async function draw() {
+      out.innerHTML = "";
+      const r = await api("GET", `/books/${bid()}/reports/tax?start=${fyStart.value}&end=${fyEnd.value}`);
+      out.appendChild(el("div", { class: "box", style: "margin-top:14px" },
+        el("div", { class: "row" },
+          kv("Årets överskott (resultat)", r.overskott_ore),
+          kv("− Schablonavdrag egenavgifter", r.schablonavdrag_ore),
+          kv("= Taxerad näringsinkomst", r.taxerad_inkomst_ore),
+          kv("− Grundavdrag", r.grundavdrag_ore),
+          kv("= Beskattningsbar inkomst", r.beskattningsbar_inkomst_ore))));
+      const row = (label, ore, note, bold) => el("tr", { style: bold ? "border-top:2px solid var(--border,#ccc)" : "" },
+        el("td", { style: bold ? "font-weight:700" : "" }, label),
+        el("td", { class: "num", style: "font-variant-numeric:tabular-nums" + (bold ? ";font-weight:700" : "") }, toKr(ore) + " kr"),
+        el("td", { class: "muted", style: "font-size:12px" }, note || ""));
+      const lines = r.lines.map((l) => row(
+        l.label + (l.pct_centi != null ? "  (" + pctLabel(l.pct_centi)
+          + (l.underlag_ore != null ? " på " + toKr(l.underlag_ore) + " kr" : "") + ")" : ""),
+        l.amount_ore, l.note));
+      out.appendChild(el("table", { style: "width:100%;margin-top:14px" },
+        el("thead", {}, el("tr", {}, el("th", {}, "Skatt"), el("th", { class: "num" }, "Belopp"), el("th", {}, ""))),
+        el("tbody", {}, lines,
+          row("Att sätta undan totalt", r.total_ore, "moms + egenavgifter + inkomstskatt", true))));
+    }
+    draw();
+  },
+
   async arsbokslut(panel) {
     const company = await api("GET", `/books/${bid()}/company`).catch(() => ({}));
     const year = new Date().getFullYear();

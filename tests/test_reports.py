@@ -163,3 +163,58 @@ class TestSieExport:
         assert "#RES 0 3001 -10.00" in text   # revenue result (credit balance, negative)
         # nothing booked before the year -> no opening balances
         assert "#IB 0" not in text
+
+
+# ---------------------------------------------------------------------------
+# Year-end tax estimate (enskild näringsidkare)
+# ---------------------------------------------------------------------------
+
+class TestTaxEstimate:
+    from backend.reports import tax as _tax_mod
+
+    def _big_year(self, ops):
+        # sale inc 500 000 kr -> ex 400 000 income; purchase inc 125 000 -> ex 100 000
+        # expense  =>  överskott 300 000 kr; moms netto 100 000 - 25 000 = 75 000 kr
+        _sale(ops, 50000000, "2026-03-01")
+        _purchase(ops, 12500000, "2026-04-01")
+
+    def test_breakdown_with_defaults(self, ops):
+        from backend.reports import tax as tax_mod
+        self._big_year(ops)
+        est = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
+        assert est["overskott_ore"] == 30000000
+        assert est["moms_ore"] == 7500000
+        assert est["schablonavdrag_ore"] == 7500000           # 25 % of 300 000
+        assert est["egenavgifter_ore"] == round(22500000 * 0.2897)
+        assert est["taxerad_inkomst_ore"] == 22500000
+        assert est["beskattningsbar_inkomst_ore"] == 22500000 - 1650000
+        assert est["kommunalskatt_ore"] == round((22500000 - 1650000) * 0.3237)
+        assert est["statlig_skatt_ore"] == 0                  # under brytpunkten
+        assert est["total_ore"] == (est["moms_ore"] + est["egenavgifter_ore"]
+                                    + est["kommunalskatt_ore"] + est["statlig_skatt_ore"])
+        assert [l["key"] for l in est["lines"]] == ["moms", "egenavgifter", "kommunalskatt", "statlig"]
+
+    def test_statlig_over_brytpunkt(self, ops):
+        from backend.reports import tax as tax_mod
+        ops.set_tax_config({"statlig_brytpunkt_ore": 10000000})   # brytpunkt 100 000 kr
+        self._big_year(ops)
+        est = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
+        # taxerad 225 000 - brytpunkt 100 000 = 125 000 over -> 20 %
+        assert est["statlig_skatt_ore"] == round((22500000 - 10000000) * 0.20)
+
+    def test_config_override_changes_estimate(self, ops):
+        from backend.reports import tax as tax_mod
+        self._big_year(ops)
+        ops.set_tax_config({"kommunal_skattesats_pct_centi": 3000})   # 30,00 %
+        est = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
+        assert est["kommunalskatt_ore"] == round((22500000 - 1650000) * 0.30)
+
+    def test_loss_year_has_no_income_tax(self, ops):
+        from backend.reports import tax as tax_mod
+        _sale(ops, 12500, "2026-03-01")            # small income
+        _purchase(ops, 125000, "2026-04-01")       # bigger expense -> loss
+        est = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
+        assert est["overskott_ore"] < 0
+        assert est["egenavgifter_ore"] == 0 and est["kommunalskatt_ore"] == 0
+        assert est["statlig_skatt_ore"] == 0
+        assert est["total_ore"] == est["moms_ore"]      # only moms
