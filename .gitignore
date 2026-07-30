@@ -23,4 +23,3 @@ phone/ios/
 # PyInstaller desktop build outputs
 /build/
 /dist/
-*.pdf
