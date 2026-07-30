@@ -55,14 +55,15 @@ CONFIG_FIELDS = [
 ]
 CONFIG_KEYS = [k for k, _, _ in CONFIG_FIELDS]
 
-# Jobbskatteavdrag 2026 (person under 66): the "belopp" is piecewise in prisbasbelopp;
-# the skattereduktion is (belopp − grundavdrag) × kommunalskattesatsen. Grundavdrag is
-# the standard piecewise schablon (rounded UP to whole 100 kr). Coefficients fitted to
-# Skatteverkets 2026 "Räkna ut din skatt" outputs (accurate to a few kronor). When the
-# year changes, refresh these from regeringens "Beräkningskonventioner 20XX" (which
-# publishes the jobbskatteavdrag / grundavdrag formulas) — SKV 152 was discontinued 2015.
-_JSA_BREAKS = (0.91, 3.24, 8.08)        # in prisbasbelopp
-_JSA_C2, _JSA_C3 = 0.3876, 0.2510       # slope in brackets 2 and 3
+# Jobbskatteavdrag 2026 (person under 66), Beräkningskonventioner 2026 Tabell 2.10: the
+# "belopp" is piecewise in prisbasbelopp; the skattereduktion is (belopp − grundavdrag)
+# × kommunalskattesatsen. There is NO high-income phase-out in the 2026 construction.
+# Grundavdrag is the standard piecewise schablon (Tabell 2.2). When the year changes,
+# refresh these constants from regeringens "Beräkningskonventioner 20XX" (which publishes
+# both formulas) — SKV 152 was discontinued 2015.
+_JSA_BREAKS = (0.91, 3.24, 8.08)        # bracket edges, in prisbasbelopp
+_JSA_C2, _JSA_C3 = 0.3874, 0.251        # slopes in brackets 2 and 3
+_JSA_B3_BASE, _JSA_B4_LEVEL = 1.813, 3.027   # belopp levels (PBB) at the start of bracket 3 / in bracket 4
 
 
 def _config(conn: sqlite3.Connection) -> dict:
@@ -71,9 +72,12 @@ def _config(conn: sqlite3.Connection) -> dict:
 
 
 def _grundavdrag(fi_kr: float, pbb: float) -> int:
-    """Grundavdrag (schablon) — piecewise in prisbasbelopp, rounded UP to whole 100 kr."""
+    """Grundavdrag (schablon), Beräkningskonventioner 2026 Tabell 2.2 — piecewise in
+    prisbasbelopp. Fastställd förvärvsinkomst is rounded DOWN to whole 100 kr, grundavdrag
+    UP to whole 100 kr."""
     if fi_kr <= 0:
         return 0
+    fi_kr = (int(fi_kr) // 100) * 100        # FFI avrundas nedåt till närmaste hundratal
     if fi_kr <= 0.99 * pbb:
         ga = 0.423 * pbb
     elif fi_kr <= 2.72 * pbb:
@@ -98,9 +102,9 @@ def _jobbskatteavdrag(ai_kr: float, ga_kr: float, pbb: float, kommunal_frac: flo
     elif ai_kr <= b2:
         belopp = b1 + _JSA_C2 * (ai_kr - b1)
     elif ai_kr <= b3:
-        belopp = b1 + _JSA_C2 * (b2 - b1) + _JSA_C3 * (ai_kr - b2)
+        belopp = _JSA_B3_BASE * pbb + _JSA_C3 * (ai_kr - b2)
     else:
-        belopp = b1 + _JSA_C2 * (b2 - b1) + _JSA_C3 * (b3 - b2)
+        belopp = _JSA_B4_LEVEL * pbb
     return round(max(0.0, belopp - ga_kr) * kommunal_frac)
 
 

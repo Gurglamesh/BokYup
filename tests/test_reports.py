@@ -187,17 +187,17 @@ class TestTaxEstimate:
         est = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
         assert est["overskott_ore"] == 10000000
         assert est["egenavgifter"]["netto_ore"] == 2147000     # 28 970 − 7 500 = 21 470 kr
-        # SKV "beräknad skatt" 30 616 kr (egenavgifter + inkomstskatt), within a few kr
-        assert abs(est["overview"]["total_skatt_ore"] - 3061600) <= 5000
+        # SKV "beräknad skatt" 30 616 kr (egenavgifter + inkomstskatt) — exact (Beräkningskonventioner 2026)
+        assert abs(est["overview"]["total_skatt_ore"] - 3061600) <= 200
 
     def test_salary_shifts_firma_into_marginal_bracket(self, ops):
         from backend.reports import tax as tax_mod
         self._firma(ops, 100000, salary_ore=46200000)   # + lön 462 000 kr
         est = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
-        # SKV: total (562k) 138 481; lön only 87 628; firma marginal 50 853 (excl moms)
-        assert abs(est["overview"]["total_skatt_ore"] - 13848100) <= 5000
-        assert abs(est["overview"]["salary_skatt_ore"] - 8762800) <= 5000
-        assert abs(est["firma_tax_ore"] - 5085300) <= 5000
+        # SKV: total (562k) 138 481; lön only 87 628; firma marginal 50 853 (excl moms) — exact
+        assert abs(est["overview"]["total_skatt_ore"] - 13848100) <= 200
+        assert abs(est["overview"]["salary_skatt_ore"] - 8762800) <= 200
+        assert abs(est["firma_tax_ore"] - 5085300) <= 200
         # the firma's marginal income tax is much higher than firma-alone (salary used the
         # grundavdrag + low brackets already)
         assert est["firma_income_tax_ore"] > 2500000

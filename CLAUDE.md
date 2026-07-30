@@ -515,9 +515,12 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       a few kronor across three reference calcs): **egenavgifter** = 28,97 % of the överskott
       − generell nedsättning (7,5 %, max 15 000 kr), **only on the firma** (never on salary);
       **income tax** = grundavdrag (piecewise in prisbasbelopp, rounded up) → kommunal +
-      statlig skatt + begravnings-/public service-avgift − **jobbskatteavdrag** (2026 formula,
-      coefficients fitted to SKV outputs) − skattereduktion för förvärvsinkomst, on the TOTAL
-      förvärvsinkomst. **Employment salary is an input** (`ovrig_forvarvsinkomst_ore`): the
+      statlig skatt + begravnings-/public service-avgift − **jobbskatteavdrag** − skatte-
+      reduktion för förvärvsinkomst, on the TOTAL förvärvsinkomst. Grundavdrag +
+      jobbskatteavdrag use the EXACT 2026 formulas from regeringens Beräkningskonventioner
+      2026 (Tabell 2.2 + 2.10; PDF in `docs/2026/`) — reproduces SKV's three reference calcs
+      to the krona (30 616 / 138 481 / 87 628). No high-income jobbskatteavdrag phase-out in
+      the 2026 construction. **Employment salary is an input** (`ovrig_forvarvsinkomst_ore`): the
       firma's own income-tax liability is the **marginal** amount its income adds on top of
       the salary (`income_tax(överskott+lön) − income_tax(lön)`), so the salary correctly
       pushes the firma income into higher brackets / statlig skatt. **Every annual figure is
