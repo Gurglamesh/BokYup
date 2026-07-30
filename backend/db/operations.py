@@ -1653,6 +1653,13 @@ class BookOps:
         # Legacy/RUT path: paid in full via register_payment (no subledger events).
         if not has_events and tx_status == "paid":
             paid = customer_due
+        # RUT/ROT: after the customer has paid, Skatteverket still owes the husavdrag part
+        # until the claim reaches 'skatteverket_paid' — the invoice is then awaiting RUT/ROT.
+        rut_claim_state = None
+        if husavdrag > 0 and inv["transaktion_id"]:
+            cr = self.conn.execute("SELECT state FROM rut_claim WHERE transaktion_id=?",
+                                   (inv["transaktion_id"],)).fetchone()
+            rut_claim_state = cr["state"] if cr else None
         return {
             "inc_moms_ore": inv["inc_moms_ore"], "rut_total_ore": inv["rut_total_ore"],
             "rot_total_ore": inv["rot_total_ore"], "husavdrag_ore": husavdrag,
@@ -1660,11 +1667,13 @@ class BookOps:
             "customer_due_ore": customer_due, "paid_ore": payments - refunds,
             "refunded_ore": refunds,
             "outstanding_ore": customer_due - paid,
-            "state": self._invoice_state(inv, customer_total, credits, paid),
+            "state": self._invoice_state(inv, customer_total, credits, paid,
+                                         husavdrag, rut_claim_state),
         }
 
     @staticmethod
-    def _invoice_state(inv_row, customer_total, credits, paid) -> str:
+    def _invoice_state(inv_row, customer_total, credits, paid,
+                       husavdrag=0, rut_claim_state=None) -> str:
         if inv_row["cancelled_at"]:
             return "cancelled"
         if inv_row["credited_at"] or (customer_total > 0 and credits >= customer_total):
@@ -1672,6 +1681,10 @@ class BookOps:
         if paid <= 0:
             return "pending"
         if paid >= customer_total - credits:
+            # Customer part settled. A RUT/ROT invoice is not fully settled until
+            # Skatteverket has paid the husavdrag part (rut_claim -> 'skatteverket_paid').
+            if husavdrag > 0 and rut_claim_state and rut_claim_state != "skatteverket_paid":
+                return "awaiting_rut"
             return "paid"
         return "partial"
 

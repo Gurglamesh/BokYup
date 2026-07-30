@@ -721,16 +721,18 @@ class TestInvoices:
         row = lambda: [x for x in client.get(f"/books/{book}/invoices").json()
                        if x["id"] == inv["invoice_id"]][0]
         assert row()["rut_claim_state"] == "pending"
-        # book the customer payment -> the SKV husavdrag step becomes available
+        # book the customer payment -> the SKV husavdrag step becomes available. The
+        # invoice is NOT fully settled yet: Skatteverket still owes the husavdrag part.
         client.post(f"/books/{book}/transaktioner/{tid}/pay", json={"payment_date": "2026-03-10"})
         r = row()
-        assert r["state"] == "paid" and r["rut_claim_state"] == "customer_paid"
+        assert r["state"] == "awaiting_rut" and r["rut_claim_state"] == "customer_paid"
         claim_id = r["rut_claim_id"]
         assert claim_id is not None
-        # book the Skatteverket payout -> done
+        # book the Skatteverket payout -> now fully paid
         client.post(f"/books/{book}/rut/{claim_id}/skatteverket-payment",
                     json={"payment_date": "2026-04-15"})
         assert row()["rut_claim_state"] == "skatteverket_paid"
+        assert row()["state"] == "paid"
 
     def test_skatteverket_partial_payout_creates_followup_via_api(self, client, book):
         cat, kid = self._setup(client, book)

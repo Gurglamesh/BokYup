@@ -1259,14 +1259,20 @@ const SECTION_RENDERERS = {
     const STATE = {
       paid: ["paid", "Betald"], pending: ["pending", "Obetald"],
       partial: ["pending", "Delbetald"],
+      awaiting_rut: ["awaiting", "Inväntar RUT/ROT"],
       cancelled: ["", "Makulerad"], credited: ["", "Krediterad"],
     };
     const act = (label, cls, fn) => el("button",
       { class: "btn small " + cls, style: "margin-left:4px", onclick: () => guard(fn) }, label);
     const rowFor = (iv) => {
-      const [cls, label] = STATE[iv.state] || STATE.pending;
+      let [cls, label] = STATE[iv.state] || STATE.pending;
       // RUT and ROT invoices both carry a husavdrag receivable -> full Skatteverket flow.
       const isRut = (iv.rut_total_ore > 0) || (iv.rot_total_ore > 0);
+      // Customer paid, but Skatteverket hasn't paid the husavdrag yet -> "Inväntar RUT/ROT".
+      if (iv.state === "awaiting_rut") {
+        const hasRut = iv.rut_total_ore > 0, hasRot = iv.rot_total_ore > 0;
+        label = "Inväntar " + (hasRut && hasRot ? "RUT/ROT" : hasRot ? "ROT" : "RUT");
+      }
       const owed = iv.outstanding_ore < 0 ? -iv.outstanding_ore : 0;   // we owe the customer
       const actions = el("td", { class: "num" },
         el("button", { class: "btn small ghost", onclick: () => guard(() => invoicePdf(iv.id, iv.invoice_number)) }, "PDF"));

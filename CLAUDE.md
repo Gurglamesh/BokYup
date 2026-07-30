@@ -265,7 +265,10 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       (pay), makulera (void an UNBOOKED invoice; number stays reserved, pending
       transaktion removed, nothing hits the ledger), kreditera (reverse a BOOKED
       invoice via rättelse). `cancel_invoice`/`credit_invoice` + derived `state`
-      (pending/paid/cancelled/credited); booking itself happens at payment
+      (pending/paid/cancelled/credited; **`awaiting_rut`** when a RUT/ROT invoice's
+      customer part is paid but Skatteverket has not yet paid the husavdrag — i.e. the
+      linked `rut_claim` is `customer_paid`, not `skatteverket_paid`; UI pill "Inväntar
+      RUT/ROT"); booking itself happens at payment
       (kontantmetod) — verified: balanced double-entry + moms into the
       momsdeklaration, RUT books the 1513 receivable.
       SUBLEDGER (schema v7, 2026-06): `invoice_event` (payment|refund|credit) — an
