@@ -52,18 +52,26 @@ CONFIG_FIELDS = [
     ("skattered_forvarv_floor_ore", "ore", "… på inkomst över"),
     ("skattered_forvarv_max_ore", "ore", "… max"),
     ("ovrig_forvarvsinkomst_ore", "ore", "Övrig förvärvsinkomst (lön m.m.)"),
+    ("tax_values_year", "year", "Satserna gäller år"),
+    # Jobbskatteavdrag formula coefficients (Beräkningskonventioner 2026, Tabell 2.10),
+    # stored as fraction × 10000 (kind 'coef' -> shown as a decimal). Editable so a new
+    # year's construction can be entered without a code change.
+    ("jsa_break1_centi", "coef", "JSA brytpunkt 1 (PBB)"),
+    ("jsa_break2_centi", "coef", "JSA brytpunkt 2 (PBB)"),
+    ("jsa_break3_centi", "coef", "JSA brytpunkt 3 (PBB)"),
+    ("jsa_c2_centi", "coef", "JSA lutning intervall 2"),
+    ("jsa_c3_centi", "coef", "JSA lutning intervall 3"),
+    ("jsa_b3_base_centi", "coef", "JSA belopp start intervall 3 (PBB)"),
+    ("jsa_b4_level_centi", "coef", "JSA belopp intervall 4 (PBB)"),
 ]
 CONFIG_KEYS = [k for k, _, _ in CONFIG_FIELDS]
 
-# Jobbskatteavdrag 2026 (person under 66), Beräkningskonventioner 2026 Tabell 2.10: the
-# "belopp" is piecewise in prisbasbelopp; the skattereduktion is (belopp − grundavdrag)
-# × kommunalskattesatsen. There is NO high-income phase-out in the 2026 construction.
-# Grundavdrag is the standard piecewise schablon (Tabell 2.2). When the year changes,
-# refresh these constants from regeringens "Beräkningskonventioner 20XX" (which publishes
-# both formulas) — SKV 152 was discontinued 2015.
-_JSA_BREAKS = (0.91, 3.24, 8.08)        # bracket edges, in prisbasbelopp
-_JSA_C2, _JSA_C3 = 0.3874, 0.251        # slopes in brackets 2 and 3
-_JSA_B3_BASE, _JSA_B4_LEVEL = 1.813, 3.027   # belopp levels (PBB) at the start of bracket 3 / in bracket 4
+# The jobbskatteavdrag "belopp" is piecewise in prisbasbelopp; the skattereduktion is
+# (belopp − grundavdrag) × kommunalskattesatsen. There is NO high-income phase-out in the
+# 2026 construction. Grundavdrag is the standard piecewise schablon (Tabell 2.2), fixed in
+# inkomstskattelagen and auto-scaled by prisbasbelopp — only the jobbskatteavdrag
+# coefficients (config above) change from year to year. Defaults stay in effect until the
+# user updates them, so the estimate never breaks for lack of a yearly update.
 
 
 def _config(conn: sqlite3.Connection) -> dict:
@@ -92,19 +100,24 @@ def _grundavdrag(fi_kr: float, pbb: float) -> int:
     return int(math.ceil(ga / 100.0)) * 100
 
 
-def _jobbskatteavdrag(ai_kr: float, ga_kr: float, pbb: float, kommunal_frac: float) -> int:
-    """Skattereduktion för arbetsinkomster (jobbskatteavdrag), person < 66."""
+def _jobbskatteavdrag(ai_kr: float, ga_kr: float, pbb: float, kommunal_frac: float,
+                      c: dict) -> int:
+    """Skattereduktion för arbetsinkomster (jobbskatteavdrag), person < 66. Piecewise
+    coefficients come from config (fraction × 10000), so a new year's construction can be
+    entered without a code change."""
     if ai_kr <= 0:
         return 0
-    b1, b2, b3 = (x * pbb for x in _JSA_BREAKS)
+    b1 = c["jsa_break1_centi"] / 10000.0 * pbb
+    b2 = c["jsa_break2_centi"] / 10000.0 * pbb
+    b3 = c["jsa_break3_centi"] / 10000.0 * pbb
     if ai_kr <= b1:
         belopp = ai_kr
     elif ai_kr <= b2:
-        belopp = b1 + _JSA_C2 * (ai_kr - b1)
+        belopp = b1 + c["jsa_c2_centi"] / 10000.0 * (ai_kr - b1)
     elif ai_kr <= b3:
-        belopp = _JSA_B3_BASE * pbb + _JSA_C3 * (ai_kr - b2)
+        belopp = c["jsa_b3_base_centi"] / 10000.0 * pbb + c["jsa_c3_centi"] / 10000.0 * (ai_kr - b2)
     else:
-        belopp = _JSA_B4_LEVEL * pbb
+        belopp = c["jsa_b4_level_centi"] / 10000.0 * pbb
     return round(max(0.0, belopp - ga_kr) * kommunal_frac)
 
 
@@ -124,7 +137,7 @@ def _income_tax(fi_ore: int, c: dict) -> dict:
                   c["public_service_max_ore"] // 100) if besk > 0 else 0
     skikt = c["statlig_skiktgrans_ore"] / 100.0
     statlig = round(c["statlig_skatt_pct_centi"] / 10000.0 * max(0.0, besk - skikt))
-    jsa = _jobbskatteavdrag(fi, ga, pbb, kommunal_frac)
+    jsa = _jobbskatteavdrag(fi, ga, pbb, kommunal_frac, c)
     sr_floor = c["skattered_forvarv_floor_ore"] / 100.0
     skattered = min(int(c["skattered_forvarv_pct_centi"] / 10000.0 * max(0.0, besk - sr_floor)),
                     c["skattered_forvarv_max_ore"] // 100) if besk > 0 else 0

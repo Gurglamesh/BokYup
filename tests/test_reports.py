@@ -208,6 +208,18 @@ class TestTaxEstimate:
         est = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
         assert est["egenavgifter"]["netto_ore"] == 2147000     # unchanged by salary
 
+    def test_jobbskatteavdrag_coefficients_are_config_driven(self, ops):
+        from backend.reports import tax as tax_mod
+        self._firma(ops, 100000)
+        base = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
+        # coefficients persist as config with 2026 defaults (no yearly update required)
+        assert base["assumptions"]["jsa_c2_centi"] == 3874
+        assert base["assumptions"]["tax_values_year"] == 2026
+        # editing a coefficient changes the estimate (bigger slope -> bigger jobbskatteavdrag)
+        ops.set_tax_config({"jsa_c2_centi": 5000})
+        bumped = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
+        assert bumped["overview"]["total_skatt_ore"] < base["overview"]["total_skatt_ore"]
+
     def test_loss_year_has_no_income_tax(self, ops):
         from backend.reports import tax as tax_mod
         _sale(ops, 12500, "2026-03-01")            # small income

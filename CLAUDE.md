@@ -520,7 +520,12 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       jobbskatteavdrag use the EXACT 2026 formulas from regeringens Beräkningskonventioner
       2026 (Tabell 2.2 + 2.10; PDF in `docs/2026/`) — reproduces SKV's three reference calcs
       to the krona (30 616 / 138 481 / 87 628). No high-income jobbskatteavdrag phase-out in
-      the 2026 construction. **Employment salary is an input** (`ovrig_forvarvsinkomst_ore`): the
+      the 2026 construction. The **jobbskatteavdrag coefficients themselves are editable
+      config** (`jsa_break1/2/3_centi`, `jsa_c2/c3_centi`, `jsa_b3_base/b4_level_centi`;
+      fraction × 10000) alongside a `tax_values_year` label — the stored values (2026
+      defaults) stay in effect until changed, so the estimate never requires a yearly update;
+      a future year's Tabell 2.10 can be entered without a code change (schema v21).
+      **Employment salary is an input** (`ovrig_forvarvsinkomst_ore`): the
       firma's own income-tax liability is the **marginal** amount its income adds on top of
       the salary (`income_tax(överskott+lön) − income_tax(lön)`), so the salary correctly
       pushes the firma income into higher brackets / statlig skatt. **Every annual figure is

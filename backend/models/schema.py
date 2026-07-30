@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -520,6 +520,19 @@ _DEFAULT_CONFIG = {
     "skattered_forvarv_floor_ore": "4000000",    #   … på inkomst över 40 000 kr
     "skattered_forvarv_max_ore": "150000",       #   … max 1 500 kr
     "ovrig_forvarvsinkomst_ore": "0",            # lön/annan förvärvsinkomst (för totalöverblick)
+    # Which year the tax figures above are for (informational; shown in the UI so you know
+    # the vintage). If nothing is updated, the estimate keeps using these values.
+    "tax_values_year": "2026",
+    # Jobbskatteavdrag formula coefficients (Beräkningskonventioner 2026, Tabell 2.10),
+    # stored as fraction × 10000 (0,3874 -> 3874; 0,91 PBB -> 9100). Editable so a new
+    # year's construction can be entered without a code change.
+    "jsa_break1_centi": "9100",                  # bracket edge 0,91 PBB
+    "jsa_break2_centi": "32400",                 # bracket edge 3,24 PBB
+    "jsa_break3_centi": "80800",                 # bracket edge 8,08 PBB
+    "jsa_c2_centi": "3874",                       # slope in bracket 2 (0,3874)
+    "jsa_c3_centi": "2510",                        # slope in bracket 3 (0,251)
+    "jsa_b3_base_centi": "18130",                 # belopp at start of bracket 3 (1,813 PBB)
+    "jsa_b4_level_centi": "30270",                # belopp in bracket 4 (3,027 PBB)
 }
 
 
@@ -749,6 +762,16 @@ _MIGRATIONS: dict[int, str] = {
         INSERT OR IGNORE INTO config(key, value) VALUES ('skattered_forvarv_floor_ore', '4000000');
         INSERT OR IGNORE INTO config(key, value) VALUES ('skattered_forvarv_max_ore', '150000');
         INSERT OR IGNORE INTO config(key, value) VALUES ('ovrig_forvarvsinkomst_ore', '0');
+    """,
+    21: """
+        INSERT OR IGNORE INTO config(key, value) VALUES ('tax_values_year', '2026');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('jsa_break1_centi', '9100');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('jsa_break2_centi', '32400');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('jsa_break3_centi', '80800');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('jsa_c2_centi', '3874');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('jsa_c3_centi', '2510');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('jsa_b3_base_centi', '18130');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('jsa_b4_level_centi', '30270');
     """,
 }
 

@@ -759,12 +759,25 @@ const SECTION_RENDERERS = {
     ["statlig_skiktgrans_ore", "ore", "Skiktgräns (kr)"],
     ["skattered_forvarv_max_ore", "ore", "Skattered. förvärv max (kr)"],
   ],
+  // Jobbskatteavdrag formula coefficients (kind 'coef' = fraction, stored × 10000).
+  _taxJsaFields: [
+    ["jsa_break1_centi", "coef", "Brytpunkt 1 (× PBB)"],
+    ["jsa_break2_centi", "coef", "Brytpunkt 2 (× PBB)"],
+    ["jsa_break3_centi", "coef", "Brytpunkt 3 (× PBB)"],
+    ["jsa_c2_centi", "coef", "Lutning intervall 2"],
+    ["jsa_c3_centi", "coef", "Lutning intervall 3"],
+    ["jsa_b3_base_centi", "coef", "Belopp start intervall 3 (× PBB)"],
+    ["jsa_b4_level_centi", "coef", "Belopp intervall 4 (× PBB)"],
+  ],
 
   async skatt(panel) {
     const year = new Date().getFullYear();
     const cfg = await api("GET", `/books/${bid()}/tax-config`);
+    const scaleFor = (kind) => kind === "coef" ? 10000 : kind === "year" ? 1 : 100;
     const fyStart = el("input", { type: "date", value: `${year}-01-01` });
     const fyEnd = el("input", { type: "date", value: `${year}-12-31` });
+    const fYear = el("input", { type: "number", step: "1", style: "width:90px",
+      value: String(cfg.tax_values_year || year) });
     const fSalary = el("input", { type: "number", step: "1", style: "width:150px",
       value: String((cfg.ovrig_forvarvsinkomst_ore || 0) / 100) });
     const out = el("div", {});
@@ -775,36 +788,51 @@ const SECTION_RENDERERS = {
       + "av arbetsgivaren, men påverkar vilken marginalskatt firmans överskott hamnar på "
       + "(grundavdrag, jobbskatteavdrag, statlig skatt) — fyll därför i din lön för rätt "
       + "beräkning. Ett hjälpmedel, inte en deklaration: stäm av mot Skatteverkets ”Räkna "
-      + "ut din skatt”. Uppdatera satserna årligen från Skatteverkets ”Belopp och procent” "
-      + "och regeringens ”Beräkningskonventioner”."));
+      + "ut din skatt”. Satserna sparas per bok och gäller tills du ändrar dem — du "
+      + "behöver alltså inte uppdatera något varje år, men bör göra det när nya värden "
+      + "kommer (Skatteverkets ”Belopp och procent” + regeringens ”Beräkningskonventioner”)."));
     panel.appendChild(el("div", { class: "row" },
       wrap("Räkenskapsår fr.o.m.", fyStart), wrap("t.o.m.", fyEnd),
       wrap("Lön / övrig förvärvsinkomst (kr/år)", fSalary),
+      wrap("Satserna gäller år", fYear),
       el("div", { style: "align-self:flex-end" },
         el("button", { class: "btn brand", onclick: () => guard(draw) }, "Visa"))));
 
     // --- editable annual figures ---
     const inputs = {};
-    const grid = el("div", { class: "row" });
-    for (const [key, kind, label] of SECTION_RENDERERS._taxFields) {
-      const inp = el("input", { type: "number", step: kind === "pct" ? "0.01" : "1",
-        value: String((cfg[key] || 0) / 100), style: "width:130px" });
-      inputs[key] = inp;
-      grid.appendChild(wrap(label, inp));
-    }
+    const mkGrid = (fields) => {
+      const grid = el("div", { class: "row" });
+      for (const [key, kind, label] of fields) {
+        const scale = scaleFor(kind);
+        const inp = el("input", { type: "number", step: kind === "coef" ? "0.0001" : kind === "pct" ? "0.01" : "1",
+          value: String((cfg[key] || 0) / scale), style: "width:150px" });
+        inp._scale = scale;
+        inputs[key] = inp;
+        grid.appendChild(wrap(label, inp));
+      }
+      return grid;
+    };
     panel.appendChild(el("details", { style: "margin:14px 0" },
       el("summary", { style: "cursor:pointer;font-weight:600" }, "Skattesatser & belopp (redigerbara, uppdatera årligen)"),
-      el("p", { class: "muted" }, "Ange procent (t.ex. 30,55) och kronor. Jobbskatteavdraget "
-        + "beräknas med 2026 års formel och är en uppskattning."),
-      grid,
+      el("p", { class: "muted" }, "Ange procent (t.ex. 30,55) och kronor. Värdena gäller tills "
+        + "du ändrar dem."),
+      mkGrid(SECTION_RENDERERS._taxFields),
       el("div", { style: "margin-top:8px" },
         el("button", { class: "btn", onclick: () => guard(save) }, "Spara satser"))));
+    panel.appendChild(el("details", { style: "margin:14px 0" },
+      el("summary", { style: "cursor:pointer;font-weight:600" }, "Jobbskatteavdrag – formelkoefficienter (avancerat)"),
+      el("p", { class: "muted" }, "Koefficienterna i Beräkningskonventionernas Tabell 2.10 "
+        + "(uttryckta i prisbasbelopp). Ändra bara när en ny årsformel publiceras."),
+      mkGrid(SECTION_RENDERERS._taxJsaFields),
+      el("div", { style: "margin-top:8px" },
+        el("button", { class: "btn", onclick: () => guard(save) }, "Spara koefficienter"))));
     panel.appendChild(out);
 
-    const toC = (inp) => Math.round(parseFloat((inp.value || "0").replace(",", ".")) * 100);
     function collectConfig() {
-      const body = { ovrig_forvarvsinkomst_ore: toC(fSalary) };
-      for (const [key] of SECTION_RENDERERS._taxFields) body[key] = toC(inputs[key]);
+      const num = (inp) => parseFloat((inp.value || "0").replace(",", "."));
+      const body = { ovrig_forvarvsinkomst_ore: Math.round(num(fSalary) * 100),
+                     tax_values_year: Math.round(num(fYear)) };
+      for (const key of Object.keys(inputs)) body[key] = Math.round(num(inputs[key]) * inputs[key]._scale);
       return body;
     }
     async function save() { await api("PUT", `/books/${bid()}/tax-config`, collectConfig()); toast("Skattesatser sparade"); await draw(); }
