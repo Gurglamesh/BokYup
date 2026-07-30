@@ -744,79 +744,105 @@ const SECTION_RENDERERS = {
   },
 
   // ----- Förenklat årsbokslut (SKV 2150) -----
+  // Editable annual tax figures (mirrors backend CONFIG_FIELDS): [key, kind, label].
+  // kind 'pct' shows/stores centi-percent as %, 'ore' shows/stores öre as kr.
+  _taxFields: [
+    ["prisbasbelopp_ore", "ore", "Prisbasbelopp (kr)"],
+    ["kommunal_skattesats_pct_centi", "pct", "Kommunalskatt %"],
+    ["begravningsavgift_pct_centi", "pct", "Begravningsavgift %"],
+    ["egenavgift_pct_centi", "pct", "Egenavgifter %"],
+    ["egenavgift_nedsattning_pct_centi", "pct", "Nedsättning egenavg. %"],
+    ["egenavgift_nedsattning_max_ore", "ore", "Nedsättning max (kr)"],
+    ["public_service_pct_centi", "pct", "Public service %"],
+    ["public_service_max_ore", "ore", "Public service max (kr)"],
+    ["statlig_skatt_pct_centi", "pct", "Statlig skatt %"],
+    ["statlig_skiktgrans_ore", "ore", "Skiktgräns (kr)"],
+    ["skattered_forvarv_max_ore", "ore", "Skattered. förvärv max (kr)"],
+  ],
+
   async skatt(panel) {
     const year = new Date().getFullYear();
+    const cfg = await api("GET", `/books/${bid()}/tax-config`);
     const fyStart = el("input", { type: "date", value: `${year}-01-01` });
     const fyEnd = el("input", { type: "date", value: `${year}-12-31` });
+    const fSalary = el("input", { type: "number", step: "1", style: "width:150px",
+      value: String((cfg.ovrig_forvarvsinkomst_ore || 0) / 100) });
     const out = el("div", {});
     panel.appendChild(el("h2", {}, "Skatt att betala (uppskattning)"));
     panel.appendChild(el("p", { class: "muted" },
-      "Enskild näringsidkare. En uppskattning av vad som bör sättas undan till "
-      + "Skatteverket för räkenskapsåret — moms, egenavgifter och inkomstskatt — "
-      + "beräknad ur din bokföring och satserna nedan. Detta är ett hjälpmedel, inte en "
-      + "deklaration: grundavdrag, jobbskatteavdrag och de slutliga egenavgifterna stäms "
-      + "av i INK1/slutskattebeskedet."));
+      "Enskild näringsidkare. Uppskattar vad du bör sätta undan till Skatteverket för din "
+      + "firma — moms, egenavgifter och inkomstskatt. Din lön från en anställning beskattas "
+      + "av arbetsgivaren, men påverkar vilken marginalskatt firmans överskott hamnar på "
+      + "(grundavdrag, jobbskatteavdrag, statlig skatt) — fyll därför i din lön för rätt "
+      + "beräkning. Ett hjälpmedel, inte en deklaration: stäm av mot Skatteverkets ”Räkna "
+      + "ut din skatt”. Uppdatera satserna årligen från Skatteverkets ”Belopp och procent” "
+      + "och regeringens ”Beräkningskonventioner”."));
     panel.appendChild(el("div", { class: "row" },
       wrap("Räkenskapsår fr.o.m.", fyStart), wrap("t.o.m.", fyEnd),
+      wrap("Lön / övrig förvärvsinkomst (kr/år)", fSalary),
       el("div", { style: "align-self:flex-end" },
         el("button", { class: "btn brand", onclick: () => guard(draw) }, "Visa"))));
 
-    // --- editable tax rates (config; percentages stored as centi-percent) ---
-    const cfg = await api("GET", `/books/${bid()}/tax-config`);
-    const numIn = (v) => el("input", { type: "number", step: "0.01", value: String(v / 100), style: "width:110px" });
-    const fEA = numIn(cfg.egenavgift_pct_centi), fSch = numIn(cfg.egenavgift_schablon_pct_centi);
-    const fKom = numIn(cfg.kommunal_skattesats_pct_centi), fStat = numIn(cfg.statlig_skatt_pct_centi);
-    const fBryt = numIn(cfg.statlig_brytpunkt_ore), fGrund = numIn(cfg.grundavdrag_ore);
+    // --- editable annual figures ---
+    const inputs = {};
+    const grid = el("div", { class: "row" });
+    for (const [key, kind, label] of SECTION_RENDERERS._taxFields) {
+      const inp = el("input", { type: "number", step: kind === "pct" ? "0.01" : "1",
+        value: String((cfg[key] || 0) / 100), style: "width:130px" });
+      inputs[key] = inp;
+      grid.appendChild(wrap(label, inp));
+    }
     panel.appendChild(el("details", { style: "margin:14px 0" },
-      el("summary", { style: "cursor:pointer;font-weight:600" }, "Skattesatser (redigerbara)"),
-      el("p", { class: "muted" },
-        "Satserna ändras årligen och varierar per kommun — kontrollera dina värden hos "
-        + "Skatteverket. Ange procent (t.ex. 32,37) och kronor."),
-      el("div", { class: "row" },
-        wrap("Egenavgifter %", fEA), wrap("Schablonavdrag %", fSch),
-        wrap("Kommunalskatt %", fKom), wrap("Statlig skatt %", fStat)),
-      el("div", { class: "row" },
-        wrap("Brytpunkt statlig (kr)", fBryt), wrap("Grundavdrag (kr)", fGrund),
-        el("div", { style: "align-self:flex-end" },
-          el("button", { class: "btn", onclick: () => guard(save) }, "Spara satser")))));
+      el("summary", { style: "cursor:pointer;font-weight:600" }, "Skattesatser & belopp (redigerbara, uppdatera årligen)"),
+      el("p", { class: "muted" }, "Ange procent (t.ex. 30,55) och kronor. Jobbskatteavdraget "
+        + "beräknas med 2026 års formel och är en uppskattning."),
+      grid,
+      el("div", { style: "margin-top:8px" },
+        el("button", { class: "btn", onclick: () => guard(save) }, "Spara satser"))));
     panel.appendChild(out);
 
-    const pctc = (inp) => Math.round(parseFloat(inp.value || "0") * 100);   // % -> centi-percent
-    async function save() {
-      await api("PUT", `/books/${bid()}/tax-config`, {
-        egenavgift_pct_centi: pctc(fEA), egenavgift_schablon_pct_centi: pctc(fSch),
-        kommunal_skattesats_pct_centi: pctc(fKom), statlig_skatt_pct_centi: pctc(fStat),
-        statlig_brytpunkt_ore: pctc(fBryt), grundavdrag_ore: pctc(fGrund),
-      });
-      toast("Skattesatser sparade");
-      await draw();
+    const toC = (inp) => Math.round(parseFloat((inp.value || "0").replace(",", ".")) * 100);
+    function collectConfig() {
+      const body = { ovrig_forvarvsinkomst_ore: toC(fSalary) };
+      for (const [key] of SECTION_RENDERERS._taxFields) body[key] = toC(inputs[key]);
+      return body;
     }
+    async function save() { await api("PUT", `/books/${bid()}/tax-config`, collectConfig()); toast("Skattesatser sparade"); await draw(); }
 
-    const pctLabel = (c) => c == null ? "" :
-      (c / 100).toLocaleString("sv-SE", { minimumFractionDigits: 0, maximumFractionDigits: 2 }) + " %";
-    const kv = (k, ore) => el("div", {}, el("div", { class: "k" }, k), el("div", { class: "v" }, toKr(ore) + " kr"));
+    const kv = (k, ore, big) => el("div", {},
+      el("div", { class: "k" }, k),
+      el("div", { class: "v", style: big ? "font-weight:700;font-size:18px" : "" }, toKr(ore) + " kr"));
+    const row = (label, ore, note, bold) => el("tr", { style: bold ? "border-top:2px solid var(--border,#ccc)" : "" },
+      el("td", { style: bold ? "font-weight:700" : "" }, label),
+      el("td", { class: "num", style: "font-variant-numeric:tabular-nums" + (bold ? ";font-weight:700" : "") }, toKr(ore) + " kr"),
+      el("td", { class: "muted", style: "font-size:12px" }, note || ""));
+
     async function draw() {
       out.innerHTML = "";
+      // persist the salary/rates the user typed, then compute
+      await api("PUT", `/books/${bid()}/tax-config`, collectConfig());
       const r = await api("GET", `/books/${bid()}/reports/tax?start=${fyStart.value}&end=${fyEnd.value}`);
+      // Firma: what to set aside
       out.appendChild(el("div", { class: "box", style: "margin-top:14px" },
         el("div", { class: "row" },
-          kv("Årets överskott (resultat)", r.overskott_ore),
-          kv("− Schablonavdrag egenavgifter", r.schablonavdrag_ore),
-          kv("= Taxerad näringsinkomst", r.taxerad_inkomst_ore),
-          kv("− Grundavdrag", r.grundavdrag_ore),
-          kv("= Beskattningsbar inkomst", r.beskattningsbar_inkomst_ore))));
-      const row = (label, ore, note, bold) => el("tr", { style: bold ? "border-top:2px solid var(--border,#ccc)" : "" },
-        el("td", { style: bold ? "font-weight:700" : "" }, label),
-        el("td", { class: "num", style: "font-variant-numeric:tabular-nums" + (bold ? ";font-weight:700" : "") }, toKr(ore) + " kr"),
-        el("td", { class: "muted", style: "font-size:12px" }, note || ""));
-      const lines = r.lines.map((l) => row(
-        l.label + (l.pct_centi != null ? "  (" + pctLabel(l.pct_centi)
-          + (l.underlag_ore != null ? " på " + toKr(l.underlag_ore) + " kr" : "") + ")" : ""),
-        l.amount_ore, l.note));
+          kv("Firmans överskott", r.overskott_ore),
+          kv("Att sätta undan (firman)", r.firma_total_ore, true))));
       out.appendChild(el("table", { style: "width:100%;margin-top:14px" },
-        el("thead", {}, el("tr", {}, el("th", {}, "Skatt"), el("th", { class: "num" }, "Belopp"), el("th", {}, ""))),
-        el("tbody", {}, lines,
-          row("Att sätta undan totalt", r.total_ore, "moms + egenavgifter + inkomstskatt", true))));
+        el("thead", {}, el("tr", {}, el("th", {}, "Firmans skatt"), el("th", { class: "num" }, "Belopp"), el("th", {}, ""))),
+        el("tbody", {}, r.lines.map((l) => row(l.label, l.amount_ore, l.note)),
+          row("Att sätta undan totalt (firman)", r.firma_total_ore, "moms + egenavgifter + firmans inkomstskatt", true))));
+      // Total overview (when a salary is entered)
+      const ov = r.overview;
+      if (r.ovrig_forvarvsinkomst_ore) {
+        out.appendChild(el("h3", { style: "margin-top:24px" }, "Total överblick (firma + lön)"));
+        out.appendChild(el("p", { class: "muted" },
+          "Din arbetsgivare drar skatten på lönen; firmans del betalar du själv via F-skatt/slutskatt."));
+        out.appendChild(el("div", { class: "box" }, el("div", { class: "row" },
+          kv("Total förvärvsinkomst", ov.forvarvsinkomst_ore),
+          kv("Total skatt (firma + lön)", ov.total_skatt_ore),
+          kv("Varav arbetsgivaren drar (lön)", ov.salary_skatt_ore),
+          kv("Varav firman (du betalar)", r.firma_tax_ore, true))));
+      }
     }
     draw();
   },

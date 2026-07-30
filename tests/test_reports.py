@@ -170,44 +170,43 @@ class TestSieExport:
 # ---------------------------------------------------------------------------
 
 class TestTaxEstimate:
-    from backend.reports import tax as _tax_mod
+    # Reproduces Skatteverket's "Räkna ut din skatt" for 2026 (kommunalskatt 30,55 %,
+    # begravningsavgift 0,07 %, född 1998) to within a few kronor.
+    def _firma(self, ops, overskott_kr, kommunal=3055, begravning=7, salary_ore=0):
+        ops.set_tax_config({"kommunal_skattesats_pct_centi": kommunal,
+                            "begravningsavgift_pct_centi": begravning,
+                            "ovrig_forvarvsinkomst_ore": salary_ore})
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="ACME AB")
+        ops.record_income(kid, cat, [{"rate_code": "25", "amount_ore": overskott_kr * 100,
+                                      "inclusive": False}], "2026-03-01", paid_date="2026-03-01")
 
-    def _big_year(self, ops):
-        # sale inc 500 000 kr -> ex 400 000 income; purchase inc 125 000 -> ex 100 000
-        # expense  =>  överskott 300 000 kr; moms netto 100 000 - 25 000 = 75 000 kr
-        _sale(ops, 50000000, "2026-03-01")
-        _purchase(ops, 12500000, "2026-04-01")
-
-    def test_breakdown_with_defaults(self, ops):
+    def test_egenavgifter_and_firma_only_matches_skatteverket(self, ops):
         from backend.reports import tax as tax_mod
-        self._big_year(ops)
+        self._firma(ops, 100000)                        # firma 100 000, no salary
         est = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
-        assert est["overskott_ore"] == 30000000
-        assert est["moms_ore"] == 7500000
-        assert est["schablonavdrag_ore"] == 7500000           # 25 % of 300 000
-        assert est["egenavgifter_ore"] == round(22500000 * 0.2897)
-        assert est["taxerad_inkomst_ore"] == 22500000
-        assert est["beskattningsbar_inkomst_ore"] == 22500000 - 1650000
-        assert est["kommunalskatt_ore"] == round((22500000 - 1650000) * 0.3237)
-        assert est["statlig_skatt_ore"] == 0                  # under brytpunkten
-        assert est["total_ore"] == (est["moms_ore"] + est["egenavgifter_ore"]
-                                    + est["kommunalskatt_ore"] + est["statlig_skatt_ore"])
-        assert [l["key"] for l in est["lines"]] == ["moms", "egenavgifter", "kommunalskatt", "statlig"]
+        assert est["overskott_ore"] == 10000000
+        assert est["egenavgifter"]["netto_ore"] == 2147000     # 28 970 − 7 500 = 21 470 kr
+        # SKV "beräknad skatt" 30 616 kr (egenavgifter + inkomstskatt), within a few kr
+        assert abs(est["overview"]["total_skatt_ore"] - 3061600) <= 5000
 
-    def test_statlig_over_brytpunkt(self, ops):
+    def test_salary_shifts_firma_into_marginal_bracket(self, ops):
         from backend.reports import tax as tax_mod
-        ops.set_tax_config({"statlig_brytpunkt_ore": 10000000})   # brytpunkt 100 000 kr
-        self._big_year(ops)
+        self._firma(ops, 100000, salary_ore=46200000)   # + lön 462 000 kr
         est = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
-        # taxerad 225 000 - brytpunkt 100 000 = 125 000 over -> 20 %
-        assert est["statlig_skatt_ore"] == round((22500000 - 10000000) * 0.20)
+        # SKV: total (562k) 138 481; lön only 87 628; firma marginal 50 853 (excl moms)
+        assert abs(est["overview"]["total_skatt_ore"] - 13848100) <= 5000
+        assert abs(est["overview"]["salary_skatt_ore"] - 8762800) <= 5000
+        assert abs(est["firma_tax_ore"] - 5085300) <= 5000
+        # the firma's marginal income tax is much higher than firma-alone (salary used the
+        # grundavdrag + low brackets already)
+        assert est["firma_income_tax_ore"] > 2500000
 
-    def test_config_override_changes_estimate(self, ops):
+    def test_egenavgifter_only_on_firma_not_salary(self, ops):
         from backend.reports import tax as tax_mod
-        self._big_year(ops)
-        ops.set_tax_config({"kommunal_skattesats_pct_centi": 3000})   # 30,00 %
+        self._firma(ops, 100000, salary_ore=46200000)
         est = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
-        assert est["kommunalskatt_ore"] == round((22500000 - 1650000) * 0.30)
+        assert est["egenavgifter"]["netto_ore"] == 2147000     # unchanged by salary
 
     def test_loss_year_has_no_income_tax(self, ops):
         from backend.reports import tax as tax_mod
@@ -215,6 +214,6 @@ class TestTaxEstimate:
         _purchase(ops, 125000, "2026-04-01")       # bigger expense -> loss
         est = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
         assert est["overskott_ore"] < 0
-        assert est["egenavgifter_ore"] == 0 and est["kommunalskatt_ore"] == 0
-        assert est["statlig_skatt_ore"] == 0
-        assert est["total_ore"] == est["moms_ore"]      # only moms
+        assert est["egenavgifter"]["netto_ore"] == 0
+        assert est["firma_income_tax_ore"] == 0
+        assert est["firma_total_ore"] == max(0, est["moms_ore"])   # only moms

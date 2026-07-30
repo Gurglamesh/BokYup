@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -501,16 +501,25 @@ _DEFAULT_CONFIG = {
     # than this many ören, treat it as pure rounding and book the diff to 3740. A
     # larger underpayment is a partial payout (a follow-up receivable on the customer).
     "rut_skv_rounding_tolerance_ore": "49",  # 0,49 kr
-    # Year-end tax estimate for an ENSKILD NÄRINGSIDKARE (the "Skatt"-tab). All rates
-    # are editable config because they change yearly and vary by kommun. Percentages are
-    # stored as centi-percent (28,97 % -> 2897); money as öre. Defaults ~2025/2026 — the
-    # user must set their own kommunal skattesats and check the year's values.
+    # Year-end tax estimate for an ENSKILD NÄRINGSIDKARE (the "Skatt"-tab). Every annual
+    # figure is editable config — update once a year from Skatteverkets "Belopp och
+    # procent" and regeringens "Beräkningskonventioner 20XX". Percentages are stored as
+    # centi-percent (28,97 % -> 2897); money as öre. Defaults are 2026 values.
+    "prisbasbelopp_ore": "5920000",              # prisbasbelopp 2026 (59 200 kr)
+    "kommunal_skattesats_pct_centi": "3237",     # kommunalskatt (SET YOUR KOMMUN)
+    "begravningsavgift_pct_centi": "0",          # begravningsavgift (set your församling, t.ex. 7 = 0,07 %)
     "egenavgift_pct_centi": "2897",              # egenavgifter 28,97 %
-    "egenavgift_schablon_pct_centi": "2500",     # schablonavdrag för egenavgifter 25 %
-    "kommunal_skattesats_pct_centi": "3237",     # genomsnittlig kommunalskatt (set your kommun)
-    "statlig_skatt_pct_centi": "2000",           # statlig inkomstskatt 20 % över brytpunkten
-    "statlig_brytpunkt_ore": "64310000",         # brytpunkt statlig skatt (643 100 kr, 2025)
-    "grundavdrag_ore": "1650000",                # grundavdrag (schablon, 16 500 kr — editable)
+    "egenavgift_nedsattning_pct_centi": "750",   # generell nedsättning 7,5 %
+    "egenavgift_nedsattning_max_ore": "1500000", #   … max 15 000 kr/år
+    "egenavgift_nedsattning_threshold_ore": "4000000",  # kräver överskott > 40 000 kr
+    "public_service_pct_centi": "100",           # public service-avgift 1 %
+    "public_service_max_ore": "118400",          #   … max 1 184 kr (2026)
+    "statlig_skatt_pct_centi": "2000",           # statlig inkomstskatt 20 %
+    "statlig_skiktgrans_ore": "64300000",        # skiktgräns 643 000 kr (2026)
+    "skattered_forvarv_pct_centi": "75",         # skattereduktion förvärvsinkomst 0,75 %
+    "skattered_forvarv_floor_ore": "4000000",    #   … på inkomst över 40 000 kr
+    "skattered_forvarv_max_ore": "150000",       #   … max 1 500 kr
+    "ovrig_forvarvsinkomst_ore": "0",            # lön/annan förvärvsinkomst (för totalöverblick)
 }
 
 
@@ -726,6 +735,20 @@ _MIGRATIONS: dict[int, str] = {
         INSERT OR IGNORE INTO config(key, value) VALUES ('statlig_skatt_pct_centi', '2000');
         INSERT OR IGNORE INTO config(key, value) VALUES ('statlig_brytpunkt_ore', '64310000');
         INSERT OR IGNORE INTO config(key, value) VALUES ('grundavdrag_ore', '1650000');
+    """,
+    20: """
+        INSERT OR IGNORE INTO config(key, value) VALUES ('prisbasbelopp_ore', '5920000');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('begravningsavgift_pct_centi', '0');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('egenavgift_nedsattning_pct_centi', '750');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('egenavgift_nedsattning_max_ore', '1500000');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('egenavgift_nedsattning_threshold_ore', '4000000');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('public_service_pct_centi', '100');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('public_service_max_ore', '118400');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('statlig_skiktgrans_ore', '64300000');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('skattered_forvarv_pct_centi', '75');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('skattered_forvarv_floor_ore', '4000000');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('skattered_forvarv_max_ore', '150000');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('ovrig_forvarvsinkomst_ore', '0');
     """,
 }
 
