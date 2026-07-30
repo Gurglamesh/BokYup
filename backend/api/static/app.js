@@ -275,7 +275,7 @@ function renderHome() {
 const SECTIONS = [
   ["transactions", "Transaktioner"],
   ["record", "Bokför"],
-  ["invoices", "Fakturor"],
+  ["invoices", "Kundfakturor"],
   ["articles", "Artiklar"],
   ["customers", "Kunder"],
   ["suppliers", "Leverantörer"],
@@ -1260,7 +1260,7 @@ const SECTION_RENDERERS = {
     ]);
     const custName = Object.fromEntries(customers.map((c) =>
       [c.kundnummer, c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim()]));
-    panel.appendChild(headerWithAdd("Fakturor", "+ Ny faktura", () => guard(() => invoiceForm(panel))));
+    panel.appendChild(headerWithAdd("Kundfakturor", "+ Ny faktura", () => guard(() => invoiceForm(panel))));
 
     // Drafts: unissued invoices saved to continue later.
     if (drafts.length) {
@@ -1286,7 +1286,7 @@ const SECTION_RENDERERS = {
         "Inga fakturor ännu. Ställ in företagsuppgifter och betalsätt under Inställningar."));
       return;
     }
-    panel.appendChild(el("h3", { style: "margin-top:18px" }, "Fakturor"));
+    panel.appendChild(el("h3", { style: "margin-top:18px" }, "Kundfakturor"));
     const STATE = {
       paid: ["paid", "Betald"], pending: ["pending", "Obetald"],
       partial: ["pending", "Delbetald"],
@@ -1412,6 +1412,26 @@ function potsFromLines(lines, rutPct, rotPct) {
     if (ln.reduction_type === "rut") rut += red; else rot += red;
   }
   return { rut, rot };
+}
+
+// Live invoice totals (ören) from the article lines — a preview while building. The final
+// invoice also applies öresavrundning on the customer part; here we show whole-krona
+// "Att betala (ca)" to match closely.
+function invoiceTotals(lines, rutPct, rotPct) {
+  let ex = 0, moms = 0, rabatt = 0;
+  for (const ln of lines) {
+    const gross = Math.round((ln.quantity_centi || 0) * (ln.unit_price_ore || 0) / 100);
+    const disc = Math.round(gross * (ln.discount_pct_centi || 0) / 10000);
+    const lineEx = gross - disc;
+    ex += lineEx; rabatt += disc;
+    moms += Math.round(lineEx * (RATE_PCT[ln.rate_code] || 0));
+  }
+  const inc = ex + moms;
+  const { rut, rot } = potsFromLines(lines, rutPct, rotPct);
+  const husavdrag = rut + rot;
+  const attExakt = inc - husavdrag;                         // customer part before öresavrundning
+  const attBetala = Math.round(attExakt / 100) * 100;       // avrundningslagen (helt krontal)
+  return { ex, moms, inc, rabatt, rut, rot, husavdrag, attBetala };
 }
 function momsLinesEditor() {
   const rowsBox = el("div", {});
@@ -2225,7 +2245,27 @@ async function invoiceForm(panel, draft) {
     getYear: () => parseInt((invDate.value || "").slice(0, 4), 10) || new Date().getFullYear(),
     initialRecipients: dp.recipients || [],
   });
-  const lines = lineItemsEditor(incomeCats, () => recips.recompute(), dp.lines || [], articles);
+  // Live totals box, updated on every line change (below).
+  const totalsBox = el("div", { class: "box", style: "margin-top:14px" });
+  const kvRow = (k, ore, opts = {}) => el("div", { style: "display:flex;justify-content:space-between;"
+    + "padding:2px 0;" + (opts.bold ? "font-weight:700;font-size:16px;border-top:1px solid var(--border,#ccc);margin-top:4px;padding-top:6px;" : "")
+    + (opts.red ? "color:var(--danger,#c33);" : "") },
+    el("span", {}, k), el("span", { style: "font-variant-numeric:tabular-nums" }, toKr(ore) + " kr"));
+  function updateTotals() {
+    const t = invoiceTotals(lines.get(), redCfg.rut_pct, redCfg.rot_pct);
+    totalsBox.innerHTML = "";
+    totalsBox.appendChild(el("div", { style: "font-weight:600;margin-bottom:4px" }, "Summering (preliminär)"));
+    if (t.rabatt) totalsBox.appendChild(kvRow("Total rabatt", -t.rabatt, { red: true }));
+    totalsBox.appendChild(kvRow("Summa exkl. moms", t.ex));
+    totalsBox.appendChild(kvRow("Moms", t.moms));
+    if (t.husavdrag) {
+      totalsBox.appendChild(kvRow("Summa inkl. moms", t.inc));
+      if (t.rut) totalsBox.appendChild(kvRow("− RUT-avdrag", -t.rut, { red: true }));
+      if (t.rot) totalsBox.appendChild(kvRow("− ROT-avdrag", -t.rot, { red: true }));
+    }
+    totalsBox.appendChild(kvRow(t.husavdrag ? "Att betala för kund (ca)" : "Att betala (ca)", t.attBetala, { bold: true }));
+  }
+  const lines = lineItemsEditor(incomeCats, () => { recips.recompute(); updateTotals(); }, dp.lines || [], articles);
   customer.onchange = () => recips.reloadPeople();
   invDate.onchange = () => recips.refreshCaps();
 
@@ -2245,6 +2285,8 @@ async function invoiceForm(panel, draft) {
     + "bildar en pott som mottagarna delar på. Välj fakturakunden eller en hushållsmedlem, "
     + "ange personnummer och andel (%). Beloppen räknas ut nedan."));
   panel.appendChild(recips.element);
+  panel.appendChild(el("h3", { style: "margin-top:18px" }, "Summa"));
+  panel.appendChild(totalsBox);
   panel.appendChild(el("div", { class: "row", style: "margin-top:14px" },
     wrap("Betalningsvillkor", terms), wrap("Er referens", yourRef), wrap("Notering", note)));
   panel.appendChild(el("div", { style: "margin-top:16px" },
@@ -2253,6 +2295,7 @@ async function invoiceForm(panel, draft) {
     el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => { state.section = "invoices"; renderWorkspace(); } }, "Avbryt")));
 
   await recips.reloadPeople();
+  updateTotals();
 
   // Collect the current form state (may be incomplete — that's fine for a draft).
   function collectBody() {
