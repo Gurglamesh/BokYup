@@ -492,6 +492,19 @@ def _build_router():
     def delete_draft(book_id: str, draft_id: int, request: Request):
         return fac(request).h_delete_draft({"book_id": book_id, "draft_id": draft_id}, {}, {})
 
+    @r.get("/books/{book_id}/offerter")
+    def list_offerter(book_id: str, request: Request):
+        return fac(request).h_list_offerter({"book_id": book_id}, {}, {})
+
+    @r.post("/books/{book_id}/offerter", status_code=201)
+    def create_offert(book_id: str, body: dict, request: Request):
+        return fac(request).h_create_offert({"book_id": book_id}, body, {})
+
+    @r.get("/books/{book_id}/offerter/{offert_id}/pdf")
+    def offert_pdf(book_id: str, offert_id: int, request: Request):
+        res = fac(request).h_offert_pdf({"book_id": book_id, "offert_id": offert_id}, {}, {})
+        return Response(content=res.content, media_type=res.media_type)
+
     @r.get("/books/{book_id}/invoices/{invoice_id}")
     def get_invoice(book_id: str, invoice_id: int, request: Request):
         return fac(request).h_get_invoice({"book_id": book_id, "invoice_id": invoice_id}, {}, {})

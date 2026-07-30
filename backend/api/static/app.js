@@ -1289,16 +1289,18 @@ const SECTION_RENDERERS = {
       await invoiceForm(panel, { payload: { customer_id: kid } });
       return;
     }
-    const [list, drafts, customers] = await Promise.all([
+    const [list, drafts, customers, offerter] = await Promise.all([
       api("GET", `/books/${bid()}/invoices`),
       api("GET", `/books/${bid()}/invoice-drafts`),
       api("GET", `/books/${bid()}/customers`),
+      api("GET", `/books/${bid()}/offerter`),
     ]);
     const custName = Object.fromEntries(customers.map((c) =>
       [c.kundnummer, c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim()]));
     panel.appendChild(headerWithAdd("Kundfakturor", "+ Ny faktura", () => guard(() => invoiceForm(panel))));
 
-    // Drafts: unissued invoices saved to continue later.
+    // Drafts: unissued invoices saved to continue later. Each can also spawn an offert
+    // (quote) — the draft is kept, an offert with its own number is created.
     if (drafts.length) {
       panel.appendChild(el("h3", { style: "margin-top:14px" }, "Utkast"));
       panel.appendChild(simpleTable(
@@ -1310,10 +1312,29 @@ const SECTION_RENDERERS = {
               const full = await api("GET", `/books/${bid()}/invoice-drafts/${d.id}`);
               invoiceForm(panel, full);
             }) }, "Fortsätt"),
+            el("button", { class: "btn small ghost", title: "Skapa en offert från utkastet (utkastet behålls)",
+              onclick: () => guard(async () => {
+                const o = await api("POST", `/books/${bid()}/offerter`, { draft_id: d.id });
+                toast(`Offert ${o.offert_number} skapad`);
+                showPdf(`/books/${bid()}/offerter/${o.offert_id}/pdf`, `Offert ${o.offert_number}`);
+                renderWorkspace();
+              }) }, "Skapa offert"),
             el("button", { class: "btn small ghost danger", onclick: () => guard(async () => {
               await api("DELETE", `/books/${bid()}/invoice-drafts/${d.id}`);
               toast("Utkast borttaget"); renderWorkspace();
             }) }, "Ta bort"))]),
+      ));
+    }
+
+    // Offerter (quotes): numbered proposal documents, no ledger impact.
+    if (offerter.length) {
+      panel.appendChild(el("h3", { style: "margin-top:18px" }, "Offerter"));
+      panel.appendChild(simpleTable(
+        ["Offertnr", "Kund", "Datum", "Giltig till", "Summa", ""],
+        offerter.map((o) => [String(o.offert_number), custName[o.customer_id] || ("Kund " + o.customer_id),
+          o.offert_date, o.valid_until || "—", toKr(o.inc_moms_ore || 0) + " kr",
+          el("button", { class: "btn small ghost",
+            onclick: () => guard(() => showPdf(`/books/${bid()}/offerter/${o.id}/pdf`, `Offert ${o.offert_number}`)) }, "PDF")]),
       ));
     }
 
@@ -2390,6 +2411,7 @@ async function invoiceForm(panel, draft) {
   panel.appendChild(el("div", { style: "margin-top:16px" },
     el("button", { class: "btn brand", onclick: () => guard(submit) }, "Skapa faktura"),
     el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(saveDraft) }, "Spara utkast"),
+    el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(createOffert) }, "Skapa offert"),
     el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => { state.section = "invoices"; renderWorkspace(); } }, "Avbryt")));
 
   await recips.reloadPeople();
@@ -2405,6 +2427,15 @@ async function invoiceForm(panel, draft) {
       your_reference: yourRef.value || null, note: note.value || null,
       lines: lines.get(), recipients: recips.get(),
     };
+  }
+
+  async function createOffert() {
+    const payload = collectBody();
+    if (!payload.customer_id) { toast("Välj en kund först", true); return; }
+    if (!payload.lines || payload.lines.length === 0) { toast("Lägg till minst en rad", true); return; }
+    const o = await api("POST", `/books/${bid()}/offerter`, { payload });
+    toast(`Offert ${o.offert_number} skapad`);
+    showPdf(`/books/${bid()}/offerter/${o.offert_id}/pdf`, `Offert ${o.offert_number}`);
   }
 
   async function saveDraft() {

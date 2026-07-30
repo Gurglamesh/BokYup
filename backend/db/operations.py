@@ -1646,6 +1646,146 @@ class BookOps:
         with self.conn:
             self.conn.execute("DELETE FROM invoice_draft WHERE id=?", (draft_id,))
 
+    # ---- offerter (quotes: numbered proposal documents, book nothing) ----------
+    def _next_offert_number(self) -> int:
+        return self.conn.execute(
+            "SELECT COALESCE(MAX(offert_number), 0) + 1 AS n FROM offert").fetchone()["n"]
+
+    def _offert_figures(self, customer_id: int, customer: dict, lines: list[dict],
+                        recipients: list[dict], category_id: Optional[int]) -> dict:
+        """Compute an offert's display figures (no booking, no persistence): per-line
+        ex/moms with rabatt, RUT/ROT pots + recipient split, and totals. Mirrors the
+        create_invoice computation but is standalone so the booking path is untouched."""
+        if not lines:
+            raise ValueError("En offert behöver minst en artikelrad")
+        computed = []
+        for i, ln in enumerate(lines, start=1):
+            rate_code = ln["rate_code"]
+            if rate_code not in S.MOMS_RATES:
+                raise ValueError(f"Unknown moms rate {rate_code!r}")
+            qty_centi = int(ln["quantity_centi"])
+            unit_price_ore = int(ln["unit_price_ore"])
+            discount_pct_centi = int(ln.get("discount_pct_centi") or 0)
+            if not 0 <= discount_pct_centi <= 10000:
+                raise ValueError("Rabatt måste vara mellan 0 och 100 %")
+            gross_ex = round(qty_centi * unit_price_ore / 100)
+            ex = gross_ex - round(gross_ex * discount_pct_centi / 10000)
+            _, moms, _ = compute_moms_figures(ex, rate_code, inclusive=False)
+            reduction_type = ln.get("reduction_type")
+            if reduction_type is None and ln.get("rut_eligible"):
+                reduction_type = "rut"
+            if reduction_type not in (None, "rut", "rot"):
+                raise ValueError(f"Unknown reduction_type {reduction_type!r}")
+            line_cat = ln.get("category_id") or category_id
+            name = bas = None
+            if line_cat:
+                row = self.conn.execute("SELECT name, bas_konto FROM category WHERE id=?",
+                                        (line_cat,)).fetchone()
+                if row:
+                    name, bas = row["name"], row["bas_konto"]
+            computed.append({
+                "line_no": i, "description": ln["description"], "category_id": line_cat,
+                "category_name": name, "category_bas_konto": bas,
+                "quantity_centi": qty_centi, "unit": ln.get("unit"),
+                "unit_price_ore": unit_price_ore, "rate_code": rate_code,
+                "reduction_type": reduction_type, "rut_eligible": 1 if reduction_type else 0,
+                "discount_pct_centi": discount_pct_centi, "ex_moms_ore": ex, "moms_ore": moms,
+            })
+        rut_pct, rot_pct = self.reduction_pcts()
+        rut_pot = sum(round((cl["ex_moms_ore"] + cl["moms_ore"]) * rut_pct / 100)
+                      for cl in computed if cl["reduction_type"] == "rut")
+        rot_pot = sum(round((cl["ex_moms_ore"] + cl["moms_ore"]) * rot_pct / 100)
+                      for cl in computed if cl["reduction_type"] == "rot")
+        has_reduction = bool(rut_pot or rot_pot)
+        if has_reduction and customer["type"] != "private":
+            raise ValueError("RUT/ROT gäller endast privatpersoner")
+        rut_total = rot_total = 0
+        out_recips = []
+        if recipients:
+            if customer["type"] != "private":
+                raise ValueError("RUT/ROT-mottagare gäller endast privatpersoner")
+            resolved = [self._resolve_recipient(r, customer_id, single=len(recipients) == 1)
+                        for r in recipients]
+            if rut_pot and sum(rc["rut_share_centi"] for rc in resolved) > 10000:
+                raise ValueError("RUT-andelarna överstiger 100 %")
+            if rot_pot and sum(rc["rot_share_centi"] for rc in resolved) > 10000:
+                raise ValueError("ROT-andelarna överstiger 100 %")
+            cum_rut = cum_rot = 0
+            for rc in resolved:
+                br, ar = cum_rut, cum_rut + rc["rut_share_centi"]; cum_rut = ar
+                rut_amt = round(rut_pot * ar / 10000) - round(rut_pot * br / 10000)
+                bo, ao = cum_rot, cum_rot + rc["rot_share_centi"]; cum_rot = ao
+                rot_amt = round(rot_pot * ao / 10000) - round(rot_pot * bo / 10000)
+                rut_total += rut_amt; rot_total += rot_amt
+                out_recips.append({
+                    "customer_id": rc["customer_id"], "first_name": rc["first_name"],
+                    "last_name": rc["last_name"], "personnummer": rc["personnummer"],
+                    "share_pct": rc["rut_share_centi"] / 100,
+                    "rut_share_pct": rc["rut_share_centi"] / 100,
+                    "rot_share_pct": rc["rot_share_centi"] / 100,
+                    "rut_amount_ore": rut_amt, "rot_amount_ore": rot_amt,
+                })
+        elif has_reduction:
+            raise ValueError("RUT/ROT-rader kräver minst en mottagare")
+        ex_total = sum(cl["ex_moms_ore"] for cl in computed)
+        moms_total = sum(cl["moms_ore"] for cl in computed)
+        return {"lines": computed, "recipients": out_recips,
+                "ex_moms_ore": ex_total, "moms_ore": moms_total,
+                "inc_moms_ore": ex_total + moms_total,
+                "rut_total_ore": rut_total, "rot_total_ore": rot_total}
+
+    def create_offert(self, payload: dict, source_draft_id: Optional[int] = None) -> dict:
+        """Create a numbered offert (quote) from a form payload. Books nothing; assigns
+        the next offert_number and stores the encrypted render snapshot."""
+        customer_id = payload.get("customer_id")
+        if not customer_id:
+            raise ValueError("Offert kräver en kund")
+        customer = self.get_customer(int(customer_id))
+        fig = self._offert_figures(int(customer_id), customer, payload.get("lines") or [],
+                                   payload.get("recipients") or [], payload.get("category_id"))
+        offert_date = payload.get("invoice_date") or _now()[:10]
+        valid_until = (payload.get("valid_until") or payload.get("due_date")
+                       or (datetime.fromisoformat(offert_date) + timedelta(days=30)).date().isoformat())
+        number = self._next_offert_number()
+        render = {
+            "doc_type": "offert", "invoice_number": number, "invoice_date": offert_date,
+            "valid_until": valid_until, "buyer": customer, "seller": self.get_company(),
+            "payment_methods": [], "payment_terms": payload.get("payment_terms"),
+            "your_reference": payload.get("your_reference"),
+            "our_reference": payload.get("our_reference"), "note": payload.get("note"),
+            **fig,
+        }
+        snapshot_enc = self.session.encrypt_text(json.dumps(render, default=str))
+        husavdrag = fig["rut_total_ore"] + fig["rot_total_ore"]
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO offert(offert_number, customer_id, offert_date, valid_until, "
+                "inc_moms_ore, husavdrag_ore, snapshot_enc, source_draft_id, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (number, int(customer_id), offert_date, valid_until, fig["inc_moms_ore"],
+                 husavdrag, snapshot_enc, source_draft_id, _now()))
+        return {"offert_id": cur.lastrowid, "offert_number": number,
+                "inc_moms_ore": fig["inc_moms_ore"], "husavdrag_ore": husavdrag}
+
+    def create_offert_from_draft(self, draft_id: int) -> dict:
+        """Create an offert from a saved draft. The draft is KEPT (not consumed)."""
+        draft = self.get_draft(draft_id)
+        return self.create_offert(draft["payload"], source_draft_id=draft_id)
+
+    def list_offerter(self) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT id, offert_number, customer_id, offert_date, valid_until, inc_moms_ore, "
+            "husavdrag_ore, source_draft_id, created_at FROM offert "
+            "ORDER BY offert_number").fetchall()]
+
+    def get_offert(self, offert_id: int) -> dict:
+        """Return the offert's decrypted render dict (for the PDF)."""
+        row = self.conn.execute("SELECT snapshot_enc FROM offert WHERE id=?",
+                                (offert_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No offert {offert_id}")
+        return json.loads(self.session.decrypt_text(row["snapshot_enc"]))
+
     def _invoice_balances(self, invoice_id: int) -> dict:
         """
         Derive an invoice's running settlement from the event subledger.

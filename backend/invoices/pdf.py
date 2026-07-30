@@ -55,6 +55,7 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     methods = invoice.get("payment_methods") or []
     credit_of = invoice.get("credit_of")
     is_credit = credit_of is not None
+    is_offert = invoice.get("doc_type") == "offert"
 
     pdf = FPDF(format="A4", unit="mm")
     pdf.set_auto_page_break(auto=True, margin=18)
@@ -82,10 +83,15 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         logo_bottom = 12 + h
 
     # ---- header: title (left) + invoice meta (right). Seller goes in the footer.
-    text(pdf.l_margin, 16, "KREDITFAKTURA" if is_credit else "FAKTURA", size=22, bold=True)
+    text(pdf.l_margin, 16, "OFFERT" if is_offert else ("KREDITFAKTURA" if is_credit else "FAKTURA"),
+         size=22, bold=True)
 
     mx = pdf.l_margin + W * 0.62
-    if is_credit:
+    if is_offert:
+        meta = [("Offertnr", str(invoice.get("invoice_number") or "")),
+                ("Offertdatum", invoice.get("invoice_date") or ""),
+                ("Giltig till", invoice.get("valid_until") or "")]
+    elif is_credit:
         meta = [("Kreditfakturanr", str(invoice.get("invoice_number") or "")),
                 ("Avser faktura", str(credit_of)),
                 ("Datum", invoice.get("invoice_date") or "")]
@@ -240,11 +246,19 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
             _kv(pdf, rx, ty, rw, "Begärd skattereduktion RUT", _kr(rut_total)); ty += 6
         if rot_total:
             _kv(pdf, rx, ty, rw, "Begärd skattereduktion ROT", _kr(rot_total)); ty += 6
-        ty = _pay_block(pdf, rx, ty, rw, "Att betala", invoice["inc_moms_ore"] - husavdrag)
+        ty = _pay_block(pdf, rx, ty, rw, "Uppskattat pris" if is_offert else "Att betala",
+                        invoice["inc_moms_ore"] - husavdrag)
     else:
-        pay_label = "Att återfå" if is_credit else "Att betala"
+        pay_label = "Uppskattat pris" if is_offert else ("Att återfå" if is_credit else "Att betala")
         pay_amount = -invoice["inc_moms_ore"] if is_credit else invoice["inc_moms_ore"]
         ty = _pay_block(pdf, rx, ty, rw, pay_label, pay_amount)
+    if is_offert:
+        ty += 4
+        pdf.set_font("Helvetica", "I", 8)
+        pdf.set_xy(pdf.l_margin, ty)
+        pdf.multi_cell(W, 4, _s("Detta är en offert och inte en faktura. Priserna är "
+                                + "preliminära och giltiga till angivet datum."))
+        ty = pdf.get_y()
 
     # ---- payment methods + terms --------------------------------------------
     ty += 4

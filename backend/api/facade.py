@@ -568,6 +568,24 @@ class AppFacade:
         self._ops(p["book_id"]).delete_draft(int(p["draft_id"]))
         return {"deleted": True}
 
+    # ---- offerter (quotes) ----
+    def h_list_offerter(self, p, b, q):
+        return self._ops(p["book_id"]).list_offerter()
+
+    def h_create_offert(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        if b.get("draft_id") is not None:
+            return ops.create_offert_from_draft(int(b["draft_id"]))
+        return ops.create_offert(b.get("payload") or b)
+
+    def h_offert_pdf(self, p, b, q):
+        from backend.invoices.pdf import render_invoice_pdf
+        ops = self._ops(p["book_id"])
+        logo = ops.get_logo()
+        pdf = render_invoice_pdf(ops.get_offert(int(p["offert_id"])),
+                                 logo_png=logo[0] if logo else None)
+        return RawResult(content=pdf, media_type="application/pdf")
+
     def h_get_invoice(self, p, b, q):
         return self._ops(p["book_id"]).get_invoice(int(p["invoice_id"]))
 
@@ -710,6 +728,9 @@ _route("POST", "/books/{book_id}/invoice-drafts", "h_create_draft", 201)
 _route("GET", "/books/{book_id}/invoice-drafts/{draft_id}", "h_get_draft")
 _route("PUT", "/books/{book_id}/invoice-drafts/{draft_id}", "h_update_draft")
 _route("DELETE", "/books/{book_id}/invoice-drafts/{draft_id}", "h_delete_draft")
+_route("GET", "/books/{book_id}/offerter", "h_list_offerter")
+_route("POST", "/books/{book_id}/offerter", "h_create_offert", 201)
+_route("GET", "/books/{book_id}/offerter/{offert_id}/pdf", "h_offert_pdf")
 _route("POST", "/books/{book_id}/invoices", "h_create_invoice", 201)
 _route("GET", "/books/{book_id}/invoices", "h_list_invoices")
 _route("GET", "/books/{book_id}/invoices/{invoice_id}/pdf", "h_invoice_pdf")

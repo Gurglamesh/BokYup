@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -413,6 +413,22 @@ CREATE TABLE support_ledger (
     created_at  TEXT NOT NULL
 );
 
+-- Offert (quote): a numbered proposal document. Books NOTHING (no ledger/moms impact);
+-- its own sequential offert_number series. The full render snapshot (buyer incl. pnr,
+-- seller, lines, recipients, totals) is stored encrypted so the PDF can be regenerated.
+CREATE TABLE offert (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    offert_number  INTEGER NOT NULL UNIQUE,
+    customer_id    INTEGER REFERENCES customer(kundnummer),
+    offert_date    TEXT NOT NULL,
+    valid_until    TEXT,
+    inc_moms_ore   INTEGER NOT NULL DEFAULT 0,
+    husavdrag_ore  INTEGER NOT NULL DEFAULT 0,
+    snapshot_enc   TEXT NOT NULL,
+    source_draft_id INTEGER,             -- the draft it was created from (kept, not consumed)
+    created_at     TEXT NOT NULL
+);
+
 -- ----- indexes ------------------------------------------------------------
 CREATE INDEX idx_verifikation_date   ON verifikation(ver_date);
 CREATE INDEX idx_posting_ver         ON posting(verifikation_id);
@@ -776,6 +792,20 @@ _MIGRATIONS: dict[int, str] = {
     """,
     22: """
         ALTER TABLE transaktion ADD COLUMN ext_ref TEXT;
+    """,
+    23: """
+        CREATE TABLE IF NOT EXISTS offert (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            offert_number  INTEGER NOT NULL UNIQUE,
+            customer_id    INTEGER REFERENCES customer(kundnummer),
+            offert_date    TEXT NOT NULL,
+            valid_until    TEXT,
+            inc_moms_ore   INTEGER NOT NULL DEFAULT 0,
+            husavdrag_ore  INTEGER NOT NULL DEFAULT 0,
+            snapshot_enc   TEXT NOT NULL,
+            source_draft_id INTEGER,
+            created_at     TEXT NOT NULL
+        );
     """,
 }
 

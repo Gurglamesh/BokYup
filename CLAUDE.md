@@ -557,6 +557,19 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       numeric sequence of booked references (own sequence, independent of faktura numbers /
       makulering — last "RUT4" → "RUT5"; API `GET /rut-next-reference`; prefilled + editable
       in the Skatteverket-payment flow). Tests pass (305); browser-smoke-tested.
+- [x] **Offert (quote) från utkast (schema v23, 2026-07).** A numbered **offert** document
+      that **books nothing** (no ledger/moms impact), with its own sequential
+      `offert_number` series. Created from a saved **utkast** (the draft is KEPT, not
+      consumed) or straight from the faktura-form's current payload. `create_offert`/
+      `create_offert_from_draft`/`list_offerter`/`get_offert` + `_offert_figures` (standalone
+      line/moms/RUT-pot computation mirroring create_invoice so the booking path is
+      untouched); the full render snapshot (buyer incl. pnr, seller, lines, recipients,
+      totals) is stored **DEK-encrypted** in the `offert` table. The PDF reuses
+      `render_invoice_pdf` in an **offert mode** (title OFFERT, Offertnr/Offertdatum/Giltig
+      till, "Uppskattat pris", a "detta är en offert"-disclaimer; no payment methods / support
+      text). API `GET/POST /offerter`, `GET /offerter/{id}/pdf`. UI: "Skapa offert" on each
+      draft row **and** on the faktura form (keeps the draft, opens the PDF) + an "Offerter"
+      list in Kundfakturor. Tests pass (307); browser-smoke-tested (offert from draft + PDF).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

@@ -777,6 +777,36 @@ class TestInvoices:
         rut_invoice_paid_with_ref("RUT4")
         assert client.get(f"/books/{book}/rut-next-reference").json()["reference"] == "RUT5"
 
+    def test_offert_from_draft_keeps_draft_and_numbers_sequentially(self, client, book):
+        cat, kid = self._setup(client, book)
+        payload = {"customer_id": kid, "invoice_date": "2026-03-01",
+                   "lines": [{"description": "Jobb", "quantity_centi": 100,
+                              "unit_price_ore": 100000, "rate_code": "25", "category_id": cat}],
+                   "recipients": []}
+        did = client.post(f"/books/{book}/invoice-drafts", json={"payload": payload}).json()["id"]
+        # create an offert from the draft — the draft is kept
+        o1 = client.post(f"/books/{book}/offerter", json={"draft_id": did}).json()
+        assert o1["offert_number"] == 1 and o1["inc_moms_ore"] == 125000
+        assert len(client.get(f"/books/{book}/invoice-drafts").json()) == 1   # draft kept
+        # a second offert increments the number (own sequence)
+        o2 = client.post(f"/books/{book}/offerter", json={"draft_id": did}).json()
+        assert o2["offert_number"] == 2
+        lst = client.get(f"/books/{book}/offerter").json()
+        assert [o["offert_number"] for o in lst] == [1, 2]
+        assert lst[0]["inc_moms_ore"] == 125000
+        # the offert renders a PDF (OFFERT document)
+        pdf = client.get(f"/books/{book}/offerter/{o1['offert_id']}/pdf")
+        assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
+
+    def test_offert_from_payload_without_draft(self, client, book):
+        cat, kid = self._setup(client, book)
+        o = client.post(f"/books/{book}/offerter", json={"payload": {
+            "customer_id": kid, "invoice_date": "2026-03-01",
+            "lines": [{"description": "X", "quantity_centi": 100, "unit_price_ore": 50000,
+                       "rate_code": "25", "category_id": cat}], "recipients": []}}).json()
+        assert o["offert_number"] == 1 and o["inc_moms_ore"] == 62500
+        assert len(client.get(f"/books/{book}/invoice-drafts").json()) == 0   # no draft created
+
     def test_skatteverket_partial_payout_creates_followup_via_api(self, client, book):
         cat, kid = self._setup(client, book)
         inv = client.post(f"/books/{book}/invoices", json={
