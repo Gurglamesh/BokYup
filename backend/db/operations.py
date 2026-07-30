@@ -629,17 +629,21 @@ class BookOps:
                        lines: list[dict], trans_date: str, *,
                        note: Optional[str] = None,
                        receipt_original_format: Optional[str] = None,
+                       ext_ref: Optional[str] = None,
                        paid_date: Optional[str] = None) -> dict:
         """
         Record a purchase (ingående moms, deductible). `lines` is a list of
-        {rate_code, amount_ore, inclusive} dicts. If `paid_date` is given the
-        transaktion is booked immediately (cash); otherwise it stays pending.
+        {rate_code, amount_ore, inclusive} dicts. `ext_ref` is the supplier's
+        kvitto-/fakturanummer. If `paid_date` is given the transaktion is booked
+        immediately (cash); otherwise it stays pending (an incoming supplier invoice
+        awaiting payment — book it now, mark it paid later via register_payment).
         """
         self._check_category(category_id, "expense")
         tid = self._insert_transaktion(
             direction="in", category_id=category_id, supplier_id=supplier_id,
             customer_id=None, trans_date=trans_date, note=note,
             receipt_original_format=receipt_original_format, snapshot_enc=None,
+            ext_ref=(ext_ref.strip() if ext_ref and ext_ref.strip() else None),
         )
         self._insert_moms_lines(tid, lines)
         result = {"transaktion_id": tid}
@@ -2319,14 +2323,15 @@ class BookOps:
         return rid
 
     def _insert_transaktion(self, *, direction, category_id, supplier_id, customer_id,
-                            trans_date, note, receipt_original_format, snapshot_enc) -> int:
+                            trans_date, note, receipt_original_format, snapshot_enc,
+                            ext_ref=None) -> int:
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO transaktion(direction, category_id, supplier_id, customer_id, "
-                "trans_date, status, customer_snapshot_enc, receipt_original_format, note, created_at) "
-                "VALUES (?,?,?,?,?, 'pending', ?,?,?,?)",
+                "trans_date, status, customer_snapshot_enc, receipt_original_format, note, "
+                "ext_ref, created_at) VALUES (?,?,?,?,?, 'pending', ?,?,?,?,?)",
                 (direction, category_id, supplier_id, customer_id, trans_date,
-                 snapshot_enc, receipt_original_format, note, _now()),
+                 snapshot_enc, receipt_original_format, note, ext_ref, _now()),
             )
         return cur.lastrowid
 

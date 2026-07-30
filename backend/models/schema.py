@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -188,6 +188,7 @@ CREATE TABLE transaktion (
     customer_snapshot_enc  TEXT,        -- frozen invoice customer details (encrypted)
     receipt_original_format TEXT CHECK (receipt_original_format IN ('paper','digital')),
     note                   TEXT,
+    ext_ref                TEXT,        -- supplier's kvitto-/fakturanummer (purchases)
     created_at             TEXT NOT NULL
 );
 
@@ -772,6 +773,9 @@ _MIGRATIONS: dict[int, str] = {
         INSERT OR IGNORE INTO config(key, value) VALUES ('jsa_c3_centi', '2510');
         INSERT OR IGNORE INTO config(key, value) VALUES ('jsa_b3_base_centi', '18130');
         INSERT OR IGNORE INTO config(key, value) VALUES ('jsa_b4_level_centi', '30270');
+    """,
+    22: """
+        ALTER TABLE transaktion ADD COLUMN ext_ref TEXT;
     """,
 }
 

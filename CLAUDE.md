@@ -542,6 +542,21 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       deklaration (verify against Skatteverket; high-income jobbskatteavdrag phase-out + AB
       are possible follow-ups). Tests pass (302); browser-smoke-tested (salary + marginal
       split).
+- [x] **Inköp-tabb + Kundfakturor-omdöp + live-fakturatotal + RUT-worklist/nummer
+      (schema v22, 2026-07).** (1) New **"Inköp"** tab: record purchases/expenses to the
+      firma with a **kvitto-/fakturanummer** (`transaktion.ext_ref`), an attached receipt,
+      supplier + BAS-category + multi-rate moms lines, and paid-now **or** as an incoming
+      **leverantörsfaktura** booked pending and marked paid later (`register_payment`).
+      `record_expense(ext_ref=)`; the transaktioner listing exposes `ext_ref` + `amount_ore`
+      (Σ inc_moms). UI reuses momsLinesEditor/receiptPicker/payFlow/receiptsFlow.
+      (2) The **"Fakturor"** tab is renamed **"Kundfakturor"**. (3) The invoice builder shows
+      a **live "Summering (preliminär)"** (rabatt/ex-moms/moms/husavdrag → att betala, whole
+      krona) updated per line change — display only, drafts unaffected. (4) RUT tab gains an
+      **"Inväntar husavdrag från Skatteverket"** worklist (invoices in state `awaiting_rut`)
+      + `next_rut_reference()` which auto-suggests the next begäran ref by continuing the
+      numeric sequence of booked references (own sequence, independent of faktura numbers /
+      makulering — last "RUT4" → "RUT5"; API `GET /rut-next-reference`; prefilled + editable
+      in the Skatteverket-payment flow). Tests pass (305); browser-smoke-tested.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

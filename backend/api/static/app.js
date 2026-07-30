@@ -276,6 +276,7 @@ const SECTIONS = [
   ["transactions", "Transaktioner"],
   ["record", "Bokför"],
   ["invoices", "Kundfakturor"],
+  ["purchases", "Inköp"],
   ["articles", "Artiklar"],
   ["customers", "Kunder"],
   ["suppliers", "Leverantörer"],
@@ -342,6 +343,41 @@ const SECTION_RENDERERS = {
         el("th", {}, "Status"), el("th", { class: "num" }, "Verifikat"),
         el("th", { class: "num" }, "Kvitto"), el("th", {}, ""))),
       el("tbody", {}, rows),
+    ));
+  },
+
+  // ----- inköp (purchases: expenses + supplier invoices + receipts) -----
+  async purchases(panel) {
+    const [txs, cats, suppliers] = await Promise.all([
+      api("GET", `/books/${bid()}/transaktioner`),
+      api("GET", `/books/${bid()}/categories`),
+      api("GET", `/books/${bid()}/suppliers`),
+    ]);
+    const catName = Object.fromEntries(cats.map((c) => [c.id, c.name]));
+    const supName = Object.fromEntries(suppliers.map((s) => [s.id, s.name]));
+    const list = txs.filter((t) => t.direction === "in");
+    panel.appendChild(headerWithAdd("Inköp", "+ Nytt inköp", () => guard(() => purchaseForm(panel))));
+    panel.appendChild(el("p", { class: "muted", style: "margin-top:6px" },
+      "Inköp och utgifter till firman. Ange kvitto- eller fakturanummer och bifoga kvittot. "
+      + "En leverantörsfaktura kan bokföras direkt och markeras som betald när den betalas."));
+    if (list.length === 0) { panel.appendChild(el("p", { class: "muted" }, "Inga inköp ännu.")); return; }
+    const actions = (t) => el("span", { style: "display:inline-flex;gap:4px" },
+      el("button", { class: "btn small ghost", onclick: () => guard(() => receiptsFlow(t.id, t.status === "pending")) }, "📎 Kvitto"),
+      t.status === "pending"
+        ? el("button", { class: "btn small", onclick: () => guard(() => payFlow(t.id)) }, "Bokför betalning")
+        : null);
+    panel.appendChild(searchTable(
+      "Sök inköp (leverantör, nr, datum, kategori)…",
+      ["Datum", "Leverantör", "Kategori", "Kvitto/Faktura-nr", "Belopp", "Status", ""],
+      list,
+      (t, q) => [t.trans_date, supName[t.supplier_id] || "", catName[t.category_id] || "",
+        t.ext_ref || ""].join(" ").toLowerCase().includes(q),
+      (t) => [t.trans_date, t.supplier_id ? (supName[t.supplier_id] || "—") : "—",
+        catName[t.category_id] || "—", t.ext_ref || "",
+        toKr(t.amount_ore || 0) + " kr",
+        el("span", { class: "pill " + (t.status === "paid" ? "paid" : "pending") },
+          t.status === "paid" ? "Betald" : "Väntar"),
+        actions(t)],
     ));
   },
 
@@ -2203,6 +2239,68 @@ function newInvoiceForCustomer(kundnummer) {
   state.pendingInvoiceCustomer = kundnummer;
   state.section = "invoices";
   renderWorkspace();
+}
+
+async function purchaseForm(panel) {
+  const [cats, suppliers] = await Promise.all([
+    api("GET", `/books/${bid()}/categories`),
+    api("GET", `/books/${bid()}/suppliers`),
+  ]);
+  const expenseCats = cats.filter((c) => c.kind === "expense");
+  if (expenseCats.length === 0) {
+    toast("Lägg till minst en utgiftskategori (BAS-konto) först", true);
+    return;
+  }
+  panel.innerHTML = "";
+  panel.appendChild(el("h2", {}, "Nytt inköp"));
+  const supplier = el("select", {}, el("option", { value: "" }, "— (ingen leverantör) —"),
+    ...suppliers.map((s) => el("option", { value: s.id }, s.name)));
+  const cat = el("select", {}, ...expenseCats.map((c) => el("option", { value: c.id }, c.name)));
+  const today = new Date().toISOString().slice(0, 10);
+  const date = el("input", { type: "date", value: today });
+  const extRef = el("input", { type: "text", placeholder: "t.ex. kvitto 1234 / faktura FAKT-99" });
+  const paidNow = el("select", {},
+    el("option", { value: "yes" }, "Ja, betald nu"),
+    el("option", { value: "no" }, "Nej, leverantörsfaktura (betalas senare)"));
+  const payDate = el("input", { type: "date", value: today });
+  const payDateWrap = wrap("Betaldatum", payDate);
+  paidNow.onchange = () => { payDateWrap.style.display = paidNow.value === "yes" ? "" : "none"; };
+  const linesEd = momsLinesEditor();
+  const receipt = receiptPicker();
+
+  panel.appendChild(el("div", { class: "row" },
+    wrap("Leverantör", supplier), wrap("Kategori (BAS-konto)", cat),
+    wrap("Kvitto-/fakturanummer", extRef)));
+  panel.appendChild(el("div", { class: "row" },
+    wrap("Inköpsdatum", date), wrap("Betald?", paidNow), payDateWrap));
+  panel.appendChild(el("div", { style: "margin-top:6px" },
+    el("label", {}, "Belopp & moms (en rad per momssats)"), linesEd.element));
+  panel.appendChild(el("div", { style: "margin-top:6px" },
+    el("label", {}, "Kvitto/faktura (bild eller PDF, valfritt)"), receipt.element));
+  panel.appendChild(el("div", { style: "margin-top:14px" },
+    el("button", { class: "btn brand", onclick: () => guard(submit) }, "Bokför inköp"),
+    el("button", { class: "btn ghost", style: "margin-left:8px",
+      onclick: () => { state.section = "purchases"; renderWorkspace(); } }, "Avbryt")));
+
+  async function submit() {
+    const lines = linesEd.getLines();
+    if (lines.length === 0) { toast("Lägg till minst en beloppsrad", true); return; }
+    const paid_date = paidNow.value === "yes" ? payDate.value : null;
+    const res = await api("POST", `/books/${bid()}/expenses`, {
+      supplier_id: supplier.value ? parseInt(supplier.value, 10) : null,
+      category_id: parseInt(cat.value, 10), lines, trans_date: date.value,
+      ext_ref: extRef.value || null, paid_date,
+    });
+    const staged = receipt.getStaged();
+    if (staged) {
+      await api("POST", `/books/${bid()}/transaktioner/${res.transaktion_id}/receipts`, {
+        image_base64: staged.image_base64, mime: staged.mime, original_format: staged.original_format,
+      });
+    }
+    state.section = "purchases";
+    renderWorkspace();
+    toast(paid_date ? "Inköp bokfört (betalt)" : "Leverantörsfaktura bokförd (väntar på betalning)");
+  }
 }
 
 async function invoiceForm(panel, draft) {

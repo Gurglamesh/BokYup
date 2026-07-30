@@ -186,6 +186,25 @@ class TestBookkeeping:
                                  "trans_date": "2026-02-01", "paid_date": "2026-02-01"})
         assert resp.status_code == 409
 
+    def test_purchase_with_ext_ref_and_pay_later(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Förbrukning", "kind": "expense", "bas_konto": 5460}).json()["id"]
+        sup = client.post(f"/books/{book}/suppliers",
+                          json={"name": "Inet", "default_moms_rate": "25"}).json()["id"]
+        # an incoming supplier invoice (not paid yet) with a kvitto-/fakturanummer
+        res = client.post(f"/books/{book}/expenses",
+                          json={"supplier_id": sup, "category_id": cat, "ext_ref": "FAKT-2211",
+                                "lines": [{"rate_code": "25", "amount_ore": 125000, "inclusive": True}],
+                                "trans_date": "2026-03-01"}).json()
+        tid = res["transaktion_id"]
+        row = lambda: [t for t in client.get(f"/books/{book}/transaktioner").json() if t["id"] == tid][0]
+        r = row()
+        assert r["ext_ref"] == "FAKT-2211" and r["amount_ore"] == 125000
+        assert r["status"] == "pending" and r["supplier_id"] == sup
+        # mark paid later
+        client.post(f"/books/{book}/transaktioner/{tid}/pay", json={"payment_date": "2026-03-20"})
+        assert row()["status"] == "paid"
+
     def test_reverse_creates_rattelse(self, client, book):
         res = self._setup_income(client, book).json()
         vid = res["verifikation_id"]

@@ -140,6 +140,7 @@ class RecordExpenseReq(BaseModel):
     supplier_id: Optional[int] = None
     note: Optional[str] = None
     receipt_original_format: Optional[str] = None   # 'paper' | 'digital'
+    ext_ref: Optional[str] = None                   # supplier's kvitto-/fakturanummer
     paid_date: Optional[str] = None
 
 

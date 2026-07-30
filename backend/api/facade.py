@@ -322,7 +322,7 @@ class AppFacade:
         return ops.record_expense(
             b.get("supplier_id"), b["category_id"], b["lines"], b["trans_date"],
             note=b.get("note"), receipt_original_format=b.get("receipt_original_format"),
-            paid_date=b.get("paid_date"),
+            ext_ref=b.get("ext_ref"), paid_date=b.get("paid_date"),
         )
 
     def h_record_income(self, p, b, q):
@@ -415,14 +415,16 @@ class AppFacade:
 
     def h_list_transaktioner(self, p, b, q):
         ops = self._ops(p["book_id"])
-        cols = ("SELECT id, direction, status, trans_date, payment_date, category_id, "
-                "customer_id, supplier_id, verifikation_id, note FROM transaktion")
+        cols = ("SELECT t.id, t.direction, t.status, t.trans_date, t.payment_date, "
+                "t.category_id, t.customer_id, t.supplier_id, t.verifikation_id, t.note, "
+                "t.ext_ref, (SELECT COALESCE(SUM(m.inc_moms_ore),0) FROM moms_line m "
+                "WHERE m.transaktion_id = t.id) AS amount_ore FROM transaktion t")
         if q.get("include_synthetic") in ("1", "true", True):
-            return _rows(ops, cols + " ORDER BY id")
+            return _rows(ops, cols + " ORDER BY t.id")
         from backend.db.operations import SYNTHETIC_TRANSAKTION_NOTES as _SYN
         placeholders = ",".join("?" for _ in _SYN)
-        return _rows(ops, f"{cols} WHERE note IS NULL OR note NOT IN ({placeholders}) "
-                          "ORDER BY id", tuple(_SYN))
+        return _rows(ops, f"{cols} WHERE t.note IS NULL OR t.note NOT IN ({placeholders}) "
+                          "ORDER BY t.id", tuple(_SYN))
 
     # ---- receipts (encrypted photos) ----
     def h_upload_receipt(self, p, b, q):
