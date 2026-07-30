@@ -1774,9 +1774,11 @@ class BookOps:
 
     def list_offerter(self) -> list[dict]:
         return [dict(r) for r in self.conn.execute(
-            "SELECT id, offert_number, customer_id, offert_date, valid_until, inc_moms_ore, "
-            "husavdrag_ore, source_draft_id, created_at FROM offert "
-            "ORDER BY offert_number").fetchall()]
+            "SELECT o.id, o.offert_number, o.customer_id, o.offert_date, o.valid_until, "
+            "o.inc_moms_ore, o.husavdrag_ore, o.source_draft_id, o.invoice_id, "
+            "i.invoice_number AS invoice_number, o.created_at FROM offert o "
+            "LEFT JOIN invoice i ON i.id = o.invoice_id "
+            "ORDER BY o.offert_number").fetchall()]
 
     def get_offert(self, offert_id: int) -> dict:
         """Return the offert's decrypted render dict (for the PDF)."""
@@ -1785,6 +1787,44 @@ class BookOps:
         if row is None:
             raise KeyError(f"No offert {offert_id}")
         return json.loads(self.session.decrypt_text(row["snapshot_enc"]))
+
+    def create_invoice_from_offert(self, offert_id: int, invoice_date: Optional[str] = None,
+                                   due_date: Optional[str] = None) -> dict:
+        """Issue a real faktura from an accepted offert. Reconstructs the invoice inputs
+        from the offert's snapshot and calls create_invoice (so booking + numbering are
+        unchanged). An offert can be invoiced only once (guarded)."""
+        row = self.conn.execute("SELECT customer_id, invoice_id FROM offert WHERE id=?",
+                                (offert_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No offert {offert_id}")
+        if row["invoice_id"] is not None:
+            raise InvalidState("Offerten är redan fakturerad")
+        render = self.get_offert(offert_id)
+        lines = [{
+            "description": l["description"], "category_id": l.get("category_id"),
+            "quantity_centi": l["quantity_centi"], "unit": l.get("unit"),
+            "unit_price_ore": l["unit_price_ore"], "rate_code": l["rate_code"],
+            "reduction_type": l.get("reduction_type"),
+            "discount_pct_centi": l.get("discount_pct_centi") or 0,
+        } for l in render.get("lines", [])]
+        recipients = [{
+            "customer_id": r.get("customer_id"), "personnummer": r.get("personnummer"),
+            "first_name": r.get("first_name"), "last_name": r.get("last_name"),
+            "rut_share_pct": r.get("rut_share_pct"), "rot_share_pct": r.get("rot_share_pct"),
+        } for r in render.get("recipients", [])]
+        idate = invoice_date or _now()[:10]
+        ddate = due_date or (datetime.fromisoformat(idate) + timedelta(days=30)).date().isoformat()
+        res = self.create_invoice(
+            customer_id=row["customer_id"], category_id=None, invoice_date=idate,
+            due_date=ddate, lines=lines, recipients=recipients,
+            payment_terms=render.get("payment_terms"),
+            your_reference=render.get("your_reference"),
+            our_reference=render.get("our_reference"), note=render.get("note"))
+        with self.conn:
+            self.conn.execute("UPDATE offert SET invoice_id=? WHERE id=?",
+                             (res["invoice_id"], offert_id))
+        res["offert_id"] = offert_id
+        return res
 
     def _invoice_balances(self, invoice_id: int) -> dict:
         """

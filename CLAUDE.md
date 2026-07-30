@@ -570,6 +570,15 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       text). API `GET/POST /offerter`, `GET /offerter/{id}/pdf`. UI: "Skapa offert" on each
       draft row **and** on the faktura form (keeps the draft, opens the PDF) + an "Offerter"
       list in Kundfakturor. Tests pass (307); browser-smoke-tested (offert from draft + PDF).
+- [x] **Skapa faktura från offert (schema v24, 2026-07).** An accepted offert can be turned
+      into a real faktura: `create_invoice_from_offert` reconstructs the invoice inputs from
+      the offert's snapshot (lines incl. per-line category/rabatt/RUT-ROT + recipients incl.
+      pnr) and calls `create_invoice` (booking + numbering unchanged), then links
+      `offert.invoice_id`. **Guarded to once** (`InvalidState`→409 if already invoiced). API
+      `POST /offerter/{id}/create-invoice` (optional invoice/förfallodatum). UI: a "Skapa
+      faktura" button per non-converted offert (date modal → issues the faktura + opens its
+      PDF); a converted offert shows a "Faktura N" pill instead. Tests pass (308);
+      browser-smoke-tested.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

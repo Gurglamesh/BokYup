@@ -505,6 +505,10 @@ def _build_router():
         res = fac(request).h_offert_pdf({"book_id": book_id, "offert_id": offert_id}, {}, {})
         return Response(content=res.content, media_type=res.media_type)
 
+    @r.post("/books/{book_id}/offerter/{offert_id}/create-invoice", status_code=201)
+    def offert_to_invoice(book_id: str, offert_id: int, body: dict, request: Request):
+        return fac(request).h_offert_to_invoice({"book_id": book_id, "offert_id": offert_id}, body, {})
+
     @r.get("/books/{book_id}/invoices/{invoice_id}")
     def get_invoice(book_id: str, invoice_id: int, request: Request):
         return fac(request).h_get_invoice({"book_id": book_id, "invoice_id": invoice_id}, {}, {})

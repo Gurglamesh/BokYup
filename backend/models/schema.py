@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -426,6 +426,7 @@ CREATE TABLE offert (
     husavdrag_ore  INTEGER NOT NULL DEFAULT 0,
     snapshot_enc   TEXT NOT NULL,
     source_draft_id INTEGER,             -- the draft it was created from (kept, not consumed)
+    invoice_id     INTEGER REFERENCES invoice(id),  -- set once converted to a faktura
     created_at     TEXT NOT NULL
 );
 
@@ -806,6 +807,9 @@ _MIGRATIONS: dict[int, str] = {
             source_draft_id INTEGER,
             created_at     TEXT NOT NULL
         );
+    """,
+    24: """
+        ALTER TABLE offert ADD COLUMN invoice_id INTEGER REFERENCES invoice(id);
     """,
 }
 

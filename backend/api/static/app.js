@@ -1326,15 +1326,23 @@ const SECTION_RENDERERS = {
       ));
     }
 
-    // Offerter (quotes): numbered proposal documents, no ledger impact.
+    // Offerter (quotes): numbered proposal documents, no ledger impact. Each can be
+    // turned into a real faktura (once) — then it shows the resulting invoice number.
     if (offerter.length) {
       panel.appendChild(el("h3", { style: "margin-top:18px" }, "Offerter"));
       panel.appendChild(simpleTable(
-        ["Offertnr", "Kund", "Datum", "Giltig till", "Summa", ""],
+        ["Offertnr", "Kund", "Datum", "Giltig till", "Summa", "Status", ""],
         offerter.map((o) => [String(o.offert_number), custName[o.customer_id] || ("Kund " + o.customer_id),
           o.offert_date, o.valid_until || "—", toKr(o.inc_moms_ore || 0) + " kr",
-          el("button", { class: "btn small ghost",
-            onclick: () => guard(() => showPdf(`/books/${bid()}/offerter/${o.id}/pdf`, `Offert ${o.offert_number}`)) }, "PDF")]),
+          o.invoice_id
+            ? el("span", { class: "pill paid" }, "Faktura " + (o.invoice_number || o.invoice_id))
+            : el("span", { class: "pill" }, "Offert"),
+          el("span", { style: "display:inline-flex;gap:4px" },
+            el("button", { class: "btn small ghost",
+              onclick: () => guard(() => showPdf(`/books/${bid()}/offerter/${o.id}/pdf`, `Offert ${o.offert_number}`)) }, "PDF"),
+            o.invoice_id ? null : el("button", { class: "btn small",
+              title: "Skapa en riktig faktura utifrån offerten",
+              onclick: () => guard(() => offertToInvoiceFlow(o)) }, "Skapa faktura"))]),
       ));
     }
 
@@ -2259,6 +2267,21 @@ async function importBackupFlow() {
 function newInvoiceForCustomer(kundnummer) {
   state.pendingInvoiceCustomer = kundnummer;
   state.section = "invoices";
+  renderWorkspace();
+}
+
+async function offertToInvoiceFlow(o) {
+  const today = new Date().toISOString().slice(0, 10);
+  const due = new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
+  const f = await modal(`Skapa faktura från offert ${o.offert_number}?`, [
+    { name: "invoice_date", label: "Fakturadatum", type: "date", value: today },
+    { name: "due_date", label: "Förfallodatum", type: "date", value: due },
+  ], "Skapa faktura");
+  if (!f) return;
+  const res = await api("POST", `/books/${bid()}/offerter/${o.id}/create-invoice`,
+    { invoice_date: f.invoice_date, due_date: f.due_date });
+  toast(`Faktura ${res.invoice_number} skapad från offert ${o.offert_number}`);
+  showPdf(`/books/${bid()}/invoices/${res.invoice_id}/pdf`, `Faktura ${res.invoice_number}`);
   renderWorkspace();
 }
 

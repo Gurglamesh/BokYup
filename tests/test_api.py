@@ -798,6 +798,24 @@ class TestInvoices:
         pdf = client.get(f"/books/{book}/offerter/{o1['offert_id']}/pdf")
         assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF"
 
+    def test_offert_to_invoice_once(self, client, book):
+        cat, kid = self._setup(client, book)
+        o = client.post(f"/books/{book}/offerter", json={"payload": {
+            "customer_id": kid, "invoice_date": "2026-03-01",
+            "lines": [{"description": "Jobb", "quantity_centi": 100, "unit_price_ore": 100000,
+                       "rate_code": "25", "category_id": cat}], "recipients": []}}).json()
+        inv = client.post(f"/books/{book}/offerter/{o['offert_id']}/create-invoice",
+                          json={"invoice_date": "2026-04-01", "due_date": "2026-05-01"}).json()
+        assert inv["invoice_number"] == 1 and inv["inc_moms_ore"] == 125000
+        # the offert now links to the faktura
+        row = client.get(f"/books/{book}/offerter").json()[0]
+        assert row["invoice_id"] == inv["invoice_id"] and row["invoice_number"] == 1
+        # a real, bookable invoice exists
+        assert any(x["id"] == inv["invoice_id"] for x in client.get(f"/books/{book}/invoices").json())
+        # invoicing the same offert again is refused
+        again = client.post(f"/books/{book}/offerter/{o['offert_id']}/create-invoice", json={})
+        assert again.status_code == 409
+
     def test_offert_from_payload_without_draft(self, client, book):
         cat, kid = self._setup(client, book)
         o = client.post(f"/books/{book}/offerter", json={"payload": {

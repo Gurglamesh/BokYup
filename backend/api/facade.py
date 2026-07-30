@@ -586,6 +586,10 @@ class AppFacade:
                                  logo_png=logo[0] if logo else None)
         return RawResult(content=pdf, media_type="application/pdf")
 
+    def h_offert_to_invoice(self, p, b, q):
+        return self._ops(p["book_id"]).create_invoice_from_offert(
+            int(p["offert_id"]), invoice_date=b.get("invoice_date"), due_date=b.get("due_date"))
+
     def h_get_invoice(self, p, b, q):
         return self._ops(p["book_id"]).get_invoice(int(p["invoice_id"]))
 
@@ -731,6 +735,7 @@ _route("DELETE", "/books/{book_id}/invoice-drafts/{draft_id}", "h_delete_draft")
 _route("GET", "/books/{book_id}/offerter", "h_list_offerter")
 _route("POST", "/books/{book_id}/offerter", "h_create_offert", 201)
 _route("GET", "/books/{book_id}/offerter/{offert_id}/pdf", "h_offert_pdf")
+_route("POST", "/books/{book_id}/offerter/{offert_id}/create-invoice", "h_offert_to_invoice", 201)
 _route("POST", "/books/{book_id}/invoices", "h_create_invoice", 201)
 _route("GET", "/books/{book_id}/invoices", "h_list_invoices")
 _route("GET", "/books/{book_id}/invoices/{invoice_id}/pdf", "h_invoice_pdf")
