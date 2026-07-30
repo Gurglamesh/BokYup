@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import sqlite3
 import uuid
@@ -919,6 +920,22 @@ class BookOps:
         return [dict(r) for r in self.conn.execute(
             "SELECT id, rut_claim_id, mime, byte_size, created_at FROM receipt "
             "WHERE rut_claim_id=? ORDER BY id", (rut_claim_id,)).fetchall()]
+
+    def next_rut_reference(self) -> str:
+        """Suggest the next RUT/ROT begäran reference by continuing the numeric sequence
+        of the references already booked (own sequence, independent of faktura numbers /
+        makulering). E.g. last "RUT4" -> "RUT5"; none yet -> "RUT1". User-editable."""
+        rows = self.conn.execute(
+            "SELECT skatteverket_reference FROM rut_claim "
+            "WHERE skatteverket_reference IS NOT NULL AND TRIM(skatteverket_reference) != ''"
+        ).fetchall()
+        best_num, prefix = 0, "RUT"
+        for r in rows:
+            m = re.match(r"^(.*?)(\d+)\s*$", (r[0] or "").strip())
+            if m and int(m.group(2)) >= best_num:
+                best_num = int(m.group(2))
+                prefix = m.group(1) or "RUT"      # keep the user's own prefix/format
+        return f"{prefix}{best_num + 1}"
 
     def _create_husavdrag_shortfall_invoice(self, claim, shortfall_ore: int,
                                             date: str, relation_note: Optional[str]) -> int:

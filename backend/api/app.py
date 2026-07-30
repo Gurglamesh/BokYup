@@ -317,6 +317,10 @@ def _build_router():
     def list_rut_claims(book_id: str, request: Request):
         return fac(request).h_list_rut_claims({"book_id": book_id}, {}, {})
 
+    @r.get("/books/{book_id}/rut-next-reference")
+    def rut_next_reference(book_id: str, request: Request):
+        return fac(request).h_rut_next_reference({"book_id": book_id}, {}, {})
+
     @r.post("/books/{book_id}/verifikationer/{verifikation_id}/reverse", status_code=201)
     def reverse_verifikation(book_id: str, verifikation_id: int, body: sc.ReverseReq, request: Request):
         return fac(request).h_reverse_verifikation(

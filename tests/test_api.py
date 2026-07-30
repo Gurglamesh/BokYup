@@ -734,6 +734,30 @@ class TestInvoices:
         assert row()["rut_claim_state"] == "skatteverket_paid"
         assert row()["state"] == "paid"
 
+    def test_rut_next_reference_continues_sequence(self, client, book):
+        cat, kid = self._setup(client, book)
+        assert client.get(f"/books/{book}/rut-next-reference").json()["reference"] == "RUT1"
+
+        def rut_invoice_paid_with_ref(ref):
+            inv = client.post(f"/books/{book}/invoices", json={
+                "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+                "due_date": "2026-03-31",
+                "lines": [{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 1000000,
+                           "rate_code": "25", "reduction_type": "rut"}],
+                "recipients": [{"customer_id": kid, "share_pct": 100}]}).json()
+            client.post(f"/books/{book}/transaktioner/{inv['transaktion_id']}/pay",
+                        json={"payment_date": "2026-03-10"})
+            claim = [x for x in client.get(f"/books/{book}/invoices").json()
+                     if x["id"] == inv["invoice_id"]][0]["rut_claim_id"]
+            client.post(f"/books/{book}/rut/{claim}/skatteverket-payment",
+                        json={"payment_date": "2026-04-15", "reference": ref})
+
+        rut_invoice_paid_with_ref("RUT1")
+        assert client.get(f"/books/{book}/rut-next-reference").json()["reference"] == "RUT2"
+        # a manual jump (e.g. RUT4) is honoured — next continues from the max
+        rut_invoice_paid_with_ref("RUT4")
+        assert client.get(f"/books/{book}/rut-next-reference").json()["reference"] == "RUT5"
+
     def test_skatteverket_partial_payout_creates_followup_via_api(self, client, book):
         cat, kid = self._setup(client, book)
         inv = client.post(f"/books/{book}/invoices", json={

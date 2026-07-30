@@ -594,9 +594,10 @@ const SECTION_RENDERERS = {
 
   // ----- RUT (husavdrag) -----
   async rut(panel) {
-    const [claims, customers] = await Promise.all([
+    const [claims, customers, invoices] = await Promise.all([
       api("GET", `/books/${bid()}/rut-claims`),
       api("GET", `/books/${bid()}/customers`),
+      api("GET", `/books/${bid()}/invoices`),
     ]);
     const custName = Object.fromEntries(customers.map((c) =>
       [c.kundnummer, c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer)]));
@@ -607,6 +608,36 @@ const SECTION_RENDERERS = {
     panel.appendChild(el("p", { class: "muted" },
       "Livscykel: väntar → kund betald → Skatteverket betald. Bokför Skatteverkets "
       + "utbetalning när husavdraget kommit in (egen verifikation)."));
+
+    // Worklist: invoices whose customer has paid but Skatteverket has not yet paid the
+    // husavdrag (state "awaiting_rut"). Book the payout straight from here.
+    const awaiting = invoices.filter((iv) => iv.state === "awaiting_rut");
+    panel.appendChild(el("h3", { style: "margin-top:18px" }, "Inväntar husavdrag från Skatteverket"));
+    if (awaiting.length === 0) {
+      panel.appendChild(el("p", { class: "muted" }, "Inga fakturor väntar på husavdrag just nu."));
+    } else {
+      panel.appendChild(el("table", { style: "margin-bottom:10px" },
+        el("thead", {}, el("tr", {},
+          el("th", {}, "Faktura"), el("th", {}, "Kund"), el("th", {}, "Typ"),
+          el("th", { class: "num" }, "Husavdrag"), el("th", {}, ""))),
+        el("tbody", {}, awaiting.map((iv) => {
+          const husavdrag = iv.rut_total_ore + iv.rot_total_ore;
+          const typ = iv.rut_total_ore > 0 && iv.rot_total_ore > 0 ? "RUT/ROT"
+            : iv.rot_total_ore > 0 ? "ROT" : "RUT";
+          return el("tr", {},
+            el("td", { class: "num" }, String(iv.invoice_number)),
+            el("td", {}, custName[iv.customer_id] || ("Kund " + iv.customer_id)),
+            el("td", {}, el("span", { class: "pill awaiting" }, "Inväntar " + typ)),
+            el("td", { class: "num" }, toKr(husavdrag) + " kr"),
+            el("td", { class: "num" }, iv.rut_claim_id
+              ? el("button", { class: "btn small",
+                  onclick: () => guard(() => rutSkvPayFlow(iv.rut_claim_id, husavdrag)) },
+                  "Bokför husavdrag (Skatteverket)")
+              : ""));
+        }))));
+    }
+
+    panel.appendChild(el("h3", { style: "margin-top:22px" }, "Alla RUT/ROT-ärenden"));
     if (claims.length === 0) {
       panel.appendChild(el("p", { class: "muted" }, "Inga RUT-ärenden ännu."));
       return;
@@ -1588,11 +1619,14 @@ async function rutSkvPayFlow(claimId, claimedOre, defaultNote) {
   // Step 1: enter the date + the amount Skatteverket actually paid (defaults to the
   // claimed husavdrag), a reference (the RUT/ROT begäran name, e.g. "RUT1"), and the
   // kvittens from Skatteverket (stored encrypted).
+  // Suggest the next RUT/ROT reference (own sequence, last + 1) — editable.
+  const suggestedRef = await api("GET", `/books/${bid()}/rut-next-reference`)
+    .then((r) => r.reference).catch(() => "");
   const f = await modal("Bokför Skatteverkets utbetalning", [
     { name: "payment_date", label: "Utbetalningsdatum", type: "date", value: new Date().toISOString().slice(0, 10) },
     { name: "received", label: "Mottaget belopp (kr)",
       value: claimedOre != null ? toKr(claimedOre) : "" },
-    { name: "reference", label: "RUT/ROT-begäran (namn, t.ex. RUT1)", value: "" },
+    { name: "reference", label: "RUT/ROT-begäran (namn, t.ex. RUT1)", value: suggestedRef },
     { name: "kvittens", label: "Kvittens från Skatteverket (bild/PDF, valfri)",
       type: "file", accept: "image/*,application/pdf" },
   ], "Fortsätt");

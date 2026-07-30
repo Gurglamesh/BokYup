@@ -367,6 +367,9 @@ class AppFacade:
         ops = self._ops(p["book_id"])
         return ops.rut_cap_status(int(p["kundnummer"]), int(p["year"]))
 
+    def h_rut_next_reference(self, p, b, q):
+        return {"reference": self._ops(p["book_id"]).next_rut_reference()}
+
     def h_list_rut_claims(self, p, b, q):
         ops = self._ops(p["book_id"])
         return _rows(ops,
@@ -666,6 +669,7 @@ _route("POST", "/books/{book_id}/rut/{rut_claim_id}/skatteverket-preview", "h_sk
 _route("POST", "/books/{book_id}/rut/{rut_claim_id}/receipt", "h_upload_rut_receipt", 201)
 _route("GET", "/books/{book_id}/rut/{rut_claim_id}/receipts", "h_list_rut_receipts")
 _route("GET", "/books/{book_id}/rut-claims", "h_list_rut_claims")
+_route("GET", "/books/{book_id}/rut-next-reference", "h_rut_next_reference")
 _route("POST", "/books/{book_id}/verifikationer/{verifikation_id}/reverse", "h_reverse_verifikation", 201)
 _route("POST", "/books/{book_id}/period-locks", "h_lock_period", 201)
 _route("POST", "/books/{book_id}/year-end-accruals", "h_year_end_accruals", 201)
