@@ -859,17 +859,26 @@ const SECTION_RENDERERS = {
         el("thead", {}, el("tr", {}, el("th", {}, "Firmans skatt"), el("th", { class: "num" }, "Belopp"), el("th", {}, ""))),
         el("tbody", {}, r.lines.map((l) => row(l.label, l.amount_ore, l.note)),
           row("Att sätta undan totalt (firman)", r.firma_total_ore, "moms + egenavgifter + firmans inkomstskatt", true))));
-      // Total overview (when a salary is entered)
+      // Overview (when a salary is entered). Income tax only — moms is shown separately
+      // below, since moms is not a förvärvsinkomstskatt.
       const ov = r.overview;
       if (r.ovrig_forvarvsinkomst_ore) {
-        out.appendChild(el("h3", { style: "margin-top:24px" }, "Total överblick (firma + lön)"));
+        const momsOre = Math.max(0, r.moms_ore);
+        out.appendChild(el("h3", { style: "margin-top:24px" }, "Överblick (firma + lön)"));
         out.appendChild(el("p", { class: "muted" },
-          "Din arbetsgivare drar skatten på lönen; firmans del betalar du själv via F-skatt/slutskatt."));
+          "Inkomstskatt på firma + lön. Din arbetsgivare drar skatten på lönen; firmans del "
+          + "betalar du själv via F-skatt/slutskatt. Momsen är ingen inkomstskatt utan visas "
+          + "separat nedan."));
         out.appendChild(el("div", { class: "box" }, el("div", { class: "row" },
           kv("Total förvärvsinkomst", ov.forvarvsinkomst_ore),
-          kv("Total skatt (firma + lön)", ov.total_skatt_ore),
+          kv("Inkomstskatt (firma + lön)", ov.total_skatt_ore),
           kv("Varav arbetsgivaren drar (lön)", ov.salary_skatt_ore),
           kv("Varav firman (du betalar)", r.firma_tax_ore, true))));
+        // Firma: skatt + moms separated, tying back to "att sätta undan totalt"
+        out.appendChild(el("div", { class: "box", style: "margin-top:10px" }, el("div", { class: "row" },
+          kv("Firmans skatt (inkomstskatt + egenavgifter)", r.firma_tax_ore),
+          kv("+ Moms (redovisas separat per momsperiod)", momsOre),
+          kv("= Firman att sätta undan totalt", r.firma_total_ore, true))));
       }
     }
     draw();
