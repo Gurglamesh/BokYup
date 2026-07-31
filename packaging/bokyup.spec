@@ -39,6 +39,7 @@ exe = EXE(
     exclude_binaries=True,
     name="BokYup",
     console=False,            # GUI app: no console window
+    icon="packaging/icon/bokyup.ico",   # taskbar / window / exe icon
     disable_windowed_traceback=False,
 )
 coll = COLLECT(

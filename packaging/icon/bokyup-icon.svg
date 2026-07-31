@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#DCEFE2"/>
+      <stop offset="55%" stop-color="#A9D3B7"/>
+      <stop offset="100%" stop-color="#7FB89A"/>
+    </linearGradient>
+    <linearGradient id="pageShade" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#FBFAF4"/>
+    </linearGradient>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#2F5D45" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+
+  <!-- background -->
+  <rect width="512" height="512" rx="118" fill="url(#bg)"/>
+
+  <!-- ledger page, slightly rotated for depth -->
+  <g transform="rotate(-4 256 256)" filter="url(#soft)">
+    <rect x="146" y="120" width="220" height="272" rx="22" fill="url(#pageShade)"/>
+    <!-- spiral/spine dots -->
+    <circle cx="146" cy="150" r="6" fill="#CFE3D6"/>
+    <circle cx="146" cy="256" r="6" fill="#CFE3D6"/>
+    <circle cx="146" cy="362" r="6" fill="#CFE3D6"/>
+    <!-- entry lines -->
+    <rect x="178" y="170" width="130" height="12" rx="6" fill="#CFE3D6"/>
+    <rect x="178" y="206" width="150" height="12" rx="6" fill="#CFE3D6"/>
+    <rect x="178" y="242" width="110" height="12" rx="6" fill="#CFE3D6"/>
+  </g>
+
+  <!-- accountant's tick mark, crossing the last two lines -->
+  <g transform="rotate(-4 256 256)">
+    <path d="M186 300 L232 344 L318 236" fill="none" stroke="#3E7A5C" stroke-width="20"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M186 300 L232 344 L318 236" fill="none" stroke="#5FA07C" stroke-width="20"
+          stroke-linecap="round" stroke-linejoin="round" opacity="0.35" transform="translate(4,4)"/>
+  </g>
+</svg>

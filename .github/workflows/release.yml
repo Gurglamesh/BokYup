@@ -110,6 +110,9 @@ jobs:
         run: |
           npm install
           npx cap add android || true
+          # Generate the launcher icon (adaptive foreground/background + mipmaps) from
+          # phone/assets/ into the android project.
+          npx @capacitor/assets generate --android || true
           npx cap sync android
           # versionName from the tag; versionCode from the run number (monotonic)
           sed -i "s/versionName \".*\"/versionName \"${{ steps.ver.outputs.version }}\"/" android/app/build.gradle || true

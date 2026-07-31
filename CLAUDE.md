@@ -615,6 +615,14 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       record, no duplicate) and `bundle.import_` auto-exports a timestamped `.buyn` backup
       of the old book before replacing it. Backend already supported it (import `overwrite`
       param). Tests pass (324; `test_import_overwrite_existing_book_in_place`).
+- [x] **App-ikon (2026-07).** A green ledger-with-tick icon (user-supplied SVG). Sources
+      `packaging/icon/bokyup-icon.svg` (+ `bokyup-foreground.svg` padded for the Android
+      adaptive safe zone); `packaging/icon/generate.py` rasterises (Playwright) to the
+      committed assets: `bokyup.ico` (wired in `bokyup.spec`), `backend/api/static/icons/*`
+      + `manifest.webmanifest` (linked in `index.html`, theme-color #A9D3B7), and
+      `phone/assets/icon-only|foreground|background.png` → `@capacitor/assets generate
+      --android` in the release workflow. This is the app/brand icon, separate from the
+      per-book company logo on invoices.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
