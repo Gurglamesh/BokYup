@@ -579,6 +579,18 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       faktura" button per non-converted offert (date modal → issues the faktura + opens its
       PDF); a converted offert shows a "Faktura N" pill instead. Tests pass (308);
       browser-smoke-tested.
+- [x] **"Ordrar"-tabb (Kundfakturor omdöpt) med 3 under-flikar + kundfilter + kund-
+      spenderat (2026-07).** The "Kundfakturor" tab is renamed **"Ordrar"** and split into
+      three sub-tabs — **Fakturor / Offerter / Utkast** (with counts) — driven by
+      `state.ordersTab`/`state.ordersCustomer` (persist across re-renders). A **"Filtrera på
+      kund"** dropdown filters the active sub-tab to one customer (default: all, sequential);
+      the Fakturor sub-tab keeps its text search. Frontend-only restructure of the invoices
+      renderer (drawFakturor/drawOfferter/drawUtkast + renderContent). The **Kunder** tab
+      gains a **"Spenderat"** column: `GET /customers` now returns `invoiced_ore` = Σ
+      inc_moms of the customer's non-makulerade invoices. Tests pass (309); browser-smoke-
+      tested (sub-tabs, filter persists across tabs, spenderat totals). FUTURE (noted, not
+      built): import supplier invoices → suggest creating articles from the lines → book the
+      cost so order margins (what the customer later buys for builds) can be derived.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

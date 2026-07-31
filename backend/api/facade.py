@@ -246,9 +246,14 @@ class AppFacade:
     # ---- reference: customers ----
     def h_list_customers(self, p, b, q):
         ops = self._ops(p["book_id"])
+        # `invoiced_ore` = total the customer has been billed (Σ inc_moms of their
+        # non-makulerade invoices) — "hur mycket kunden har spenderat".
         return _rows(ops,
-                     "SELECT kundnummer, type, first_name, last_name, company_name, "
-                     "org_nr, email, phone, active FROM customer ORDER BY kundnummer")
+                     "SELECT c.kundnummer, c.type, c.first_name, c.last_name, c.company_name, "
+                     "c.org_nr, c.email, c.phone, c.active, "
+                     "(SELECT COALESCE(SUM(i.inc_moms_ore), 0) FROM invoice i "
+                     " WHERE i.customer_id = c.kundnummer AND i.cancelled_at IS NULL) AS invoiced_ore "
+                     "FROM customer c ORDER BY c.kundnummer")
 
     def h_get_customer(self, p, b, q):
         ops = self._ops(p["book_id"])

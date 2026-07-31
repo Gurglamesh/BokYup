@@ -275,7 +275,7 @@ function renderHome() {
 const SECTIONS = [
   ["transactions", "Transaktioner"],
   ["record", "Bokför"],
-  ["invoices", "Kundfakturor"],
+  ["invoices", "Ordrar"],
   ["purchases", "Inköp"],
   ["articles", "Artiklar"],
   ["customers", "Kunder"],
@@ -517,11 +517,13 @@ const SECTION_RENDERERS = {
         : null);
     panel.appendChild(searchTable(
       "Sök kund (namn, nr, org/pers.nr, e-post)…",
-      ["Nr", "Typ", "Namn", "Org/Pers", "E-post", ""],
+      ["Nr", "Typ", "Namn", "Org/Pers", "E-post", "Spenderat", ""],
       list,
       (c, q) => [String(c.kundnummer), cname(c), c.org_nr || "",
         c.email || "", c.phone || ""].join(" ").toLowerCase().includes(q),
-      (c) => [c.kundnummer, c.type, cname(c), c.org_nr || "", c.email || "", actions(c)],
+      (c) => [c.kundnummer, c.type, cname(c), c.org_nr || "", c.email || "",
+        el("span", { class: "num", title: "Totalt fakturerat (ej makulerat)" },
+          toKr(c.invoiced_ore || 0) + " kr"), actions(c)],
     ));
   },
 
@@ -1297,15 +1299,46 @@ const SECTION_RENDERERS = {
     ]);
     const custName = Object.fromEntries(customers.map((c) =>
       [c.kundnummer, c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim()]));
-    panel.appendChild(headerWithAdd("Kundfakturor", "+ Ny faktura", () => guard(() => invoiceForm(panel))));
+    panel.appendChild(headerWithAdd("Ordrar", "+ Ny faktura", () => guard(() => invoiceForm(panel))));
 
-    // Drafts: unissued invoices saved to continue later. Each can also spawn an offert
-    // (quote) — the draft is kept, an offert with its own number is created.
-    if (drafts.length) {
-      panel.appendChild(el("h3", { style: "margin-top:14px" }, "Utkast"));
-      panel.appendChild(simpleTable(
-        ["Sparat", "Rader", "Summa", ""],
-        drafts.map((d) => [d.updated_at ? d.updated_at.slice(0, 16).replace("T", " ") : "",
+    // Sub-tabs (Fakturor / Offerter / Utkast) + a per-customer filter. Default: all,
+    // sequential order. State persists on `state` so an action that re-renders keeps the
+    // active sub-tab and filter.
+    if (!state.ordersTab) state.ordersTab = "fakturor";
+    if (state.ordersCustomer == null) state.ordersCustomer = "";
+    const cfilter = (arr) => {
+      const cid = state.ordersCustomer ? parseInt(state.ordersCustomer, 10) : null;
+      return cid ? arr.filter((x) => x.customer_id === cid) : arr;
+    };
+    const subTabs = [["fakturor", "Fakturor", list.length],
+                     ["offerter", "Offerter", offerter.length],
+                     ["utkast", "Utkast", drafts.length]];
+    const subnav = el("div", { class: "nav", style: "margin-top:12px" });
+    for (const [key, label, count] of subTabs) {
+      subnav.appendChild(el("button", { class: state.ordersTab === key ? "active" : "",
+        onclick: () => { state.ordersTab = key; renderContent(); } }, `${label} (${count})`));
+    }
+    const custFilter = el("select", { style: "max-width:280px" },
+      el("option", { value: "" }, "— Alla kunder —"),
+      ...customers.map((c) => el("option", { value: c.kundnummer },
+        c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer))));
+    custFilter.value = state.ordersCustomer;
+    custFilter.onchange = () => { state.ordersCustomer = custFilter.value; renderContent(); };
+    panel.appendChild(subnav);
+    panel.appendChild(el("div", { class: "row", style: "margin-top:8px" }, wrap("Filtrera på kund", custFilter)));
+    const content = el("div", {});
+    panel.appendChild(content);
+
+    // ----- Utkast -----
+    function drawUtkast() {
+      const rows = cfilter(drafts);
+      if (rows.length === 0) {
+        content.appendChild(el("p", { class: "muted", style: "margin-top:14px" }, "Inga utkast.")); return;
+      }
+      content.appendChild(simpleTable(
+        ["Sparat", "Kund", "Rader", "Summa", ""],
+        rows.map((d) => [d.updated_at ? d.updated_at.slice(0, 16).replace("T", " ") : "",
+          custName[d.customer_id] || (d.customer_id ? "Kund " + d.customer_id : "—"),
           d.line_count, toKr(d.total_ore || 0) + " kr",
           el("span", { style: "display:inline-flex;gap:4px" },
             el("button", { class: "btn small", onclick: () => guard(async () => {
@@ -1326,13 +1359,15 @@ const SECTION_RENDERERS = {
       ));
     }
 
-    // Offerter (quotes): numbered proposal documents, no ledger impact. Each can be
-    // turned into a real faktura (once) — then it shows the resulting invoice number.
-    if (offerter.length) {
-      panel.appendChild(el("h3", { style: "margin-top:18px" }, "Offerter"));
-      panel.appendChild(simpleTable(
+    // ----- Offerter -----
+    function drawOfferter() {
+      const rows = cfilter(offerter);
+      if (rows.length === 0) {
+        content.appendChild(el("p", { class: "muted", style: "margin-top:14px" }, "Inga offerter.")); return;
+      }
+      content.appendChild(simpleTable(
         ["Offertnr", "Kund", "Datum", "Giltig till", "Summa", "Status", ""],
-        offerter.map((o) => [String(o.offert_number), custName[o.customer_id] || ("Kund " + o.customer_id),
+        rows.map((o) => [String(o.offert_number), custName[o.customer_id] || ("Kund " + o.customer_id),
           o.offert_date, o.valid_until || "—", toKr(o.inc_moms_ore || 0) + " kr",
           o.invoice_id
             ? el("span", { class: "pill paid" }, "Faktura " + (o.invoice_number || o.invoice_id))
@@ -1346,12 +1381,17 @@ const SECTION_RENDERERS = {
       ));
     }
 
-    if (list.length === 0) {
-      panel.appendChild(el("p", { class: "muted", style: "margin-top:14px" },
-        "Inga fakturor ännu. Ställ in företagsuppgifter och betalsätt under Inställningar."));
-      return;
+    function renderContent() {
+      content.innerHTML = "";
+      [...subnav.children].forEach((btn, i) => {
+        btn.className = state.ordersTab === subTabs[i][0] ? "active" : "";
+      });
+      if (state.ordersTab === "offerter") return drawOfferter();
+      if (state.ordersTab === "utkast") return drawUtkast();
+      return drawFakturor();
     }
-    panel.appendChild(el("h3", { style: "margin-top:18px" }, "Kundfakturor"));
+
+    // ----- Fakturor -----
     const STATE = {
       paid: ["paid", "Betald"], pending: ["pending", "Obetald"],
       partial: ["pending", "Delbetald"],
@@ -1427,30 +1467,40 @@ const SECTION_RENDERERS = {
           owed ? el("span", { class: "pill", style: "margin-left:4px" }, "återbet.") : null),
         actions);
     };
-    const ivMatch = (iv, q) => [String(iv.invoice_number), custName[iv.customer_id] || "",
-      iv.invoice_date || "", iv.due_date || ""].join(" ").toLowerCase().includes(q);
-    const search = el("input", { type: "search", placeholder: "Sök faktura (nr, kund, datum)…",
-      style: "margin-top:12px;max-width:340px" });
-    const tbody = el("tbody", {});
-    const drawRows = () => {
-      const q = search.value.trim().toLowerCase();
-      const shown = q ? list.filter((iv) => ivMatch(iv, q)) : list;
-      tbody.innerHTML = "";
-      if (q && shown.length === 0) {
-        tbody.appendChild(el("tr", {}, el("td", { colspan: "8", class: "muted" }, "Inga träffar.")));
-      } else {
-        for (const iv of shown) tbody.appendChild(rowFor(iv));
+    function drawFakturor() {
+      const rows = cfilter(list);
+      if (rows.length === 0) {
+        content.appendChild(el("p", { class: "muted", style: "margin-top:14px" },
+          state.ordersCustomer ? "Inga fakturor för vald kund."
+            : "Inga fakturor ännu. Ställ in företagsuppgifter och betalsätt under Inställningar."));
+        return;
       }
-    };
-    search.oninput = drawRows;
-    drawRows();
-    panel.appendChild(search);
-    panel.appendChild(el("table", { style: "margin-top:14px" },
-      el("thead", {}, el("tr", {},
-        el("th", { class: "num" }, "Nr"), el("th", {}, "Kund"), el("th", {}, "Datum"),
-        el("th", {}, "Förfaller"), el("th", { class: "num" }, "Summa"),
-        el("th", { class: "num" }, "Kvar"), el("th", {}, "Status"), el("th", {}, ""))),
-      tbody));
+      const ivMatch = (iv, q) => [String(iv.invoice_number), custName[iv.customer_id] || "",
+        iv.invoice_date || "", iv.due_date || ""].join(" ").toLowerCase().includes(q);
+      const search = el("input", { type: "search", placeholder: "Sök faktura (nr, kund, datum)…",
+        style: "margin-top:12px;max-width:340px" });
+      const tbody = el("tbody", {});
+      const drawRows = () => {
+        const q = search.value.trim().toLowerCase();
+        const shown = q ? rows.filter((iv) => ivMatch(iv, q)) : rows;
+        tbody.innerHTML = "";
+        if (q && shown.length === 0) {
+          tbody.appendChild(el("tr", {}, el("td", { colspan: "8", class: "muted" }, "Inga träffar.")));
+        } else {
+          for (const iv of shown) tbody.appendChild(rowFor(iv));
+        }
+      };
+      search.oninput = drawRows;
+      drawRows();
+      content.appendChild(search);
+      content.appendChild(el("table", { style: "margin-top:14px" },
+        el("thead", {}, el("tr", {},
+          el("th", { class: "num" }, "Nr"), el("th", {}, "Kund"), el("th", {}, "Datum"),
+          el("th", {}, "Förfaller"), el("th", { class: "num" }, "Summa"),
+          el("th", { class: "num" }, "Kvar"), el("th", {}, "Status"), el("th", {}, ""))),
+        tbody));
+    }
+    renderContent();
   },
 };
 

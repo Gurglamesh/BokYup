@@ -142,6 +142,20 @@ class TestReference:
         got = client.get(f"/books/{book}/customers/{kid}").json()
         assert got["personnummer"] == "811218-9876"
 
+    def test_customer_list_exposes_invoiced_total(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "T", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "Alfa AB"}).json()["kundnummer"]
+        assert client.get(f"/books/{book}/customers").json()[0]["invoiced_ore"] == 0
+        for _ in range(2):
+            client.post(f"/books/{book}/invoices", json={
+                "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+                "due_date": "2026-03-31",
+                "lines": [{"description": "J", "quantity_centi": 100, "unit_price_ore": 100000,
+                           "rate_code": "25", "category_id": cat}]})
+        assert client.get(f"/books/{book}/customers").json()[0]["invoiced_ore"] == 250000
+
 
 # ---------------------------------------------------------------------------
 # Bookkeeping
