@@ -125,6 +125,17 @@ class AppFacade:
         from backend import __version__ as APP_VERSION
         return {"name": "BokYup API", "version": APP_VERSION}
 
+    # ---- app-level updates (GitHub Releases) ----
+    def h_update_check(self, p, b, q):
+        from backend import updater
+        return updater.check_for_update()
+
+    def h_update_apply(self, p, b, q):
+        from backend import updater
+        # The UI passes the update-info it got from /update-check; only the frozen desktop
+        # build actually self-updates (otherwise a friendly "not supported" comes back).
+        return updater.apply_update(b or {})
+
     # ---- books / registry ----
     def h_list_books(self, p, b, q):
         return [rec.to_dict() for rec in self.manager.list_books()]
@@ -650,6 +661,8 @@ def _clean(body: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 _route("GET", "/", "h_root")
+_route("GET", "/update-check", "h_update_check")
+_route("POST", "/update-apply", "h_update_apply")
 _route("GET", "/books", "h_list_books")
 _route("POST", "/books", "h_create_book", 201)
 _route("POST", "/books/import", "h_import_book", 201)

@@ -1,0 +1,162 @@
+name: Release
+
+# Build the desktop .exe and the Android .apk and publish them to a GitHub Release.
+# The in-app updater (backend/updater.py) checks this repo's latest release; Obtainium
+# tracks the same releases for Android auto-notifications. Nothing installs by itself —
+# the user always clicks to update.
+#
+# Trigger by pushing a version tag, e.g.  git tag v0.2.0 && git push origin v0.2.0
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (without leading v), e.g. 0.2.0"
+        required: true
+
+permissions:
+  contents: write        # create the release + upload assets
+
+jobs:
+  # ----------------------------------------------------------------- Windows exe
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          V="${{ github.event.inputs.version }}"
+          [ -z "$V" ] && V="${GITHUB_REF_NAME#v}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp version into the build
+        shell: bash
+        run: |
+          python - "$V" <<'PY'
+          import re, sys, pathlib
+          v = "${{ steps.ver.outputs.version }}"
+          p = pathlib.Path("backend/__init__.py")
+          p.write_text(re.sub(r'__version__\s*=\s*".*"', f'__version__ = "{v}"', p.read_text()))
+          print("version ->", v)
+          PY
+
+      - name: Install deps
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          # pywebview needs the OS webview at runtime, but installs fine for freezing.
+          python -m pip install -r requirements.txt
+
+      - name: Build app + updater
+        run: |
+          pyinstaller packaging/bokyup.spec
+          pyinstaller packaging/updater.spec
+
+      - name: Bundle updater into the app folder + zip
+        shell: bash
+        run: |
+          cp dist/BokYupUpdater.exe dist/BokYup/BokYupUpdater.exe
+          cd dist
+          7z a "BokYup-windows-${{ steps.ver.outputs.version }}.zip" BokYup >/dev/null
+          cd ..
+          python - <<'PY'
+          import hashlib, pathlib
+          f = pathlib.Path("dist/BokYup-windows-${{ steps.ver.outputs.version }}.zip")
+          (f.with_suffix(f.suffix + ".sha256")).write_text(hashlib.sha256(f.read_bytes()).hexdigest())
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/BokYup-windows-*.zip
+            dist/BokYup-windows-*.zip.sha256
+
+  # ----------------------------------------------------------------- Android apk
+  android:
+    runs-on: ubuntu-latest
+    continue-on-error: true      # don't block the Windows release if the phone build needs tuning
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "17" }
+      - uses: android-actions/setup-android@v3
+
+      - name: Resolve version
+        id: ver
+        run: |
+          V="${{ github.event.inputs.version }}"
+          [ -z "$V" ] && V="${GITHUB_REF_NAME#v}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble the WebView bundle (UI + Pyodide + backend)
+        run: |
+          python -m pip install --upgrade pip
+          python phone/build_www.py
+
+      - name: Capacitor project + sync
+        working-directory: phone
+        run: |
+          npm install
+          npx cap add android || true
+          npx cap sync android
+          # versionName from the tag; versionCode from the run number (monotonic)
+          sed -i "s/versionName \".*\"/versionName \"${{ steps.ver.outputs.version }}\"/" android/app/build.gradle || true
+          sed -i "s/versionCode [0-9]*/versionCode ${{ github.run_number }}/" android/app/build.gradle || true
+
+      - name: Build APK (signed if keystore secrets are present)
+        working-directory: phone/android
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PW: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > release.keystore
+            ./gradlew assembleRelease \
+              -Pandroid.injected.signing.store.file="$PWD/release.keystore" \
+              -Pandroid.injected.signing.store.password="$KEYSTORE_PW" \
+              -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+              -Pandroid.injected.signing.key.password="$KEY_PW"
+            APK=$(find app/build/outputs/apk/release -name '*.apk' | head -1)
+          else
+            echo "No keystore secrets — building an unsigned/debug APK (fine for testing)."
+            ./gradlew assembleDebug
+            APK=$(find app/build/outputs/apk/debug -name '*.apk' | head -1)
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "$APK" "$GITHUB_WORKSPACE/dist/bokyup-${{ steps.ver.outputs.version }}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist/bokyup-*.apk
+
+  # ----------------------------------------------------------------- Release
+  release:
+    needs: [windows, android]
+    if: always()               # publish whatever built (Windows is the critical one)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/BokYup-windows-*.zip
+            dist/BokYup-windows-*.zip.sha256
+            dist/bokyup-*.apk
+          fail_on_unmatched_files: false
+          generate_release_notes: true

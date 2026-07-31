@@ -267,6 +267,75 @@ function renderHome() {
               onclick: () => guard(() => removeBookFlow(b)) }, "Ta bort"),
           ))),
   ));
+  v.appendChild(updatePanel());
+  maybeAutoCheckUpdates();
+}
+
+// ---------------------------------------------------------------------------
+// Updates (app-level, via GitHub Releases). Never auto-installs — it only checks
+// (optionally on startup) and the user must click "Uppdatera nu" to apply.
+// ---------------------------------------------------------------------------
+function autoUpdateOn() { return localStorage.getItem("bokyup.autoUpdate") !== "off"; }
+
+function updatePanel() {
+  const auto = el("input", { type: "checkbox" });
+  auto.checked = autoUpdateOn();
+  auto.onchange = () => localStorage.setItem("bokyup.autoUpdate", auto.checked ? "on" : "off");
+  const box = el("div", { class: "panel", id: "update-panel", style: "margin-top:16px" },
+    el("div", { style: "display:flex;align-items:center;justify-content:space-between" },
+      el("h3", { style: "margin:0" }, "Uppdateringar"),
+      el("button", { class: "btn small", onclick: () => guard(() => checkUpdates(true)) }, "Sök efter uppdateringar")),
+    el("p", { class: "muted", style: "margin:6px 0" }, "Installerad version: " + (state.appVersion || "okänd")),
+    el("label", { style: "display:flex;gap:6px;align-items:center;font-size:14px" },
+      auto, "Sök automatiskt efter uppdateringar när appen startar"),
+    el("div", { id: "update-result", style: "margin-top:8px" }));
+  if (state.updateInfo) setTimeout(() => renderUpdateResult(state.updateInfo), 0);
+  return box;
+}
+
+async function checkUpdates(manual) {
+  const result = $("#update-result");
+  if (result) result.textContent = "Söker…";
+  const info = await api("GET", "/update-check").catch((e) => ({ error: String(e) }));
+  state.updateInfo = info;
+  renderUpdateResult(info, manual);
+}
+
+function renderUpdateResult(info, manual) {
+  const result = $("#update-result");
+  if (!result || !info) return;
+  result.innerHTML = "";
+  if (info.error) {
+    if (manual) result.appendChild(el("p", { class: "muted" }, "Kunde inte kontrollera uppdateringar (offline?)."));
+    return;
+  }
+  if (!info.update_available) {
+    if (manual) result.appendChild(el("p", { class: "muted" },
+      "Du har den senaste versionen (" + (info.current || state.appVersion || "") + ")."));
+    return;
+  }
+  result.appendChild(el("div", { class: "box", style: "border-left:4px solid var(--brand,#3a6ea5)" },
+    el("div", { style: "font-weight:600" }, `Ny version ${info.latest} finns (du har ${info.current}).`),
+    info.notes ? el("p", { class: "muted", style: "white-space:pre-wrap;max-height:120px;overflow:auto;margin:6px 0" }, info.notes) : null,
+    el("div", { style: "margin-top:8px;display:flex;gap:8px;flex-wrap:wrap" },
+      el("button", { class: "btn brand", onclick: () => guard(() => applyUpdate(info)) }, "Uppdatera nu"),
+      info.html_url ? el("a", { class: "btn ghost", href: info.html_url, target: "_blank", rel: "noopener" }, "Visa release") : null)));
+}
+
+async function applyUpdate(info) {
+  const res = await api("POST", "/update-apply", info).catch((e) => ({ applied: false, reason: String(e) }));
+  if (res.applied) {
+    toast("Uppdaterar… appen startar om automatiskt.");
+  } else {
+    toast(res.reason || "Uppdatering stöds inte i den här versionen.", true);
+    if (info.html_url) window.open(info.html_url, "_blank");
+  }
+}
+
+function maybeAutoCheckUpdates() {
+  if (state.updateChecked || !autoUpdateOn()) return;
+  state.updateChecked = true;
+  checkUpdates(false);
 }
 
 // ---------------------------------------------------------------------------
@@ -3010,6 +3079,7 @@ function searchTable(placeholder, headers, items, matchFn, rowFn) {
       if (v) v.appendChild(el("p", { class: "muted" }, "Startar bokföringsmotorn…"));
       await window.BokYupReady;
     }
+    state.appVersion = await api("GET", "/").then((r) => r.version).catch(() => "");
     await loadBooks();
     renderHome();
   } catch (e) {

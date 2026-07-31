@@ -117,6 +117,15 @@ def _build_router():
     def root(request: Request):
         return fac(request).h_root({}, {}, {})
 
+    # ---- app-level updates (GitHub Releases) ----
+    @r.get("/update-check")
+    def update_check(request: Request):
+        return fac(request).h_update_check({}, {}, {})
+
+    @r.post("/update-apply")
+    def update_apply(body: dict, request: Request):
+        return fac(request).h_update_apply({}, body, {})
+
     # ---- books / registry ----
     @r.get("/books")
     def list_books(request: Request):

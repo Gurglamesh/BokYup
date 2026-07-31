@@ -591,6 +591,22 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       tested (sub-tabs, filter persists across tabs, spenderat totals). FUTURE (noted, not
       built): import supplier invoices → suggest creating articles from the lines → book the
       cost so order margins (what the customer later buys for builds) can be derived.
+- [x] **Distribution + in-app updates via GitHub Releases (2026-07).** `.github/workflows/
+      release.yml` builds the Windows one-folder app (`bokyup.spec`) + the external updater
+      (`updater.spec` → `BokYupUpdater.exe`) on a `v*` tag, zips them, and builds the Android
+      APK (Capacitor), attaching all to a GitHub Release (version stamped from the tag).
+      `backend/updater.py`: `check_for_update` (GitHub `releases/latest`, pure
+      `evaluate_release`/`is_newer` + stdlib fetch; soft-fails offline) and `apply_update`
+      (frozen desktop only). **No auto-install** — the home screen checks (optionally on
+      startup; a checkbox stores the pref in localStorage) and shows a banner; the user
+      clicks **"Uppdatera nu"** → `POST /update-apply` downloads the zip, launches a temp
+      copy of `BokYupUpdater.exe` (`packaging/updater.py`: waits for the app PID to exit,
+      backs up the install to `.bak`, `swap_zip` extracts the new build, relaunches) and
+      exits. Books live outside the install dir so updates never touch them; `schema.migrate`
+      handles a schema bump. API `GET /update-check` + `POST /update-apply`. **Android: use
+      Obtainium** now (tracks the releases; APK named `bokyup-<version>.apk`, signed via repo
+      keystore secrets); **Capgo OTA** for web/WASM updates noted for later (`docs/updates.md`).
+      Tests pass (323; version-compare/release-eval/swap_zip/verify_sha256).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
