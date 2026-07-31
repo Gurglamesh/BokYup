@@ -128,6 +128,31 @@ class TestRoundTrip:
         got = s2.connection().execute("SELECT COUNT(*) FROM verifikation").fetchone()[0]
         assert got == count
 
+    def test_import_overwrite_existing_book_in_place(self, tmp_path):
+        # Source bundle carries a marker; a DIFFERENT existing book is overwritten by it.
+        mgr, recA, sessA = _make_book(tmp_path, pw="pwA")
+        sessA.connection().execute("INSERT INTO config(key,value) VALUES('marker','FROM_A')")
+        sessA.connection().commit()
+        out = mgr.export_book(recA.id, tmp_path / "a.buyn")
+
+        recB, sessB = mgr.create_book("Firman", str(tmp_path / "b.db"), "pwB")
+        from backend.models import schema as S
+        S.initialize_schema(sessB.connection())
+        mgr.lock_book(recB.id)
+        before = {r.id for r in mgr.list_books()}
+
+        # Overwrite book B in place (frontend targets recB.db_path + overwrite=True).
+        rec = mgr.import_book(out, recB.db_path, display_name="Firman", overwrite=True)
+        assert rec.id in before                       # same registry record — no duplicate
+        assert len(mgr.list_books()) == len(before)   # book count unchanged
+        # a timestamped .buyn backup of the old B was made beside it
+        assert any(p.name.startswith("b.backup-") and p.suffix == ".buyn"
+                   for p in tmp_path.iterdir())
+        # B now holds A's data, unlockable with A's (the bundle's) passphrase
+        s = mgr.open_book(rec.id, "pwA")
+        marker = s.connection().execute("SELECT value FROM config WHERE key='marker'").fetchone()
+        assert marker[0] == "FROM_A"
+
     def test_imported_book_decrypts_sensitive_fields(self, tmp_path):
         mgr, record, session = _make_book(tmp_path, pw="secret")
         ops = BookOps(session)

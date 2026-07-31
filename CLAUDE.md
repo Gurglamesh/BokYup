@@ -607,6 +607,14 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       Obtainium** now (tracks the releases; APK named `bokyup-<version>.apk`, signed via repo
       keystore secrets); **Capgo OTA** for web/WASM updates noted for later (`docs/updates.md`).
       Tests pass (323; version-compare/release-eval/swap_zip/verify_sha256).
+- [x] **Import: överskriv befintlig bok med samma namn eller skapa ny (2026-07).** When
+      restoring a `.buyn`, if a book with the same display name already exists the UI now
+      asks: **skapa ny** (keep both) or **skriv över** the existing one. Frontend
+      orchestration (`resolveImportConflict`): overwrite targets the existing book's
+      `db_path` with `overwrite: true` — `register_existing` dedups by path (same registry
+      record, no duplicate) and `bundle.import_` auto-exports a timestamped `.buyn` backup
+      of the old book before replacing it. Backend already supported it (import `overwrite`
+      param). Tests pass (324; `test_import_overwrite_existing_book_in_place`).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

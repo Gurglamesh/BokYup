@@ -2344,6 +2344,25 @@ async function exportBackupFlow(bookId, displayName) {
   toast("Säkerhetskopia sparad: " + res.out_path);
 }
 
+// When a book with the same name already exists, let the user choose to overwrite it
+// (replace that book's file — a backup of the old one is auto-made) or create a new book.
+// Returns { dest_db_path, overwrite, display_name } or null (cancelled).
+async function resolveImportConflict(name, proposedDest) {
+  const existing = state.books.find((b) => (b.display_name || "").trim() === (name || "").trim());
+  if (!name || !existing) return { dest_db_path: proposedDest, overwrite: false, display_name: name };
+  const f = await modal(`En bok med namnet "${name}" finns redan`, [
+    { name: "action", label: "Vad vill du göra?", type: "select", options: [
+      { value: "new", label: "Skapa en ny bok (behåll båda)" },
+      { value: "overwrite", label: "Skriv över den befintliga boken" },
+    ] },
+  ], "Fortsätt");
+  if (!f) return null;
+  if (f.action === "overwrite") {
+    return { dest_db_path: existing.db_path, overwrite: true, display_name: name, overwrote: true };
+  }
+  return { dest_db_path: proposedDest, overwrite: false, display_name: name };
+}
+
 async function importBackupFlow() {
   if (window.__BOKYUP_FILES__) {
     // Phone: pick a .buyn (copied into the app FS), then import it into IndexedDB.
@@ -2354,12 +2373,15 @@ async function importBackupFlow() {
     ], "Återställ");
     if (!f) return;
     const name = f.display_name || "Återställd bok";
-    const dest = `/bokyup-data/${name.replace(/\W+/g, "_")}_${Date.now()}.db`;
-    const rec = await api("POST", "/books/import",
-                          { bundle_path: picked.fsPath, dest_db_path: dest, display_name: name });
+    const proposed = `/bokyup-data/${name.replace(/\W+/g, "_")}_${Date.now()}.db`;
+    const target = await resolveImportConflict(name, proposed);
+    if (!target) return;
+    const rec = await api("POST", "/books/import", { bundle_path: picked.fsPath,
+      dest_db_path: target.dest_db_path, display_name: name, overwrite: target.overwrite });
     await loadBooks();
     renderHome();
-    toast(`Återställd: ${rec.display_name} — lås upp med dess lösenord`);
+    toast(target.overwrote ? `Skrev över "${name}" (säkerhetskopia av den gamla gjordes) — lås upp med dess lösenord`
+                           : `Återställd: ${rec.display_name} — lås upp med dess lösenord`);
     return;
   }
   const f = await modal("Återställ från säkerhetskopia", [
@@ -2368,13 +2390,17 @@ async function importBackupFlow() {
     { name: "display_name", label: "Namn på boken (valfritt)" },
   ], "Återställ");
   if (!f || !f.bundle_path || !f.dest_db_path) return;
+  const name = f.display_name || null;
+  const target = await resolveImportConflict(name, f.dest_db_path);
+  if (!target) return;
   const rec = await api("POST", "/books/import", {
-    bundle_path: f.bundle_path, dest_db_path: f.dest_db_path,
-    display_name: f.display_name || null,
+    bundle_path: f.bundle_path, dest_db_path: target.dest_db_path,
+    display_name: name, overwrite: target.overwrite,
   });
   await loadBooks();
   renderHome();
-  toast(`Återställd: ${rec.display_name} — lås upp med dess lösenord`);
+  toast(target.overwrote ? `Skrev över "${name}" (säkerhetskopia av den gamla gjordes) — lås upp med dess lösenord`
+                         : `Återställd: ${rec.display_name} — lås upp med dess lösenord`);
 }
 
 // ---------------------------------------------------------------------------
