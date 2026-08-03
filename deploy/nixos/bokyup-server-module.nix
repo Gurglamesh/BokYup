@@ -1,7 +1,8 @@
-# NixOS module: run the BokYup authority server as a native systemd service (no Docker).
+# NixOS module: run the BokYup authority server ISOLATED IN A CONTAINER
+# (virtualisation.oci-containers) from a Nix-built OCI image. Docker is enabled for you.
 #
 # You normally get this via the flake:  imports = [ inputs.bokyup.nixosModules.bokyup-server ];
-# (the flake injects `services.bokyup-server.package`). Then, minimally:
+# (the flake injects `services.bokyup-server.imageFile`). Minimal use:
 #
 #   services.bokyup-server = {
 #     enable = true;
@@ -9,36 +10,38 @@
 #     backup.enable = true;
 #   };
 #
-# The server binds 127.0.0.1 by default — publish it to your tailnet with
-# `tailscale serve --bg 8756` (see docs/server-nixos.md). Books live in dataDir; that
-# directory is the one thing to back up (this module can do it nightly).
+# The container's port is published on 127.0.0.1 only — publish it to your tailnet with
+# `tailscale serve --bg 8756` (see docs/server-flake.md). Books live in dataDir (bind-mounted
+# to /data in the container); that directory is the one thing to back up.
 { config, lib, pkgs, ... }:
 
 let
   cfg = config.services.bokyup-server;
+  backend = config.virtualisation.oci-containers.backend;
+  unit = "${backend}-bokyup-server.service";
 in
 {
   options.services.bokyup-server = {
-    enable = lib.mkEnableOption "the BokYup self-hosted authority server";
+    enable = lib.mkEnableOption "the BokYup self-hosted authority server (isolated in a container)";
 
-    package = lib.mkOption {
+    imageFile = lib.mkOption {
       type = lib.types.package;
-      description = "The bokyup-server package (normally injected by the flake).";
+      description = "The OCI image to run (normally injected by the flake).";
     };
 
     dataDir = lib.mkOption {
       type = lib.types.path;
       default = "/var/lib/bokyup";
-      description = "Where the registry + encrypted books live. THE thing to back up.";
+      description = "Host dir bind-mounted to /data — registry + encrypted books. THE thing to back up.";
     };
 
     host = lib.mkOption {
       type = lib.types.str;
       default = "127.0.0.1";
-      description = "Bind address. Keep 127.0.0.1 and publish via `tailscale serve`.";
+      description = "Host address the container port is published on. Keep 127.0.0.1; publish via `tailscale serve`.";
     };
 
-    port = lib.mkOption { type = lib.types.port; default = 8756; description = "TCP port."; };
+    port = lib.mkOption { type = lib.types.port; default = 8756; description = "Published host port."; };
 
     autolockSeconds = lib.mkOption {
       type = lib.types.int;
@@ -55,15 +58,12 @@ in
     tokenFile = lib.mkOption {
       type = lib.types.path;
       description = ''
-        Path to a file containing ONLY the API bearer token (no KEY=VALUE, just the token).
-        Kept off the Nix store and out of the environment via systemd LoadCredential — use
-        an agenix/sops secret, or a root-only file you create by hand. Generate a token:
+        Path to a file containing ONLY the API bearer token (just the token, no KEY=VALUE).
+        It is bind-mounted read-only into the container; keep it off the Nix store (agenix/
+        sops secret, or a root-only file). Generate one:
           python3 -c "import secrets; print(secrets.token_urlsafe(32))"
       '';
     };
-
-    user = lib.mkOption { type = lib.types.str; default = "bokyup"; description = "Service user."; };
-    group = lib.mkOption { type = lib.types.str; default = "bokyup"; description = "Service group."; };
 
     backup = {
       enable = lib.mkEnableOption "a consistent nightly local backup of dataDir";
@@ -82,53 +82,31 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    users.users = lib.mkIf (cfg.user == "bokyup") {
-      bokyup = { isSystemUser = true; group = cfg.group; home = cfg.dataDir; };
-    };
-    users.groups = lib.mkIf (cfg.group == "bokyup") { bokyup = { }; };
+    # Container runtime (Docker by default; set oci-containers.backend = "podman" to switch).
+    virtualisation.docker.enable = lib.mkDefault true;
 
-    systemd.tmpfiles.rules = [
-      "d ${cfg.dataDir} 0700 ${cfg.user} ${cfg.group} - -"
-    ];
-
-    systemd.services.bokyup-server = {
-      description = "BokYup self-hosted authority server";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
-      environment = {
-        BOKYUP_DATA_DIR = cfg.dataDir;
-        BOKYUP_HOST = cfg.host;
-        BOKYUP_PORT = toString cfg.port;
-        BOKYUP_AUTOLOCK = toString cfg.autolockSeconds;
-        BOKYUP_CORS = lib.concatStringsSep "," cfg.corsOrigins;
-      };
-      serviceConfig = {
-        # The token is exposed to the process only via $CREDENTIALS_DIRECTORY/token (tmpfs,
-        # 0400) — never in the store or the environment.
-        LoadCredential = [ "token:${cfg.tokenFile}" ];
-        ExecStart = pkgs.writeShellScript "bokyup-server-start" ''
-          export BOKYUP_API_TOKEN_FILE="$CREDENTIALS_DIRECTORY/token"
-          exec ${cfg.package}/bin/bokyup-server
-        '';
-        User = cfg.user;
-        Group = cfg.group;
-        Restart = "on-failure";
-        RestartSec = 5;
-        # Hardening.
-        NoNewPrivileges = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        PrivateTmp = true;
-        PrivateDevices = true;
-        ProtectKernelTunables = true;
-        ProtectControlGroups = true;
-        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
-        ReadWritePaths = [ cfg.dataDir ];
+    virtualisation.oci-containers = {
+      backend = lib.mkDefault "docker";
+      containers.bokyup-server = {
+        imageFile = cfg.imageFile;
+        image = "bokyup-server:latest";
+        # Publish on the host loopback only; reach it over Tailscale.
+        ports = [ "${cfg.host}:${toString cfg.port}:8756" ];
+        volumes = [
+          "${cfg.dataDir}:/data"
+          "${cfg.tokenFile}:/run/bokyup-token:ro"   # the token, read-only
+        ];
+        environment = {
+          BOKYUP_AUTOLOCK = toString cfg.autolockSeconds;
+          BOKYUP_CORS = lib.concatStringsSep "," cfg.corsOrigins;
+          BOKYUP_API_TOKEN_FILE = "/run/bokyup-token";
+        };
       };
     };
 
-    # Consistent nightly backup: stop the service (SQLite closes cleanly), archive, restart.
+    systemd.tmpfiles.rules = [ "d ${cfg.dataDir} 0700 root root - -" ];
+
+    # Consistent nightly backup: stop the container (SQLite closes cleanly), archive, restart.
     systemd.services.bokyup-backup = lib.mkIf cfg.backup.enable {
       description = "Nightly consistent backup of the BokYup data directory";
       path = [ pkgs.gnutar pkgs.gzip pkgs.coreutils pkgs.findutils pkgs.systemd ];
@@ -138,11 +116,11 @@ in
         mkdir -p ${lib.escapeShellArg cfg.backup.dir}
         stamp=$(date +%Y%m%d-%H%M%S)
         dest=${lib.escapeShellArg cfg.backup.dir}/bokyup-"$stamp".tgz
-        systemctl stop bokyup-server
+        systemctl stop ${unit}
         if tar czf "$dest" -C ${lib.escapeShellArg cfg.dataDir} . ; then
-          systemctl start bokyup-server
+          systemctl start ${unit}
         else
-          systemctl start bokyup-server
+          systemctl start ${unit}
           echo "backup FAILED" >&2; exit 1
         fi
         ls -1t ${lib.escapeShellArg cfg.backup.dir}/bokyup-*.tgz \

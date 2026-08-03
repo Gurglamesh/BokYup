@@ -2,15 +2,15 @@
   description = "BokYup — self-hosted authority server (flake outputs; the app itself is unaffected)";
 
   # The server is the SAME backend as the app (single-sourced — a legal book must not run
-  # divergent schema/verifikationsnummer logic), packaged here as an opt-in flake output so
-  # it only matters when you deploy a server. Consume it from your system flake:
+  # divergent schema/verifikationsnummer logic), packaged here as an opt-in flake output.
+  # It runs ISOLATED IN A CONTAINER via a Nix-built OCI image + virtualisation.oci-containers.
+  # Consume it from your system flake:
   #
-  #   inputs.bokyup.url = "github:gurglamesh/bokyup";     # or a path / ref
-  #   # in your nixosConfiguration modules:
+  #   inputs.bokyup.url = "github:gurglamesh/bokyup";
+  #   inputs.bokyup.inputs.nixpkgs.follows = "nixpkgs";
+  #   # in your host modules:
   #   imports = [ inputs.bokyup.nixosModules.bokyup-server ];
   #   services.bokyup-server = { enable = true; tokenFile = ...; backup.enable = true; };
-  #
-  # Tip: add `inputs.bokyup.inputs.nixpkgs.follows = "nixpkgs";` to build against your nixpkgs.
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -19,18 +19,14 @@
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
 
-      # Runtime Python env for the headless server. These are the ONLY runtime deps
-      # (httpx2/pytest/pywebview are test/desktop-only and not needed here).
+      # Runtime Python env for the headless server (the ONLY runtime deps;
+      # httpx2/pytest/pywebview are test/desktop-only).
       pythonEnvFor = pkgs: pkgs.python3.withPackages (ps: with ps; [
-        fastapi
-        uvicorn
-        pydantic
-        argon2-cffi
-        cryptography
-        pillow
-        fpdf2
+        fastapi uvicorn pydantic argon2-cffi cryptography pillow fpdf2
       ]);
 
+      # The launcher: put this flake's backend source on PYTHONPATH and run the headless
+      # server module. Used both for `nix run` and as the container's entrypoint.
       serverPkgFor = system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
@@ -40,48 +36,51 @@
           name = "bokyup-server";
           runtimeInputs = [ pythonEnv ];
           text = ''
-            # The backend source is this flake's tree; put it on PYTHONPATH and run the
-            # headless server module. Config comes from BOKYUP_* env vars (see backend/server.py).
             export PYTHONPATH="${self}:''${PYTHONPATH:-}"
             exec python -m backend.server "$@"
           '';
         };
+
+      # A reproducible OCI image (no Dockerfile). Binds 0.0.0.0 INSIDE the container; the
+      # NixOS module maps it to 127.0.0.1 on the host and publishes via Tailscale.
+      containerFor = system:
+        let pkgs = nixpkgs.legacyPackages.${system};
+        in pkgs.dockerTools.buildLayeredImage {
+          name = "bokyup-server";
+          tag = "latest";
+          contents = [ (serverPkgFor system) ];
+          config = {
+            Cmd = [ "/bin/bokyup-server" ];
+            Env = [ "BOKYUP_DATA_DIR=/data" "BOKYUP_HOST=0.0.0.0" "BOKYUP_PORT=8756" ];
+            ExposedPorts = { "8756/tcp" = { }; };
+          };
+        };
     in
     {
       packages = forAllSystems (system: rec {
-        bokyup-server = serverPkgFor system;
+        bokyup-server = serverPkgFor system;   # the launcher (nix run / container entrypoint)
+        container = containerFor system;       # the OCI image the NixOS module loads + runs
         default = bokyup-server;
       });
 
       apps = forAllSystems (system: rec {
-        bokyup-server = {
-          type = "app";
-          program = "${serverPkgFor system}/bin/bokyup-server";
-        };
+        bokyup-server = { type = "app"; program = "${serverPkgFor system}/bin/bokyup-server"; };
         default = bokyup-server;
       });
 
-      # The NixOS service module, with the package pre-wired to this flake's build.
+      # The NixOS service module, with the container image pre-wired to this flake's build.
       nixosModules.bokyup-server = { pkgs, lib, ... }: {
         imports = [ ./deploy/nixos/bokyup-server-module.nix ];
-        services.bokyup-server.package =
-          lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.bokyup-server;
+        services.bokyup-server.imageFile =
+          lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.container;
       };
       nixosModules.default = self.nixosModules.bokyup-server;
 
-      # `nix flake check` builds these: the server package (validates the Python env +
-      # the launcher) and the NixOS module wired into a config (validates it evaluates
-      # and the service's ExecStart builds) — without building a whole OS closure.
+      # `nix flake check` builds these: the launcher + the OCI image (validates the Python
+      # env, the entrypoint, and the image assembly).
       checks = forAllSystems (system: {
         bokyup-server = self.packages.${system}.bokyup-server;
-        nixos-module =
-          (nixpkgs.lib.nixosSystem {
-            inherit system;
-            modules = [
-              self.nixosModules.bokyup-server
-              { services.bokyup-server = { enable = true; tokenFile = "/dev/null"; backup.enable = true; }; }
-            ];
-          }).config.systemd.services.bokyup-server.serviceConfig.ExecStart;
+        container = self.packages.${system}.container;
       });
     };
 }
