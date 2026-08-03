@@ -1,0 +1,37 @@
+name: flake
+
+# Validate the self-hosted-server flake: build the server package (catches Python
+# dep / launcher errors) and evaluate the NixOS module wired into a config (catches
+# option/type errors) — via `nix flake check`, which builds the flake's `checks`.
+#
+# Nix isn't available in the app's own test runner, so this is what keeps flake.nix +
+# deploy/nixos/* from silently rotting.
+
+on:
+  push:
+    paths:
+      - "flake.nix"
+      - "flake.lock"
+      - "deploy/nixos/**"
+      - "backend/server.py"
+      - ".github/workflows/flake.yml"
+  pull_request:
+    paths:
+      - "flake.nix"
+      - "flake.lock"
+      - "deploy/nixos/**"
+      - "backend/server.py"
+      - ".github/workflows/flake.yml"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: nix flake check
+        run: nix flake check -L
+      - name: build the server package
+        run: nix build .#bokyup-server -L

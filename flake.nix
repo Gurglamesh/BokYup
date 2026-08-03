@@ -67,5 +67,20 @@
         services.bokyup-server.package = lib.mkDefault self.packages.${pkgs.system}.bokyup-server;
       };
       nixosModules.default = self.nixosModules.bokyup-server;
+
+      # `nix flake check` builds these: the server package (validates the Python env +
+      # the launcher) and the NixOS module wired into a config (validates it evaluates
+      # and the service's ExecStart builds) — without building a whole OS closure.
+      checks = forAllSystems (system: {
+        bokyup-server = self.packages.${system}.bokyup-server;
+        nixos-module =
+          (nixpkgs.lib.nixosSystem {
+            inherit system;
+            modules = [
+              self.nixosModules.bokyup-server
+              { services.bokyup-server = { enable = true; tokenFile = "/dev/null"; backup.enable = true; }; }
+            ];
+          }).config.systemd.services.bokyup-server.serviceConfig.ExecStart;
+      });
     };
 }
