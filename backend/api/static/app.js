@@ -117,6 +117,10 @@ function modal(title, fields, okLabel = "OK") {
         input = el("input", { type: f.type || "text", value: f.value ?? "" });
       }
       inputs[f.name] = input;
+      if (f.onChange) {
+        input._prev = input.value;
+        input.addEventListener("change", () => f.onChange(input.value, input, inputs));
+      }
       body.appendChild(input);
     }
     $("#modal-ok").textContent = okLabel;
@@ -1797,6 +1801,70 @@ function overlay(...children) {
   return { close, box };
 }
 
+// Inline "create category" — a stacking overlay dialog so it works even on top of the
+// shared modal (e.g. the Ny artikel form). Categories created here are income/product
+// categories (an article's sell-side category, which also gives its number prefix).
+// Resolves to the new category object {id,name,kind,prefix,default_rate_code,bas_konto}
+// or null if cancelled.
+const NEW_CAT = "__newcat__";
+function catLabel(c) { return `${c.prefix || "?"} · ${c.name}`; }
+
+function newCategoryDialog() {
+  return new Promise((resolve) => {
+    const name = el("input", { type: "text", placeholder: "Namn (t.ex. Nätverk)" });
+    const bas = el("input", { type: "text", placeholder: "BAS-konto (t.ex. 3001)" });
+    const prefix = el("input", { type: "text", placeholder: "4 siffror" });
+    const rate = el("select", {}, ...RATE_OPTIONS.map((r) => el("option", { value: r }, rateLabel(r))));
+    rate.value = "25";
+    // Suggest the lowest unused prefix (editable; a taken one is rejected on save).
+    api("GET", `/books/${bid()}/categories/next-prefix`)
+      .then((r) => { if (!prefix.value) prefix.value = r.prefix; }).catch(() => {});
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; ui.close(); resolve(v); };
+    const ok = el("button", { class: "btn brand", onclick: () => guard(async () => {
+      if (!name.value.trim() || !bas.value.trim()) { toast("Fyll i namn och BAS-konto", true); return; }
+      const res = await api("POST", `/books/${bid()}/categories`, {
+        name: name.value.trim(), kind: "income", bas_konto: parseInt(bas.value, 10),
+        prefix: (prefix.value || "").trim() || null, default_rate_code: rate.value });
+      const cat = { id: res.id, name: name.value.trim(), kind: "income", prefix: res.prefix,
+        default_rate_code: rate.value, bas_konto: parseInt(bas.value, 10) };
+      toast(`Kategori ${cat.name} skapad (prefix ${cat.prefix})`);
+      finish(cat);
+    }) }, "Skapa");
+    const cancel = el("button", { class: "btn ghost", onclick: () => finish(null) }, "Avbryt");
+    const ui = overlay(el("div", { class: "panel", style: "min-width:280px;max-width:420px" },
+      el("h3", { style: "margin-top:0" }, "Ny kategori (inkomst/produkt)"),
+      wrap("Namn", name), wrap("BAS-konto", bas), wrap("Artikelnr-prefix", prefix),
+      wrap("Standardmoms", rate),
+      el("div", { class: "modal-actions", style: "margin-top:12px" }, cancel, ok)));
+    name.focus();
+  });
+}
+
+// Wire a category <select> whose first entries include a "➕ Ny kategori…" option: when
+// picked it opens newCategoryDialog, inserts + selects the created category, pushes it
+// onto `cats`, and calls onCreated(cat). Cancelling reverts to the previous selection.
+function wireCategoryCreateSelect(select, cats, onCreated) {
+  let prev = select.value;
+  select.addEventListener("change", () => {
+    if (select.value !== NEW_CAT) { prev = select.value; return; }
+    guard(async () => {
+      const cat = await newCategoryDialog();
+      if (cat) {
+        cats.push(cat);
+        const anchor = select.querySelector(`option[value="${NEW_CAT}"]`);
+        select.insertBefore(el("option", { value: String(cat.id) }, cat.name),
+          anchor ? anchor.nextSibling : null);
+        select.value = String(cat.id);
+        prev = select.value;
+        if (onCreated) onCreated(cat);
+      } else {
+        select.value = prev;
+      }
+    });
+  });
+}
+
 // Live-camera capture: returns a Promise<Blob|null>.
 function cameraCaptureModal() {
   return new Promise((resolve) => {
@@ -2119,8 +2187,28 @@ function articleFields(a, incomeCats) {
     { name: "category_id", label: "Kategori (BAS, valfri)", type: "select",
       value: a.category_id ? String(a.category_id) : "",
       options: [{ value: "", label: "Okategoriserad" },
-        ...incomeCats.map((c) => ({ value: String(c.id), label: c.name }))] },
+        { value: NEW_CAT, label: "➕ Ny kategori…" },
+        ...incomeCats.map((c) => ({ value: String(c.id), label: c.name }))],
+      onChange: handleModalCatCreate },
   ];
+}
+
+// Category <select> inside a shared modal: open the stacking category dialog when the
+// "➕ Ny kategori…" option is picked, then insert + select the created category.
+function handleModalCatCreate(val, input) {
+  if (val !== NEW_CAT) { input._prev = val; return; }
+  guard(async () => {
+    const cat = await newCategoryDialog();
+    if (cat) {
+      const anchor = input.querySelector(`option[value="${NEW_CAT}"]`);
+      input.insertBefore(el("option", { value: String(cat.id) }, cat.name),
+        anchor ? anchor.nextSibling : null);
+      input.value = String(cat.id);
+    } else {
+      input.value = input._prev || "";
+    }
+    input._prev = input.value;
+  });
 }
 
 async function addArticleFlow(incomeCats) {
@@ -2594,8 +2682,14 @@ function purchaseItemsEditor(incomeCats, articles, onChange) {
     const name = el("input", { type: "text", placeholder: "Artikelnamn (tomt = ren kostnad)",
       value: v.description || "", oninput: fire });
     const cat = el("select", {}, el("option", { value: "" }, "(ingen)"),
+      el("option", { value: NEW_CAT }, "➕ Ny kategori…"),
       ...cats.map((c) => el("option", { value: c.id }, `${c.prefix || "?"} · ${c.name}`)));
     if (v.category_id) cat.value = String(v.category_id);
+    wireCategoryCreateSelect(cat, cats, (nc) => {
+      // keep the label format (prefix · name) consistent with the other options
+      const o = cat.querySelector(`option[value="${nc.id}"]`);
+      if (o) o.textContent = catLabel(nc);
+    });
     const qty = el("input", { type: "text", value: v.qty || "1", style: "width:60px", oninput: fire });
     const cost = el("input", { type: "text", value: v.cost || "0,00", style: "width:96px", oninput: fire });
     const rate = el("select", { onchange: fire }, ...RATE_OPTIONS.map((r) => el("option", { value: r }, rateLabel(r))));
@@ -2909,8 +3003,14 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatch
     const desc = el("input", { type: "text", placeholder: "Beskrivning", value: v.description || "" });
     const cat = el("select", {},
       el("option", { value: "" }, "(standard)"),
+      el("option", { value: NEW_CAT }, "➕ Ny kategori…"),
       ...cats.map((c) => el("option", { value: c.id }, c.name)));
     if (v.category_id) cat.value = String(v.category_id);
+    // Allow creating a category inline; on create pre-fill the row's moms from it.
+    wireCategoryCreateSelect(cat, cats, (nc) => {
+      if (nc.default_rate_code) rate.value = nc.default_rate_code;
+      fire();
+    });
     const qtyVal = v.quantity_centi != null ? String(v.quantity_centi / 100).replace(".", ",") : "1";
     const qty = el("input", { type: "text", value: qtyVal, style: "width:64px", oninput: fire });
     const unit = el("input", { type: "text", value: v.unit || "st", style: "width:54px" });

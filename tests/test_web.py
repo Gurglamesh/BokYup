@@ -54,6 +54,14 @@ class TestStaticUI:
                        "full_batch_id", "Produktkategori"):
             assert marker in js, f"missing {marker} in app.js"
 
+    def test_app_js_has_inline_category_create(self, client):
+        # Inline "create category" (stacking dialog) is wired into the invoice line editor
+        # and the article-create form.
+        js = client.get("/app/app.js").text
+        for marker in ("newCategoryDialog", "wireCategoryCreateSelect",
+                       "handleModalCatCreate", "Ny kategori"):
+            assert marker in js, f"missing {marker} in app.js"
+
     def test_styles_served(self, client):
         resp = client.get("/app/styles.css")
         assert resp.status_code == 200
