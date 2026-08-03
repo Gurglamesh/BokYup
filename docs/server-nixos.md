@@ -8,37 +8,30 @@ Everything below is tailnet-only — **no ports are opened to the internet.**
 
 ---
 
-## 1. Enable Tailscale + Docker in `configuration.nix`
+## 1. Enable Tailscale + Docker (NixOS module)
 
-Add to `/etc/nixos/configuration.nix` (replace `youruser`):
+A ready-to-import system module lives at **`deploy/nixos/servertools.nix`** (Tailscale +
+Docker + compose + the `docker` group for user `gurglamesh`). These are system services, so
+it's a NixOS module imported from `configuration.nix` — independent of hjem, which manages
+your user's files, not system services.
+
+Copy it into your config tree and import it:
 
 ```nix
-{ config, pkgs, ... }:
-{
-  # --- Tailscale (mesh VPN; the only way in) ---
-  services.tailscale.enable = true;
-  # Let the tailnet reach services on this box and help NAT traversal.
-  networking.firewall = {
-    trustedInterfaces = [ "tailscale0" ];
-    allowedUDPPorts = [ config.services.tailscale.port ];   # 41641, for direct connections
-    # NOTE: we do NOT open 8756 here — Docker binds it to 127.0.0.1 and
-    # `tailscale serve` proxies it inside the tailnet.
-  };
-
-  # --- Docker (to run the BokYup server container) ---
-  virtualisation.docker.enable = true;
-  users.users.youruser.extraGroups = [ "docker" ];
-
-  # git is handy for cloning the repo (skip if you already have it)
-  environment.systemPackages = [ pkgs.git ];
-}
+# configuration.nix (or your modules aggregator)
+imports = [ ./servertools.nix ];   # adjust the path
 ```
 
-Apply it:
+Change the username in `users.users.gurglamesh.extraGroups` if needed, then apply:
 
 ```bash
 sudo nixos-rebuild switch
 ```
+
+> Prefer inlining over a separate module? The three blocks inside `servertools.nix`
+> (`services.tailscale.enable`, the `networking.firewall` tailnet bits, and
+> `virtualisation.docker.enable` + the `docker` group) can go straight into
+> `configuration.nix`.
 
 Then bring this machine onto your tailnet (opens a browser link to authenticate):
 
