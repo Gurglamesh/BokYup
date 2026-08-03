@@ -1753,10 +1753,13 @@ function momsLinesEditor() {
 // ---------------------------------------------------------------------------
 // Receipt picker — import a file or take a photo; stages one image for upload
 // ---------------------------------------------------------------------------
-function receiptPicker() {
+function receiptPicker(opts = {}) {
   let staged = null;           // { image_base64, mime }
   const preview = el("div", { class: "receipt-preview" });
+  // With requireFormat the selector starts on a "—" placeholder so the user must actively
+  // pick paper vs digital (a photo of a digital receipt is not the digital original).
   const fmt = el("select", {},
+    ...(opts.requireFormat ? [el("option", { value: "" }, "—")] : []),
     el("option", { value: "paper" }, "Papperskvitto (foto = originalet)"),
     el("option", { value: "digital" }, "Digitalt kvitto (foto ersätter EJ originalet)"));
 
@@ -1806,7 +1809,8 @@ function receiptPicker() {
   const element = el("div", {}, controls, wrap("Kvittots originalformat", fmt), preview);
   return {
     element,
-    getStaged() { return staged ? { ...staged, original_format: fmt.value } : null; },
+    getFormat() { return fmt.value; },     // "" | "paper" | "digital"
+    getStaged() { return staged ? { ...staged, original_format: fmt.value || null } : null; },
   };
 }
 
@@ -1960,19 +1964,29 @@ async function receiptsFlow(txId, isPending) {
     body.appendChild(el("p", { class: "muted" }, "Inga kvitton för denna transaktion."));
   } else {
     for (const rc of list) {
+      const isImg = (rc.mime || "").startsWith("image/");
+      const ext = rc.mime === "application/pdf" ? ".pdf" : "";
+      const dlName = rc.filename || `kvitto-${rc.id}${ext}`;
       let view;
-      if (rc.mime === "application/pdf") {
-        view = el("button", { class: "btn small", onclick: () => guard(() =>
-          showPdf(`/books/${bid()}/receipts/${rc.id}`, rc.filename || `kvitto-${rc.id}.pdf`)) },
-          "📄 Öppna PDF");
-      } else {
+      if (isImg) {
         view = el("img", { class: "receipt-view" });
         receiptSrc(rc.id).then((src) => { view.src = src; });
+      } else {
+        // A PDF/document. The document viewer uses the shared modal (z-index below this
+        // overlay), so close this overlay first or the viewer opens hidden behind it.
+        view = el("button", { class: "btn small", onclick: () => {
+          ui.close();
+          guard(() => showPdf(`/books/${bid()}/receipts/${rc.id}`, dlName));
+        } }, "📄 Öppna dokument");
       }
       const meta = el("div", { class: "muted" },
         `${rc.mime} · ${Math.round(rc.byte_size / 1024)} kB`
         + (rc.original_format ? " · " + rc.original_format : ""));
       const actions = el("div", { class: "modal-actions" });
+      // Always allow retrieving the original file (image or PDF).
+      const dl = el("a", { class: "btn small ghost", download: dlName }, "Ladda ner");
+      receiptSrc(rc.id).then((src) => { dl.href = src; });
+      actions.appendChild(dl);
       if (isPending) {
         actions.appendChild(el("button", { class: "btn small danger", onclick: () => guard(async () => {
           await api("DELETE", `/books/${bid()}/receipts/${rc.id}`);
@@ -2850,9 +2864,14 @@ async function purchaseForm(panel) {
     toast("Lägg till minst en utgiftskategori (BAS-konto) först", true);
     return;
   }
+  if (suppliers.length === 0) {
+    toast("Lägg till minst en leverantör först (fliken Leverantörer)", true);
+    return;
+  }
   panel.innerHTML = "";
   panel.appendChild(el("h2", {}, "Nytt inköp"));
-  const supplier = el("select", {}, el("option", { value: "" }, "— (ingen leverantör) —"),
+  // Leverantör is required — start on a placeholder so nothing is booked without one.
+  const supplier = el("select", {}, el("option", { value: "" }, "— Välj leverantör —"),
     ...suppliers.map((s) => el("option", { value: s.id }, s.name)));
   const cat = el("select", {}, ...expenseCats.map((c) => el("option", { value: c.id }, c.name)));
   const today = new Date().toISOString().slice(0, 10);
@@ -2874,7 +2893,7 @@ async function purchaseForm(panel) {
     totalsBox.textContent = `Summa: ${toKr(ex)} kr ex moms + ${toKr(moms)} kr moms = ${toKr(ex + moms)} kr`;
   };
   const items = purchaseItemsEditor(incomeCats, articles, updateTotals);
-  const receipt = receiptPicker();
+  const receipt = receiptPicker({ requireFormat: true });
 
   panel.appendChild(el("div", { class: "row" },
     wrap("Leverantör", supplier), wrap("Bokförs på (kostnadskonto)", cat),
@@ -2885,7 +2904,7 @@ async function purchaseForm(panel) {
     el("label", {}, "Artiklar (namnge en rad → den läggs i lager som en batch)"), items.element));
   panel.appendChild(totalsBox);
   panel.appendChild(el("div", { style: "margin-top:6px" },
-    el("label", {}, "Kvitto/faktura (bild eller PDF, valfritt)"), receipt.element));
+    el("label", {}, "Kvitto/faktura (bild eller PDF) — välj papper eller digitalt"), receipt.element));
   panel.appendChild(el("div", { style: "margin-top:14px" },
     el("button", { class: "btn brand", onclick: () => guard(submit) }, "Bokför inköp"),
     el("button", { class: "btn ghost", style: "margin-left:8px",
@@ -2895,11 +2914,16 @@ async function purchaseForm(panel) {
   async function submit() {
     const rows = items.get();
     if (rows.length === 0) { toast("Lägg till minst en rad med belopp", true); return; }
+    if (!supplier.value) { toast("Välj en leverantör", true); return; }
+    const fmt = receipt.getFormat();
+    if (fmt !== "paper" && fmt !== "digital") {
+      toast("Välj kvittots originalformat (papper eller digitalt)", true); return;
+    }
     const paid_date = paidNow.value === "yes" ? payDate.value : null;
     const res = await api("POST", `/books/${bid()}/expenses`, {
-      supplier_id: supplier.value ? parseInt(supplier.value, 10) : null,
+      supplier_id: parseInt(supplier.value, 10),
       category_id: parseInt(cat.value, 10), items: rows, trans_date: date.value,
-      ext_ref: extRef.value || null, paid_date,
+      ext_ref: extRef.value || null, paid_date, receipt_original_format: fmt,
     });
     const staged = receipt.getStaged();
     if (staged) {
