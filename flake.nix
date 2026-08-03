@@ -64,7 +64,8 @@
       # The NixOS service module, with the package pre-wired to this flake's build.
       nixosModules.bokyup-server = { pkgs, lib, ... }: {
         imports = [ ./deploy/nixos/bokyup-server-module.nix ];
-        services.bokyup-server.package = lib.mkDefault self.packages.${pkgs.system}.bokyup-server;
+        services.bokyup-server.package =
+          lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.bokyup-server;
       };
       nixosModules.default = self.nixosModules.bokyup-server;
 
