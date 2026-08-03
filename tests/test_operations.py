@@ -1548,3 +1548,54 @@ class TestCustomerDelete:
         assert ops.conn.execute("SELECT COUNT(*) FROM customer_relation").fetchone()[0] == 0
         assert ops.conn.execute("SELECT COUNT(*) FROM support_ledger WHERE customer_id=?",
                                 (a,)).fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# Inköp extras: öresavrundning + edit non-ledger fields
+# ---------------------------------------------------------------------------
+
+class TestExpenseExtras:
+    def test_ores_rounding_books_diff_to_3740(self, ops):
+        cat = ops.create_category("Inköp varor", "expense", 4010)
+        res = ops.record_expense(None, cat,
+            [{"rate_code": "25", "amount_ore": 12499, "inclusive": True}],
+            "2026-05-01", ores_rounding=True, paid_date="2026-05-01")
+        vid = res["verifikation_id"]
+        postings = {p["bas_konto"]: p["amount_ore"] for p in _postings(ops, vid)}
+        assert postings[1930] == -12500      # bank pays whole kronor
+        assert postings[3740] == 1           # öre diff to öres-/kronutjämning
+        assert postings[4010] == 9999        # ex-moms exact
+        assert postings[2640] == 2500        # ingående moms exact
+        assert _balance(ops, vid) == 0
+
+    def test_no_rounding_by_default(self, ops):
+        cat = ops.create_category("Inköp varor", "expense", 4010)
+        res = ops.record_expense(None, cat,
+            [{"rate_code": "25", "amount_ore": 12499, "inclusive": True}],
+            "2026-05-01", paid_date="2026-05-01")
+        postings = {p["bas_konto"]: p["amount_ore"] for p in _postings(ops, res["verifikation_id"])}
+        assert postings[1930] == -12499 and 3740 not in postings
+
+    def test_update_expense_meta_keeps_ledger(self, ops):
+        cat = ops.create_category("Inköp varor", "expense", 4010)
+        sup = ops.create_supplier("Inet")
+        res = ops.record_expense(None, cat,
+            [{"rate_code": "25", "amount_ore": 10000, "inclusive": False}],
+            "2026-05-01", ext_ref="K1", paid_date="2026-05-01")
+        tid = res["transaktion_id"]
+        ops.update_expense_meta(tid, supplier_id=sup, ext_ref="K2", note="rättat",
+                                receipt_original_format="digital")
+        row = ops.conn.execute("SELECT supplier_id, ext_ref, note, category_id, "
+            "receipt_original_format FROM transaktion WHERE id=?", (tid,)).fetchone()
+        assert row["supplier_id"] == sup and row["ext_ref"] == "K2"
+        assert row["note"] == "rättat" and row["receipt_original_format"] == "digital"
+        assert row["category_id"] == cat        # BAS-konto untouched
+        # moms/belopp untouched
+        assert ops._sum_moms(tid)[0] == 10000
+
+    def test_update_expense_meta_refuses_sale(self, ops):
+        icat = ops.create_category("Sälj", "income", 3001)
+        kid = ops.create_customer("business", company_name="X AB")
+        inc = ops.record_income(kid, icat, [{"rate_code": "25", "amount_ore": 10000}], "2026-05-01")
+        with pytest.raises(InvalidState):
+            ops.update_expense_meta(inc["transaktion_id"], ext_ref="Z")

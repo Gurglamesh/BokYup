@@ -879,13 +879,15 @@ class BookOps:
                        note: Optional[str] = None,
                        receipt_original_format: Optional[str] = None,
                        ext_ref: Optional[str] = None,
+                       ores_rounding: bool = False,
                        paid_date: Optional[str] = None) -> dict:
         """
         Record a purchase (ingående moms, deductible). `lines` is a list of
         {rate_code, amount_ore, inclusive} dicts. `ext_ref` is the supplier's
-        kvitto-/fakturanummer. If `paid_date` is given the transaktion is booked
-        immediately (cash); otherwise it stays pending (an incoming supplier invoice
-        awaiting payment — book it now, mark it paid later via register_payment).
+        kvitto-/fakturanummer. `ores_rounding` books the paid total to whole kronor
+        (supplier öresavrundning) with the öre diff to 3740 (moms/underlag stay exact).
+        If `paid_date` is given the transaktion is booked immediately (cash); otherwise
+        it stays pending (an incoming supplier invoice — mark it paid later).
         """
         self._check_category(category_id, "expense")
         tid = self._insert_transaktion(
@@ -895,10 +897,51 @@ class BookOps:
             ext_ref=(ext_ref.strip() if ext_ref and ext_ref.strip() else None),
         )
         self._insert_moms_lines(tid, lines)
+        if ores_rounding:
+            with self.conn:
+                self.conn.execute("UPDATE transaktion SET ores_rounding=1 WHERE id=?", (tid,))
         result = {"transaktion_id": tid}
         if paid_date:
             result.update(self.register_payment(tid, paid_date))
         return result
+
+    def update_expense_meta(self, transaktion_id: int, *,
+                            supplier_id: Optional[int] = None,
+                            ext_ref: Optional[str] = None,
+                            note: Optional[str] = None,
+                            receipt_original_format: Optional[str] = None) -> dict:
+        """Edit an inköp's NON-ledger fields only: leverantör, kvitto-/fakturanummer,
+        note and kvittots originalformat. The BAS-konto, belopp, moms and any articles/
+        batches are part of the bookkeeping and stay immutable (even after the inköp is
+        booked — only this metadata is editable). A field left None is untouched; pass an
+        empty string to clear ext_ref/note."""
+        t = self.conn.execute("SELECT direction FROM transaktion WHERE id=?",
+                              (transaktion_id,)).fetchone()
+        if t is None:
+            raise KeyError(f"No transaktion {transaktion_id}")
+        if t["direction"] != "in":
+            raise InvalidState("Endast inköp kan redigeras här")
+        updates: dict[str, object] = {}
+        if supplier_id is not None:
+            if supplier_id and self.conn.execute(
+                    "SELECT 1 FROM supplier WHERE id=?", (supplier_id,)).fetchone() is None:
+                raise KeyError(f"No supplier {supplier_id}")
+            updates["supplier_id"] = supplier_id or None
+        if ext_ref is not None:
+            updates["ext_ref"] = ext_ref.strip() or None
+        if note is not None:
+            updates["note"] = note.strip() or None
+        if receipt_original_format is not None:
+            if receipt_original_format and receipt_original_format not in S.RECEIPT_FORMATS:
+                raise ValueError(f"Invalid receipt format: {receipt_original_format}")
+            updates["receipt_original_format"] = receipt_original_format or None
+        if updates:
+            cols = list(updates.keys())
+            sets = ", ".join(f"{c}=?" for c in cols)
+            with self.conn:
+                self.conn.execute(f"UPDATE transaktion SET {sets} WHERE id=?",
+                                  (*[updates[c] for c in cols], transaktion_id))
+        return {"transaktion_id": transaktion_id, "updated": list(updates.keys())}
 
     def record_income(self, customer_id: int, category_id: int,
                       lines: list[dict], trans_date: str, *,
@@ -998,7 +1041,13 @@ class BookOps:
             postings = [(k, ex_k, "utgift") for k, ex_k in income_splits]
             if sum_moms:
                 postings.append((self._sys_account("account_ingaende_moms"), sum_moms, "ingående moms"))
-            postings.append((self._sys_account("account_bank"), -inc, "betalning"))
+            # Öresavrundning (supplier rounded to whole kronor): the bank pays the rounded
+            # total; ex-moms + ingående moms stay exact and the öre diff goes to 3740.
+            round_inc = _round_to_krona(inc) if t["ores_rounding"] else inc
+            postings.append((self._sys_account("account_bank"), -round_inc, "betalning"))
+            if round_inc != inc:
+                postings.append((self._sys_account("account_ores_kronutjamning"),
+                                 round_inc - inc, "öresavrundning"))
             text = "Utgift"
         elif rut:  # 'out' — RUT/ROT faktura: öresavrundning on the customer's summa att betala
             # Per avrundningslagen the customer pays whole kronor, but per Skatteverket's

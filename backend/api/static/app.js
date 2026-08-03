@@ -450,6 +450,8 @@ const SECTION_RENDERERS = {
     if (list.length === 0) { panel.appendChild(el("p", { class: "muted" }, "Inga inköp ännu.")); return; }
     const actions = (t) => el("span", { style: "display:inline-flex;gap:4px" },
       el("button", { class: "btn small ghost", onclick: () => guard(() => receiptsFlow(t.id, t.status === "pending")) }, "📎 Kvitto"),
+      el("button", { class: "btn small ghost", title: "Ändra leverantör, nr, notering, kvittoformat (bokföringen berörs ej)",
+        onclick: () => guard(() => editPurchaseFlow(t, suppliers)) }, "Ändra"),
       t.status === "pending"
         ? el("button", { class: "btn small", onclick: () => guard(() => payFlow(t.id)) }, "Bokför betalning")
         : null);
@@ -2867,6 +2869,29 @@ function purchaseItemsEditor(incomeCats, articles, onChange) {
   return { element, get: () => [...rowsBox.children].map((r) => r._get()).filter((l) => l.quantity_centi > 0) };
 }
 
+// Edit an inköp's NON-ledger fields only. BAS-konto, belopp, moms and articles are part
+// of the bookkeeping and stay fixed; only leverantör, kvitto-/fakturanummer, notering and
+// kvittots originalformat are editable (even after the inköp is booked).
+async function editPurchaseFlow(t, suppliers) {
+  const f = await modal("Ändra inköp (endast icke-bokförda uppgifter)", [
+    { name: "supplier_id", label: "Leverantör", type: "select", value: t.supplier_id ? String(t.supplier_id) : "",
+      options: [{ value: "", label: "— Välj leverantör —" },
+        ...suppliers.map((s) => ({ value: String(s.id), label: s.name }))] },
+    { name: "ext_ref", label: "Kvitto-/fakturanummer", value: t.ext_ref || "" },
+    { name: "note", label: "Notering", value: t.note || "" },
+    { name: "receipt_original_format", label: "Kvittots originalformat", type: "select",
+      value: t.receipt_original_format || "",
+      options: [{ value: "", label: "—" }, { value: "paper", label: "Papper" }, { value: "digital", label: "Digitalt" }] },
+  ], "Spara");
+  if (!f) return;
+  await api("PATCH", `/books/${bid()}/transaktioner/${t.id}`, {
+    supplier_id: f.supplier_id ? parseInt(f.supplier_id, 10) : null,
+    ext_ref: f.ext_ref, note: f.note, receipt_original_format: f.receipt_original_format,
+  });
+  toast("Inköp uppdaterat");
+  renderWorkspace();
+}
+
 async function purchaseForm(panel) {
   const [cats, suppliers, articles] = await Promise.all([
     api("GET", `/books/${bid()}/categories`),
@@ -2888,7 +2913,7 @@ async function purchaseForm(panel) {
   // Leverantör is required — start on a placeholder so nothing is booked without one.
   const supplier = el("select", {}, el("option", { value: "" }, "— Välj leverantör —"),
     ...suppliers.map((s) => el("option", { value: s.id }, s.name)));
-  const cat = el("select", {}, ...expenseCats.map((c) => el("option", { value: c.id }, c.name)));
+  const cat = el("select", {}, ...expenseCats.map((c) => el("option", { value: c.id }, categoryPath(expenseCats, c.id))));
   const today = new Date().toISOString().slice(0, 10);
   const date = el("input", { type: "date", value: today });
   const extRef = el("input", { type: "text", placeholder: "t.ex. kvitto 1234 / faktura FAKT-99" });
@@ -2898,6 +2923,10 @@ async function purchaseForm(panel) {
   const payDate = el("input", { type: "date", value: today });
   const payDateWrap = wrap("Betaldatum", payDate);
   paidNow.onchange = () => { payDateWrap.style.display = paidNow.value === "yes" ? "" : "none"; };
+  // Öresavrundning: only when the supplier rounds the total to whole kronor. Off by default.
+  const ores = el("input", { type: "checkbox" });
+  const oresWrap = el("label", { style: "display:inline-flex;gap:6px;align-items:center" },
+    ores, el("span", {}, "Leverantören öresavrundar totalen (diff bokförs på 3740)"));
   const totalsBox = el("p", { class: "muted", style: "margin-top:6px" });
   const updateTotals = () => {
     let ex = 0, moms = 0;
@@ -2915,6 +2944,7 @@ async function purchaseForm(panel) {
     wrap("Kvitto-/fakturanummer", extRef)));
   panel.appendChild(el("div", { class: "row" },
     wrap("Inköpsdatum", date), wrap("Betald?", paidNow), payDateWrap));
+  panel.appendChild(el("div", { style: "margin-top:6px" }, oresWrap));
   panel.appendChild(el("div", { style: "margin-top:6px" },
     el("label", {}, "Artiklar (namnge en rad → den läggs i lager som en batch)"), items.element));
   panel.appendChild(totalsBox);
@@ -2939,6 +2969,7 @@ async function purchaseForm(panel) {
       supplier_id: parseInt(supplier.value, 10),
       category_id: parseInt(cat.value, 10), items: rows, trans_date: date.value,
       ext_ref: extRef.value || null, paid_date, receipt_original_format: fmt,
+      ores_rounding: ores.checked,
     });
     const staged = receipt.getStaged();
     if (staged) {

@@ -160,7 +160,16 @@ class RecordExpenseReq(BaseModel):
     note: Optional[str] = None
     receipt_original_format: Optional[str] = None   # 'paper' | 'digital'
     ext_ref: Optional[str] = None                   # supplier's kvitto-/fakturanummer
+    ores_rounding: bool = False                     # supplier rounded the total to whole krona
     paid_date: Optional[str] = None
+
+
+class ExpenseMetaReq(BaseModel):
+    # Editable NON-ledger fields of an inköp (BAS-konto/belopp/moms/artiklar are immutable).
+    supplier_id: Optional[int] = None
+    ext_ref: Optional[str] = None
+    note: Optional[str] = None
+    receipt_original_format: Optional[str] = None
 
 
 class RecordIncomeReq(BaseModel):

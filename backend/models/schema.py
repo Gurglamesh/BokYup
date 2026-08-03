@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -191,6 +191,7 @@ CREATE TABLE transaktion (
     receipt_original_format TEXT CHECK (receipt_original_format IN ('paper','digital')),
     note                   TEXT,
     ext_ref                TEXT,        -- supplier's kvitto-/fakturanummer (purchases)
+    ores_rounding          INTEGER NOT NULL DEFAULT 0,  -- supplier rounded the total to whole krona
     created_at             TEXT NOT NULL
 );
 
@@ -920,6 +921,9 @@ _MIGRATIONS: dict[int, str] = {
                 claim_year, created_at FROM rut_claim_old;
         DROP TABLE rut_claim_old;
         CREATE INDEX IF NOT EXISTS idx_rut_state ON rut_claim(state);
+    """,
+    29: """
+        ALTER TABLE transaktion ADD COLUMN ores_rounding INTEGER NOT NULL DEFAULT 0;
     """,
 }
 

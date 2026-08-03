@@ -379,7 +379,8 @@ class AppFacade:
             res = ops.record_expense(
                 b.get("supplier_id"), b["category_id"], moms_lines, b["trans_date"],
                 note=b.get("note"), receipt_original_format=b.get("receipt_original_format"),
-                ext_ref=b.get("ext_ref"), paid_date=b.get("paid_date"))
+                ext_ref=b.get("ext_ref"), ores_rounding=bool(b.get("ores_rounding")),
+                paid_date=b.get("paid_date"))
             tid = res["transaktion_id"]
             batches = []
             for it in items:
@@ -400,8 +401,15 @@ class AppFacade:
         return ops.record_expense(
             b.get("supplier_id"), b["category_id"], b["lines"], b["trans_date"],
             note=b.get("note"), receipt_original_format=b.get("receipt_original_format"),
-            ext_ref=b.get("ext_ref"), paid_date=b.get("paid_date"),
+            ext_ref=b.get("ext_ref"), ores_rounding=bool(b.get("ores_rounding")),
+            paid_date=b.get("paid_date"),
         )
+
+    def h_update_expense(self, p, b, q):
+        return self._ops(p["book_id"]).update_expense_meta(
+            int(p["transaktion_id"]), supplier_id=b.get("supplier_id"),
+            ext_ref=b.get("ext_ref"), note=b.get("note"),
+            receipt_original_format=b.get("receipt_original_format"))
 
     def h_record_income(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -495,7 +503,8 @@ class AppFacade:
         ops = self._ops(p["book_id"])
         cols = ("SELECT t.id, t.direction, t.status, t.trans_date, t.payment_date, "
                 "t.category_id, t.customer_id, t.supplier_id, t.verifikation_id, t.note, "
-                "t.ext_ref, (SELECT COALESCE(SUM(m.inc_moms_ore),0) FROM moms_line m "
+                "t.ext_ref, t.receipt_original_format, "
+                "(SELECT COALESCE(SUM(m.inc_moms_ore),0) FROM moms_line m "
                 "WHERE m.transaktion_id = t.id) AS amount_ore FROM transaktion t")
         if q.get("include_synthetic") in ("1", "true", True):
             return _rows(ops, cols + " ORDER BY t.id")
@@ -772,6 +781,7 @@ _route("POST", "/books/{book_id}/suppliers", "h_create_supplier", 201)
 _route("PATCH", "/books/{book_id}/suppliers/{supplier_id}", "h_update_supplier")
 
 _route("POST", "/books/{book_id}/expenses", "h_record_expense", 201)
+_route("PATCH", "/books/{book_id}/transaktioner/{transaktion_id}", "h_update_expense")
 _route("POST", "/books/{book_id}/incomes", "h_record_income", 201)
 _route("POST", "/books/{book_id}/transaktioner/{transaktion_id}/pay", "h_register_payment")
 _route("POST", "/books/{book_id}/rut/{rut_claim_id}/skatteverket-payment", "h_rut_skatteverket_payment")

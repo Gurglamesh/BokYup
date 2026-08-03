@@ -317,6 +317,11 @@ def _build_router():
     def record_expense(book_id: str, body: sc.RecordExpenseReq, request: Request):
         return fac(request).h_record_expense({"book_id": book_id}, body.model_dump(), {})
 
+    @r.patch("/books/{book_id}/transaktioner/{transaktion_id}")
+    def update_expense(book_id: str, transaktion_id: int, body: sc.ExpenseMetaReq, request: Request):
+        return fac(request).h_update_expense(
+            {"book_id": book_id, "transaktion_id": transaktion_id}, body.model_dump(), {})
+
     @r.post("/books/{book_id}/incomes", status_code=201)
     def record_income(book_id: str, body: sc.RecordIncomeReq, request: Request):
         return fac(request).h_record_income({"book_id": book_id}, body.model_dump(), {})
