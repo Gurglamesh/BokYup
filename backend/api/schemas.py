@@ -58,11 +58,12 @@ class ImportReq(BaseModel):
 
 class CategoryReq(BaseModel):
     name: str
-    kind: str                     # 'income' | 'expense'
-    bas_konto: int
+    kind: Optional[str] = None    # 'income' | 'expense' (inherited from parent for a subcategory)
+    bas_konto: Optional[int] = None   # inherited from parent when a parent_id is given
     default_rate_code: Optional[str] = None   # default moms for lines on this category
     account_name: Optional[str] = None
     prefix: Optional[str] = None  # unique 4-digit article-number prefix (auto if omitted)
+    parent_id: Optional[int] = None   # makes this a subcategory of parent_id
 
 
 class CategoryUpdateReq(BaseModel):
@@ -72,6 +73,7 @@ class CategoryUpdateReq(BaseModel):
     active: Optional[bool] = None
     account_name: Optional[str] = None
     prefix: Optional[str] = None
+    parent_id: Optional[int] = None   # reparent (0 = make top-level)
 
 
 class CustomerReq(BaseModel):

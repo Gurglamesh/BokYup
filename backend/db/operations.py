@@ -233,26 +233,54 @@ class BookOps:
             "SELECT prefix FROM category WHERE id=?", (category_id,)).fetchone()
         return row["prefix"] if row else None
 
-    def create_category(self, name: str, kind: str, bas_konto: int,
+    def category_descendants(self, category_id: int) -> set:
+        """All categories under `category_id` (any depth), excluding itself."""
+        out, stack = set(), [category_id]
+        while stack:
+            for r in self.conn.execute(
+                    "SELECT id FROM category WHERE parent_id=?", (stack.pop(),)).fetchall():
+                if r["id"] not in out:
+                    out.add(r["id"])
+                    stack.append(r["id"])
+        return out
+
+    def create_category(self, name: str, kind: str, bas_konto: Optional[int] = None,
                         account_name: Optional[str] = None,
                         default_rate_code: Optional[str] = None,
-                        prefix: Optional[str] = None) -> int:
+                        prefix: Optional[str] = None,
+                        parent_id: Optional[int] = None) -> int:
         """Create a category linked to a BAS-konto (auto-creating the account).
 
         `default_rate_code` is the moms rate the UI pre-fills for lines booked to this
         category. `prefix` is the unique 4-digit article-number prefix; if omitted the
-        lowest unused one is assigned. Raises InvalidState if a given prefix is taken."""
+        lowest unused one is assigned. `parent_id` makes this a **subcategory**: it takes
+        its parent's `kind` and, when not given, inherits the parent's BAS-konto +
+        default moms (purely organizational — it still books to whatever konto it holds).
+        """
+        if parent_id is not None:
+            parent = self.conn.execute(
+                "SELECT id, kind, bas_konto, default_rate_code FROM category WHERE id=?",
+                (parent_id,)).fetchone()
+            if parent is None:
+                raise KeyError(f"No parent category {parent_id}")
+            kind = parent["kind"]                       # a subcategory shares its parent's kind
+            if bas_konto is None:
+                bas_konto = parent["bas_konto"]          # inherit the konto by default
+            if default_rate_code is None:
+                default_rate_code = parent["default_rate_code"]
         if kind not in ("income", "expense"):
             raise ValueError("kind must be 'income' or 'expense'")
+        if bas_konto is None:
+            raise ValueError("En kategori behöver ett BAS-konto")
         if default_rate_code is not None and default_rate_code not in S.MOMS_RATES:
             raise ValueError(f"Unknown moms rate {default_rate_code!r}")
         prefix = self._validate_prefix(prefix) if prefix is not None else self._next_unused_prefix()
         self.ensure_account(bas_konto, account_name or name)
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO category(name, kind, bas_konto, default_rate_code, prefix, created_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (name, kind, bas_konto, default_rate_code, prefix, _now()),
+                "INSERT INTO category(name, kind, bas_konto, default_rate_code, prefix, "
+                "parent_id, created_at) VALUES (?,?,?,?,?,?,?)",
+                (name, kind, bas_konto, default_rate_code, prefix, parent_id, _now()),
             )
         return cur.lastrowid
 
@@ -260,9 +288,11 @@ class BookOps:
                         bas_konto: Optional[int] = None, active: Optional[bool] = None,
                         account_name: Optional[str] = None,
                         default_rate_code: Optional[str] = None,
-                        prefix: Optional[str] = None) -> None:
+                        prefix: Optional[str] = None,
+                        parent_id: Optional[int] = None) -> None:
         """Edit reference data freely. Does not touch already-booked verifikationer.
-        Changing the prefix only affects future article numbers (issued ones are frozen)."""
+        Changing the prefix only affects future article numbers (issued ones are frozen).
+        `parent_id` reparents (0/negative → make top-level); a cycle is refused."""
         if bas_konto is not None:
             self.ensure_account(bas_konto, account_name or name or f"Konto {bas_konto}")
         if default_rate_code is not None and default_rate_code not in S.MOMS_RATES:
@@ -273,9 +303,19 @@ class BookOps:
             {"name": name, "bas_konto": bas_konto, "default_rate_code": default_rate_code,
              "prefix": prefix, "active": None if active is None else int(active)}
         )
-        if sets:
-            with self.conn:
+        with self.conn:
+            if sets:
                 self.conn.execute(f"UPDATE category SET {sets} WHERE id=?", (*params, category_id))
+            if parent_id is not None:
+                new_parent = int(parent_id) if int(parent_id) > 0 else None
+                if new_parent is not None:
+                    if new_parent == category_id or new_parent in self.category_descendants(category_id):
+                        raise InvalidState("En kategori kan inte bli underkategori till sig själv")
+                    if self.conn.execute("SELECT 1 FROM category WHERE id=?",
+                                         (new_parent,)).fetchone() is None:
+                        raise KeyError(f"No parent category {new_parent}")
+                self.conn.execute("UPDATE category SET parent_id=? WHERE id=?",
+                                  (new_parent, category_id))
 
     def category_in_use(self, category_id: int) -> bool:
         """Whether a category is referenced by any transaktion, moms-line or invoice
@@ -449,10 +489,13 @@ class BookOps:
     def find_or_create_article(self, description: str, category_id: Optional[int] = None,
                                *, rate_code: str = "25",
                                reduction_type: Optional[str] = None,
-                               unit: Optional[str] = None) -> int:
+                               unit: Optional[str] = None,
+                               unit_price_ore: int = 0) -> int:
         """Return an existing active article matching (description, category) or create a
         new one. Used by the Inköp flow so buying the same article again adds a batch to
-        the SAME article. Match is on trimmed, case-insensitive description + category."""
+        the SAME article. Match is on trimmed, case-insensitive description + category.
+        A newly-created article's default à-pris is `unit_price_ore` (the inköp price);
+        an existing article keeps its own price."""
         desc = (description or "").strip()
         if not desc:
             raise ValueError("Artikeln behöver en beskrivning")
@@ -468,7 +511,8 @@ class BookOps:
         if row:
             return row["id"]
         return self.create_article(desc, category_id=category_id, rate_code=rate_code,
-                                   reduction_type=reduction_type, unit=unit)["id"]
+                                   reduction_type=reduction_type, unit=unit,
+                                   unit_price_ore=int(unit_price_ore))["id"]
 
     def add_stock_batch(self, article_id: int, qty_centi: int, unit_cost_ore: int, *,
                         received_date: Optional[str] = None,

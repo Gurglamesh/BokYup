@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -105,6 +105,7 @@ CREATE TABLE category (
     default_rate_code TEXT CHECK (default_rate_code IN
                        ('25','12','6','0','momsfri','ej_avdragsgill')),  -- default moms
     prefix     TEXT UNIQUE,   -- unique 4-digit article-number prefix (articles: <prefix>-XXXX)
+    parent_id  INTEGER REFERENCES category(id),  -- NULL = top-level; else a subcategory
     active     INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
 );
@@ -886,6 +887,9 @@ _MIGRATIONS: dict[int, str] = {
             FROM stock_batch_old o;
         DROP TABLE stock_batch_old;
         CREATE INDEX IF NOT EXISTS idx_stock_batch_article ON stock_batch(article_id);
+    """,
+    27: """
+        ALTER TABLE category ADD COLUMN parent_id INTEGER REFERENCES category(id);
     """,
 }
 

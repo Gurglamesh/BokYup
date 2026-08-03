@@ -1187,6 +1187,20 @@ class TestStock:
         assert res2["batches"][0]["batch_number"] == 2
         assert client.get(f"/books/{book}/stock").json()[0]["qty_remaining_centi"] == 800
 
+    def test_subcategory_inherits_and_cycle_guard(self, client, book):
+        parent = client.post(f"/books/{book}/categories",
+                             json={"name": "Hårdvara", "kind": "income", "bas_konto": 3010,
+                                   "default_rate_code": "25"}).json()["id"]
+        # subcategory: omit kind + bas_konto -> inherited from parent
+        sub = client.post(f"/books/{book}/categories",
+                          json={"name": "Nätverk", "parent_id": parent}).json()["id"]
+        cats = {c["id"]: c for c in client.get(f"/books/{book}/categories").json()}
+        assert cats[sub]["parent_id"] == parent
+        assert cats[sub]["kind"] == "income" and cats[sub]["bas_konto"] == 3010
+        # reparent the parent under its own child -> cycle -> 409
+        r = client.patch(f"/books/{book}/categories/{parent}", json={"parent_id": sub})
+        assert r.status_code == 409
+
     def test_next_prefix_and_duplicate_rejected(self, client, book):
         p = client.get(f"/books/{book}/categories/next-prefix").json()["prefix"]
         assert p == "0000"

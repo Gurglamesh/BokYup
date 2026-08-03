@@ -337,6 +337,17 @@ class TestMigration:
             "SELECT id, batch_number FROM stock_batch")}
         assert rows == {1: 1, 2: 2, 3: 1}
 
+    def test_migrate_v26_adds_category_parent_id(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        S.initialize_schema(db)
+        db.execute("ALTER TABLE category DROP COLUMN parent_id")
+        db.execute("PRAGMA user_version = 26")
+        db.commit()
+        assert S.migrate(db) == S.SCHEMA_VERSION
+        cols = {r["name"] for r in db.execute("PRAGMA table_info(category)")}
+        assert "parent_id" in cols
+
     def test_migrate_is_idempotent(self, conn):
         before = S.get_schema_version(conn)
         assert S.migrate(conn) == before     # already current -> no-op

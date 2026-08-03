@@ -62,6 +62,13 @@ class TestStaticUI:
                        "handleModalCatCreate", "Ny kategori"):
             assert marker in js, f"missing {marker} in app.js"
 
+    def test_app_js_has_subcategories_and_dropdowns(self, client):
+        # Subcategory tree + path labels, BAS-konto datalist, receipt accept-all/PDF.
+        js = client.get("/app/app.js").text
+        for marker in ("orderCategoryTree", "categoryPath", "descendantIdSet",
+                       "accountOptions", "+ Underkat.", "Endast bild eller PDF"):
+            assert marker in js, f"missing {marker} in app.js"
+
     def test_styles_served(self, client):
         resp = client.get("/app/styles.css")
         assert resp.status_code == 200

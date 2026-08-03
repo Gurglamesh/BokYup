@@ -1340,6 +1340,47 @@ class TestCategoryPrefix:
         assert a == b
 
 
+class TestSubcategories:
+    def test_subcategory_inherits_parent(self, ops):
+        parent = ops.create_category("Hårdvara", "income", 3010, default_rate_code="25")
+        sub = ops.create_category("Nätverk", "income", parent_id=parent)   # no konto/kind
+        row = ops.conn.execute(
+            "SELECT kind, bas_konto, default_rate_code, parent_id FROM category WHERE id=?",
+            (sub,)).fetchone()
+        assert row["parent_id"] == parent
+        assert row["kind"] == "income"
+        assert row["bas_konto"] == 3010          # inherited
+        assert row["default_rate_code"] == "25"  # inherited
+
+    def test_subcategory_own_konto_allowed(self, ops):
+        parent = ops.create_category("Hårdvara", "income", 3010)
+        sub = ops.create_category("Nätverk", "income", 3011, parent_id=parent)
+        assert ops.conn.execute("SELECT bas_konto FROM category WHERE id=?",
+                                (sub,)).fetchone()[0] == 3011
+
+    def test_descendants_and_nesting(self, ops):
+        a = ops.create_category("A", "income", 3001)
+        b = ops.create_category("B", "income", parent_id=a)
+        c = ops.create_category("C", "income", parent_id=b)   # deep nesting
+        assert ops.category_descendants(a) == {b, c}
+        assert ops.category_descendants(b) == {c}
+
+    def test_reparent_cycle_refused(self, ops):
+        a = ops.create_category("A", "income", 3001)
+        b = ops.create_category("B", "income", parent_id=a)
+        with pytest.raises(InvalidState):
+            ops.update_category(a, parent_id=b)      # a under its own descendant -> cycle
+        with pytest.raises(InvalidState):
+            ops.update_category(a, parent_id=a)      # under itself
+
+    def test_reparent_to_top_level(self, ops):
+        a = ops.create_category("A", "income", 3001)
+        b = ops.create_category("B", "income", parent_id=a)
+        ops.update_category(b, parent_id=0)          # 0 -> make top-level
+        assert ops.conn.execute("SELECT parent_id FROM category WHERE id=?",
+                                (b,)).fetchone()[0] is None
+
+
 # ---------------------------------------------------------------------------
 # Stock / lager (inventory batches + real margin)
 # ---------------------------------------------------------------------------

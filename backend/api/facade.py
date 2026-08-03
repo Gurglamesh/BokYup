@@ -201,7 +201,7 @@ class AppFacade:
         ops = self._ops(p["book_id"])
         # `used` flags categories already touched by the books (cannot be deleted).
         return _rows(ops,
-                     "SELECT id, name, kind, bas_konto, default_rate_code, prefix, active, "
+                     "SELECT id, name, kind, bas_konto, default_rate_code, prefix, parent_id, active, "
                      "(EXISTS(SELECT 1 FROM transaktion t WHERE t.category_id=category.id) "
                      " OR EXISTS(SELECT 1 FROM moms_line m WHERE m.category_id=category.id) "
                      " OR EXISTS(SELECT 1 FROM invoice_line il WHERE il.category_id=category.id)) "
@@ -226,9 +226,9 @@ class AppFacade:
 
     def h_create_category(self, p, b, q):
         ops = self._ops(p["book_id"])
-        cid = ops.create_category(b["name"], b["kind"], b["bas_konto"],
+        cid = ops.create_category(b["name"], b.get("kind"), b.get("bas_konto"),
                                   b.get("account_name"), b.get("default_rate_code"),
-                                  prefix=b.get("prefix"))
+                                  prefix=b.get("prefix"), parent_id=b.get("parent_id"))
         return {"id": cid, "prefix": ops._category_prefix(cid)}
 
     def h_update_category(self, p, b, q):
@@ -385,7 +385,8 @@ class AppFacade:
                     continue
                 aid = ops.find_or_create_article(
                     desc, it.get("category_id"), rate_code=it.get("rate_code", "25"),
-                    reduction_type=it.get("reduction_type"), unit=it.get("unit"))
+                    reduction_type=it.get("reduction_type"), unit=it.get("unit"),
+                    unit_price_ore=int(it.get("unit_cost_ore") or 0))
                 batch = ops.add_stock_batch(
                     aid, int(it["quantity_centi"]), int(it["unit_cost_ore"]),
                     received_date=b["trans_date"], supplier_id=b.get("supplier_id"),

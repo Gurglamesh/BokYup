@@ -111,6 +111,14 @@ function modal(title, fields, okLabel = "OK") {
         input = el("select", {});
         for (const o of f.options) input.appendChild(el("option", { value: o.value }, o.label));
         if (f.value !== undefined) input.value = f.value;
+      } else if (f.type === "datalist") {
+        // A free-text input with a dropdown of suggestions (select an option or type a
+        // new value). Used e.g. for BAS-konto: pick an existing konto or enter a new one.
+        const listId = "dl_" + f.name + "_" + Math.random().toString(36).slice(2, 8);
+        input = el("input", { type: "text", value: f.value ?? "", list: listId });
+        const dl = el("datalist", { id: listId });
+        for (const o of f.options) dl.appendChild(el("option", { value: o.value }, o.label));
+        body.appendChild(dl);
       } else if (f.type === "file") {
         input = el("input", { type: "file", accept: f.accept || "image/*" });
       } else {
@@ -564,19 +572,24 @@ const SECTION_RENDERERS = {
       panel.appendChild(el("p", { class: "muted" }, "Inga artiklar ännu."));
       return;
     }
-    // Category filter: "alla" + one option per category actually used by articles.
-    const usedCatIds = [...new Set(list.map((a) => a.category_id).filter((x) => x != null))];
-    const catFilter = el("select", { style: "max-width:280px;margin-top:8px" },
+    // Category filter (tree paths). Selecting a category also matches its subcategories.
+    const catFilter = el("select", { style: "max-width:320px;margin-top:8px" },
       el("option", { value: "" }, "— Alla kategorier —"),
       el("option", { value: "none" }, "Okategoriserade"),
-      ...incomeCats.filter((c) => usedCatIds.includes(c.id))
-        .map((c) => el("option", { value: c.id }, `${c.prefix || "?"} · ${c.name}`)));
+      ...orderCategoryTree(incomeCats).map((c) =>
+        el("option", { value: c.id }, "  ".repeat(c._depth) + categoryPath(incomeCats, c.id))));
     catFilter.value = state.articlesCat || "";
     const tableBox = el("div", {});
     const draw = () => {
       const v = catFilter.value;
-      const rows = list.filter((a) => v === "" ? true
-        : v === "none" ? a.category_id == null : String(a.category_id) === v);
+      let match = () => true;
+      if (v === "none") match = (a) => a.category_id == null;
+      else if (v) {
+        const set = descendantIdSet(incomeCats, parseInt(v, 10));
+        set.add(parseInt(v, 10));
+        match = (a) => set.has(a.category_id);
+      }
+      const rows = list.filter(match);
       tableBox.innerHTML = "";
       tableBox.appendChild(simpleTable(
         ["Artikelnr", "Beskrivning", "À-pris", "Moms", "Husavdrag", "Kategori", ""],
@@ -698,8 +711,12 @@ const SECTION_RENDERERS = {
         "Ett BAS-konto som ännu inte använts kan tas bort. Har det bokförts måste det "
         + "vara kvar (legal spårbarhet) — inaktivera det istället."));
       panel.appendChild(simpleTable(
-        ["Namn", "Typ", "BAS-konto", "Standardmoms", "Status", ""],
-        list.map((c) => [c.name, c.kind === "income" ? "Inkomst" : "Utgift", c.bas_konto,
+        ["Namn", "Typ", "BAS-konto", "Prefix", "Standardmoms", "Status", ""],
+        orderCategoryTree(list).map((c) => [
+          el("span", { style: `padding-left:${c._depth * 18}px`,
+            title: c._depth ? categoryPath(list, c.id) : c.name },
+            (c._depth ? "› " : "") + c.name),
+          c.kind === "income" ? "Inkomst" : "Utgift", c.bas_konto, c.prefix || "—",
           rateLabel(c.default_rate_code),
           el("span", { class: "pill " + (c.active ? "paid" : "") }, c.active ? "Aktiv" : "Inaktiv"),
           categoryActions(c)]),
@@ -1746,16 +1763,28 @@ function receiptPicker() {
   function showPreview() {
     preview.innerHTML = "";
     if (!staged) return;
-    preview.appendChild(el("img", { src: `data:${staged.mime};base64,${staged.image_base64}`, class: "receipt-thumb" }));
+    if (staged.mime === "application/pdf") {
+      preview.appendChild(el("span", { class: "pill" }, "📄 " + (staged.name || "PDF")));
+    } else {
+      preview.appendChild(el("img", { src: `data:${staged.mime};base64,${staged.image_base64}`, class: "receipt-thumb" }));
+    }
     preview.appendChild(el("button", { class: "btn small ghost", type: "button",
       onclick: () => { staged = null; showPreview(); } }, "Ta bort"));
   }
 
-  const file = el("input", { type: "file", accept: "image/*", capture: "environment" });
+  // Open the OS file chooser to ALL files (some browsers hide PDFs when accept="image/*"),
+  // then accept only image/* or PDF and reject anything else.
+  const file = el("input", { type: "file" });
   file.addEventListener("change", () => guard(async () => {
     const f = file.files && file.files[0];
     if (!f) return;
-    staged = { image_base64: await blobToBase64(f), mime: f.type || "image/jpeg" };
+    const isPdf = f.type === "application/pdf" || /\.pdf$/i.test(f.name);
+    const isImg = (f.type || "").startsWith("image/") || /\.(png|jpe?g|webp|gif|heic|heif|bmp|tiff?)$/i.test(f.name);
+    if (!isPdf && !isImg) {
+      toast("Endast bild eller PDF tillåts", true); file.value = ""; return;
+    }
+    staged = { image_base64: await blobToBase64(f),
+      mime: isPdf ? "application/pdf" : (f.type || "image/jpeg"), name: f.name };
     file.value = "";
     showPreview();
   }));
@@ -1809,33 +1838,66 @@ function overlay(...children) {
 const NEW_CAT = "__newcat__";
 function catLabel(c) { return `${c.prefix || "?"} · ${c.name}`; }
 
+// Full hierarchical path of a category, e.g. "Hårdvara › Nätverk". `cats` is the flat
+// category list (each with id + parent_id).
+function categoryPath(cats, id) {
+  const byId = {};
+  for (const c of cats) byId[c.id] = c;
+  const parts = [];
+  let c = byId[id], guard = 0;
+  while (c && guard++ < 30) { parts.unshift(c.name); c = c.parent_id ? byId[c.parent_id] : null; }
+  return parts.join(" › ");
+}
+
+// {value,label} options for a BAS-konto datalist (existing accounts).
+function accountOptions(accounts) {
+  return (accounts || []).map((a) => ({ value: String(a.bas_konto),
+    label: `${a.bas_konto} — ${a.name || ""}` }));
+}
+
 function newCategoryDialog() {
   return new Promise((resolve) => {
     const name = el("input", { type: "text", placeholder: "Namn (t.ex. Nätverk)" });
-    const bas = el("input", { type: "text", placeholder: "BAS-konto (t.ex. 3001)" });
+    const basListId = "dl_newcat_" + Math.random().toString(36).slice(2, 8);
+    const bas = el("input", { type: "text", placeholder: "BAS-konto (välj/skriv; ärvs om tomt)", list: basListId });
+    const basDl = el("datalist", { id: basListId });
     const prefix = el("input", { type: "text", placeholder: "4 siffror" });
     const rate = el("select", {}, ...RATE_OPTIONS.map((r) => el("option", { value: r }, rateLabel(r))));
     rate.value = "25";
-    // Suggest the lowest unused prefix (editable; a taken one is rejected on save).
+    // Optional parent (subcategory of an existing income category).
+    const parent = el("select", {}, el("option", { value: "" }, "— Ingen (toppnivå) —"));
+    // Fill suggestions: next prefix, existing konton (datalist), income categories (parents).
     api("GET", `/books/${bid()}/categories/next-prefix`)
       .then((r) => { if (!prefix.value) prefix.value = r.prefix; }).catch(() => {});
+    api("GET", `/books/${bid()}/accounts`).then((accs) => {
+      for (const o of accountOptions(accs)) basDl.appendChild(el("option", { value: o.value }, o.label));
+    }).catch(() => {});
+    let incomeCats = [];
+    api("GET", `/books/${bid()}/categories`).then((cs) => {
+      incomeCats = cs.filter((c) => c.kind === "income");
+      for (const c of incomeCats) parent.appendChild(el("option", { value: String(c.id) }, categoryPath(cs, c.id)));
+    }).catch(() => {});
     let done = false;
     const finish = (v) => { if (done) return; done = true; ui.close(); resolve(v); };
     const ok = el("button", { class: "btn brand", onclick: () => guard(async () => {
-      if (!name.value.trim() || !bas.value.trim()) { toast("Fyll i namn och BAS-konto", true); return; }
+      const pid = parent.value ? parseInt(parent.value, 10) : null;
+      if (!name.value.trim()) { toast("Fyll i namn", true); return; }
+      if (!pid && !bas.value.trim()) { toast("Ange ett BAS-konto (eller välj en förälder)", true); return; }
       const res = await api("POST", `/books/${bid()}/categories`, {
-        name: name.value.trim(), kind: "income", bas_konto: parseInt(bas.value, 10),
+        name: name.value.trim(), kind: pid ? null : "income",
+        bas_konto: bas.value.trim() ? parseInt(bas.value, 10) : null, parent_id: pid,
         prefix: (prefix.value || "").trim() || null, default_rate_code: rate.value });
       const cat = { id: res.id, name: name.value.trim(), kind: "income", prefix: res.prefix,
-        default_rate_code: rate.value, bas_konto: parseInt(bas.value, 10) };
+        default_rate_code: rate.value, parent_id: pid,
+        bas_konto: bas.value.trim() ? parseInt(bas.value, 10) : null };
       toast(`Kategori ${cat.name} skapad (prefix ${cat.prefix})`);
       finish(cat);
     }) }, "Skapa");
     const cancel = el("button", { class: "btn ghost", onclick: () => finish(null) }, "Avbryt");
     const ui = overlay(el("div", { class: "panel", style: "min-width:280px;max-width:420px" },
       el("h3", { style: "margin-top:0" }, "Ny kategori (inkomst/produkt)"),
-      wrap("Namn", name), wrap("BAS-konto", bas), wrap("Artikelnr-prefix", prefix),
-      wrap("Standardmoms", rate),
+      wrap("Namn", name), wrap("Förälder (valfri)", parent), wrap("BAS-konto", bas), basDl,
+      wrap("Artikelnr-prefix", prefix), wrap("Standardmoms", rate),
       el("div", { class: "modal-actions", style: "margin-top:12px" }, cancel, ok)));
     name.focus();
   });
@@ -1898,8 +1960,15 @@ async function receiptsFlow(txId, isPending) {
     body.appendChild(el("p", { class: "muted" }, "Inga kvitton för denna transaktion."));
   } else {
     for (const rc of list) {
-      const img = el("img", { class: "receipt-view" });
-      receiptSrc(rc.id).then((src) => { img.src = src; });
+      let view;
+      if (rc.mime === "application/pdf") {
+        view = el("button", { class: "btn small", onclick: () => guard(() =>
+          showPdf(`/books/${bid()}/receipts/${rc.id}`, rc.filename || `kvitto-${rc.id}.pdf`)) },
+          "📄 Öppna PDF");
+      } else {
+        view = el("img", { class: "receipt-view" });
+        receiptSrc(rc.id).then((src) => { view.src = src; });
+      }
       const meta = el("div", { class: "muted" },
         `${rc.mime} · ${Math.round(rc.byte_size / 1024)} kB`
         + (rc.original_format ? " · " + rc.original_format : ""));
@@ -1912,7 +1981,7 @@ async function receiptsFlow(txId, isPending) {
           renderWorkspace();
         }) }, "Ta bort"));
       }
-      body.appendChild(el("div", { class: "receipt-card" }, img, meta, actions));
+      body.appendChild(el("div", { class: "receipt-card" }, view, meta, actions));
     }
   }
   const ui = overlay(el("h3", {}, "Kvitton"), body,
@@ -2188,7 +2257,7 @@ function articleFields(a, incomeCats) {
       value: a.category_id ? String(a.category_id) : "",
       options: [{ value: "", label: "Okategoriserad" },
         { value: NEW_CAT, label: "➕ Ny kategori…" },
-        ...incomeCats.map((c) => ({ value: String(c.id), label: c.name }))],
+        ...incomeCats.map((c) => ({ value: String(c.id), label: categoryPath(incomeCats, c.id) }))],
       onChange: handleModalCatCreate },
   ];
 }
@@ -2305,28 +2374,40 @@ async function stockBatchesTable(articleId, suppliers) {
   );
 }
 
-async function addCategoryFlow() {
-  // Suggest the lowest unused 4-digit prefix; the user may type another (a taken one is
-  // rejected by the backend with a clear message).
+async function addCategoryFlow(presetParentId) {
+  const [accounts, cats] = await Promise.all([
+    api("GET", `/books/${bid()}/accounts`),
+    api("GET", `/books/${bid()}/categories`),
+  ]);
   let suggested = "";
   try { suggested = (await api("GET", `/books/${bid()}/categories/next-prefix`)).prefix; }
   catch (e) { /* offline / none — leave blank, backend auto-assigns */ }
-  const f = await modal("Ny kategori", [
+  const parentOpts = [{ value: "", label: "— Ingen (toppnivå) —" },
+    ...cats.map((c) => ({ value: String(c.id), label: categoryPath(cats, c.id) }))];
+  const f = await modal(presetParentId ? "Ny underkategori" : "Ny kategori", [
     { name: "name", label: "Namn (t.ex. Försäljning IT-tjänster)" },
-    { name: "kind", label: "Typ", type: "select", value: "expense",
+    { name: "parent_id", label: "Förälder (för underkategori, valfri)", type: "select",
+      value: presetParentId ? String(presetParentId) : "", options: parentOpts },
+    { name: "kind", label: "Typ (ärvs för underkategori)", type: "select", value: "expense",
       options: [{ value: "income", label: "Inkomst" }, { value: "expense", label: "Utgift" }] },
-    { name: "bas_konto", label: "BAS-konto (t.ex. 3001 eller 5460)" },
+    { name: "bas_konto", label: "BAS-konto (välj eller skriv; ärvs om tomt)", type: "datalist",
+      options: accountOptions(accounts) },
     { name: "prefix", label: "Artikelnr-prefix (4 siffror, 0000–9999)", value: suggested },
     { name: "default_rate_code", label: "Standardmoms", type: "select", value: "25",
       options: RATE_OPTIONS.map((r) => ({ value: r, label: rateLabel(r) })) },
   ], "Spara");
-  if (!f || !f.name || !f.bas_konto) return;
+  if (!f || !f.name) return;
+  const parent_id = f.parent_id ? parseInt(f.parent_id, 10) : null;
+  if (!parent_id && !f.bas_konto) {
+    toast("Ange ett BAS-konto (eller välj en förälder att ärva från)", true); return;
+  }
   await api("POST", `/books/${bid()}/categories`, {
-    name: f.name, kind: f.kind, bas_konto: parseInt(f.bas_konto, 10),
+    name: f.name, kind: parent_id ? null : f.kind,
+    bas_konto: f.bas_konto ? parseInt(f.bas_konto, 10) : null, parent_id,
     prefix: (f.prefix || "").trim() || null,
     default_rate_code: f.default_rate_code || null,
   });
-  toast(`Kategori sparad (prefix ${(f.prefix || "").trim() || "auto"})`);
+  toast("Kategori sparad");
   renderWorkspace();
 }
 
@@ -2500,9 +2581,36 @@ async function editSupplierFlow(s) {
 }
 
 // Row actions for a category: edit, activate/inactivate, and delete-if-unused.
+// All descendant category ids (any depth) under `id`, from a flat cats list.
+function descendantIdSet(cats, id) {
+  const children = {};
+  for (const c of cats) (children[c.parent_id] = children[c.parent_id] || []).push(c.id);
+  const out = new Set(), stack = [id];
+  while (stack.length) {
+    for (const ch of (children[stack.pop()] || [])) { if (!out.has(ch)) { out.add(ch); stack.push(ch); } }
+  }
+  return out;
+}
+
+// Flatten categories into parent→child order with a `_depth` for tree indentation.
+function orderCategoryTree(list) {
+  const children = {};
+  for (const c of list) (children[c.parent_id || 0] = children[c.parent_id || 0] || []).push(c);
+  const out = [];
+  const walk = (pid, depth) => {
+    for (const c of (children[pid] || [])) { out.push({ ...c, _depth: depth }); walk(c.id, depth + 1); }
+  };
+  walk(0, 0);
+  const seen = new Set(out.map((c) => c.id));          // orphans (parent hidden) at top level
+  for (const c of list) if (!seen.has(c.id)) out.push({ ...c, _depth: 0 });
+  return out;
+}
+
 function categoryActions(c) {
   const box = el("span", { style: "display:inline-flex;gap:4px;flex-wrap:wrap" },
     editBtn(() => guard(() => editCategoryFlow(c))),
+    el("button", { class: "btn small ghost", title: "Skapa en underkategori",
+      onclick: () => guard(() => addCategoryFlow(c.id)) }, "+ Underkat."),
     el("button", { class: "btn small ghost",
       onclick: () => guard(() => toggleCategoryActive(c)) },
       c.active ? "Inaktivera" : "Aktivera"));
@@ -2517,16 +2625,26 @@ function categoryActions(c) {
 }
 
 async function editCategoryFlow(c) {
+  const [accounts, cats] = await Promise.all([
+    api("GET", `/books/${bid()}/accounts`),
+    api("GET", `/books/${bid()}/categories`),
+  ]);
   // A used BAS-konto must not have its number changed (it would retroactively remap
   // already-booked entries in the reports); only name + default moms stay editable.
   const fields = [{ name: "name", label: "Namn", value: c.name }];
-  if (!c.used) fields.push({ name: "bas_konto", label: "BAS-konto", value: c.bas_konto });
+  if (!c.used) fields.push({ name: "bas_konto", label: "BAS-konto", type: "datalist",
+    value: String(c.bas_konto), options: accountOptions(accounts) });
+  const parentOpts = [{ value: "0", label: "— Ingen (toppnivå) —" },
+    ...cats.filter((x) => x.id !== c.id).map((x) => ({ value: String(x.id), label: categoryPath(cats, x.id) }))];
+  fields.push({ name: "parent_id", label: "Förälder (underkategori av)", type: "select",
+    value: c.parent_id ? String(c.parent_id) : "0", options: parentOpts });
   fields.push({ name: "default_rate_code", label: "Standardmoms", type: "select",
     value: c.default_rate_code || "25",
     options: RATE_OPTIONS.map((r) => ({ value: r, label: rateLabel(r) })) });
   const f = await modal(`Ändra kategori`, fields, "Spara");
   if (!f || !f.name) return;
-  const body = { name: f.name, default_rate_code: f.default_rate_code || null };
+  const body = { name: f.name, default_rate_code: f.default_rate_code || null,
+    parent_id: f.parent_id ? parseInt(f.parent_id, 10) : 0 };
   if (!c.used && f.bas_konto) body.bas_konto = parseInt(f.bas_konto, 10);
   await api("PATCH", `/books/${bid()}/categories/${c.id}`, body);
   toast("Kategori uppdaterad");
@@ -2683,12 +2801,11 @@ function purchaseItemsEditor(incomeCats, articles, onChange) {
       value: v.description || "", oninput: fire });
     const cat = el("select", {}, el("option", { value: "" }, "(ingen)"),
       el("option", { value: NEW_CAT }, "➕ Ny kategori…"),
-      ...cats.map((c) => el("option", { value: c.id }, `${c.prefix || "?"} · ${c.name}`)));
+      ...cats.map((c) => el("option", { value: c.id }, categoryPath(cats, c.id))));
     if (v.category_id) cat.value = String(v.category_id);
     wireCategoryCreateSelect(cat, cats, (nc) => {
-      // keep the label format (prefix · name) consistent with the other options
       const o = cat.querySelector(`option[value="${nc.id}"]`);
-      if (o) o.textContent = catLabel(nc);
+      if (o) o.textContent = categoryPath(cats, nc.id);
     });
     const qty = el("input", { type: "text", value: v.qty || "1", style: "width:60px", oninput: fire });
     const cost = el("input", { type: "text", value: v.cost || "0,00", style: "width:96px", oninput: fire });
@@ -3004,7 +3121,7 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatch
     const cat = el("select", {},
       el("option", { value: "" }, "(standard)"),
       el("option", { value: NEW_CAT }, "➕ Ny kategori…"),
-      ...cats.map((c) => el("option", { value: c.id }, c.name)));
+      ...cats.map((c) => el("option", { value: c.id }, categoryPath(cats, c.id))));
     if (v.category_id) cat.value = String(v.category_id);
     // Allow creating a category inline; on create pre-fill the row's moms from it.
     wireCategoryCreateSelect(cat, cats, (nc) => {
