@@ -259,6 +259,11 @@ def _build_router():
         return fac(request).h_update_customer(
             {"book_id": book_id, "kundnummer": kundnummer}, body.model_dump(), {})
 
+    @r.delete("/books/{book_id}/customers/{kundnummer}")
+    def delete_customer(book_id: str, kundnummer: int, request: Request):
+        return fac(request).h_delete_customer(
+            {"book_id": book_id, "kundnummer": kundnummer}, {}, {})
+
     # ---- customer household relations (RUT/ROT) ----
     @r.get("/books/{book_id}/customers/{kundnummer}/relations")
     def list_customer_relations(book_id: str, kundnummer: int, request: Request):

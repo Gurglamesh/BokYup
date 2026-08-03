@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -211,7 +211,7 @@ CREATE TABLE moms_line (
 CREATE TABLE rut_claim (
     id                        INTEGER PRIMARY KEY AUTOINCREMENT,
     transaktion_id            INTEGER NOT NULL REFERENCES transaktion(id),
-    customer_id               INTEGER NOT NULL REFERENCES customer(kundnummer),
+    customer_id               INTEGER REFERENCES customer(kundnummer),  -- NULL if the customer card was deleted
     rut_amount_ore            INTEGER NOT NULL,
     state                     TEXT NOT NULL DEFAULT 'pending'
                               CHECK (state IN ('pending','customer_paid','skatteverket_paid')),
@@ -890,6 +890,36 @@ _MIGRATIONS: dict[int, str] = {
     """,
     27: """
         ALTER TABLE category ADD COLUMN parent_id INTEGER REFERENCES category(id);
+    """,
+    28: """
+        DROP INDEX IF EXISTS idx_rut_state;
+        ALTER TABLE rut_claim RENAME TO rut_claim_old;
+        CREATE TABLE rut_claim (
+            id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaktion_id            INTEGER NOT NULL REFERENCES transaktion(id),
+            customer_id               INTEGER REFERENCES customer(kundnummer),
+            rut_amount_ore            INTEGER NOT NULL,
+            state                     TEXT NOT NULL DEFAULT 'pending'
+                                      CHECK (state IN ('pending','customer_paid','skatteverket_paid')),
+            customer_payment_date     TEXT,
+            skatteverket_payment_date TEXT,
+            skatteverket_verifikation_id INTEGER REFERENCES verifikation(id),
+            skatteverket_received_ore INTEGER,
+            shortfall_invoice_id      INTEGER REFERENCES invoice(id),
+            skatteverket_reference    TEXT,
+            claim_year                INTEGER NOT NULL,
+            created_at                TEXT NOT NULL
+        );
+        INSERT INTO rut_claim (id, transaktion_id, customer_id, rut_amount_ore, state,
+            customer_payment_date, skatteverket_payment_date, skatteverket_verifikation_id,
+            skatteverket_received_ore, shortfall_invoice_id, skatteverket_reference,
+            claim_year, created_at)
+            SELECT id, transaktion_id, customer_id, rut_amount_ore, state,
+                customer_payment_date, skatteverket_payment_date, skatteverket_verifikation_id,
+                skatteverket_received_ore, shortfall_invoice_id, skatteverket_reference,
+                claim_year, created_at FROM rut_claim_old;
+        DROP TABLE rut_claim_old;
+        CREATE INDEX IF NOT EXISTS idx_rut_state ON rut_claim(state);
     """,
 }
 

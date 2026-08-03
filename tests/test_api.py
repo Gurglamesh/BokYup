@@ -1117,6 +1117,25 @@ class TestArticles:
         assert client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()["ex_moms_ore"] == 90000
 
 
+class TestCustomerDelete:
+    def test_delete_customer_keeps_invoice(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Tjänst", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "Acme AB"}).json()["kundnummer"]
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "X", "quantity_centi": 100, "unit_price_ore": 10000,
+                       "rate_code": "25"}]}).json()
+        r = client.delete(f"/books/{book}/customers/{kid}")
+        assert r.status_code == 200 and r.json()["deleted"] is True
+        assert all(c["kundnummer"] != kid for c in client.get(f"/books/{book}/customers").json())
+        # invoice kept with its frozen buyer, link detached
+        got = client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()
+        assert got["customer_id"] is None and got["buyer"]["company_name"] == "Acme AB"
+
+
 class TestStock:
     def _art(self, client, book):
         return client.post(f"/books/{book}/articles", json={

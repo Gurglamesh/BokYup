@@ -670,7 +670,9 @@ const SECTION_RENDERERS = {
       editBtn(() => guard(() => editCustomerFlow(c.kundnummer))),
       c.type === "private"
         ? el("button", { class: "btn small ghost", onclick: () => guard(() => householdFlow(c)) }, "Hushåll")
-        : null);
+        : null,
+      el("button", { class: "btn small ghost danger", title: "Ta bort kundkortet (fakturor behålls)",
+        onclick: () => guard(() => deleteCustomerFlow(c)) }, "Ta bort"));
     panel.appendChild(searchTable(
       "Sök kund (namn, nr, org/pers.nr, e-post)…",
       ["Nr", "Typ", "Namn", "Org/Pers", "E-post", "Spenderat", ""],
@@ -2238,6 +2240,19 @@ async function addCustomerFlow() {
   }
   await api("POST", `/books/${bid()}/customers`, body);
   toast("Kund sparad");
+  renderWorkspace();
+}
+
+async function deleteCustomerFlow(c) {
+  const name = c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer);
+  const spent = c.invoiced_ore ? ` Kunden är fakturerad ${toKr(c.invoiced_ore)} kr — de fakturorna behålls (med frusna uppgifter).` : "";
+  const f = await modal(`Ta bort kundkortet "${name}"?`,
+    [{ name: "confirm", label: `Skriv TA BORT för att bekräfta.${spent} Fakturor, ordrar och RUT/ROT-ärenden behålls; endast kundkortet tas bort.` }],
+    "Ta bort");
+  if (!f) return;
+  if ((f.confirm || "").trim().toUpperCase() !== "TA BORT") { toast("Avbrutet (bekräftelse saknas)", true); return; }
+  await api("DELETE", `/books/${bid()}/customers/${c.kundnummer}`);
+  toast(`Kundkortet "${name}" borttaget`);
   renderWorkspace();
 }
 

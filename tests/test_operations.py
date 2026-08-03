@@ -618,6 +618,15 @@ class TestInvoices:
         assert bal2["earned_active_minutes"] == 15 and bal2["used_minutes"] == 35
         assert bal2["remaining_minutes"] == 0
 
+    def test_makulerad_invoice_earns_no_support(self, ops):
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-15",
+            due_date="2026-04-15",
+            lines=[{"description": "A", "quantity_centi": 100, "unit_price_ore": round(124900/1.25), "rate_code": "25"}])
+        assert ops.support_balance(kid)["earned_active_minutes"] == 30
+        ops.cancel_invoice(inv["invoice_id"])          # makulera -> no support time
+        assert ops.support_balance(kid)["earned_active_minutes"] == 0
+
     def test_support_entry_validation(self, ops):
         cat, kid = self._setup(ops)
         with pytest.raises(ValueError):
@@ -1494,3 +1503,48 @@ class TestStock:
             ops.delete_stock_batch(b2["id"])         # partially consumed
         ops.delete_stock_batch(b1["id"])             # untouched -> ok
         assert all(b["id"] != b1["id"] for b in ops.list_article_batches(aid))
+
+
+# ---------------------------------------------------------------------------
+# Delete customer from the register (keep invoices)
+# ---------------------------------------------------------------------------
+
+class TestCustomerDelete:
+    def test_delete_keeps_invoice_detaches_link(self, ops):
+        cat = ops.create_category("Tjänst", "income", 3001)
+        kid = ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+            due_date="2026-03-31",
+            lines=[{"description": "X", "quantity_centi": 100, "unit_price_ore": 10000, "rate_code": "25"}])
+        ops.delete_customer(kid)
+        # customer gone
+        with pytest.raises(KeyError):
+            ops.get_customer(kid)
+        # invoice kept, link detached, frozen buyer snapshot intact
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["customer_id"] is None
+        assert got["buyer"]["company_name"] == "Acme AB"
+
+    def test_delete_customer_with_rut_detaches_claim(self, ops):
+        cat = ops.create_category("Städ", "income", 3001)
+        kid = ops.create_customer("private", first_name="Anna", last_name="A",
+                                  personnummer="811218-9876")
+        res = ops.record_income(kid, cat, [{"rate_code": "25", "amount_ore": 100000}],
+                                "2026-03-01", rut_amount_ore=25000)
+        claim_id = res["rut_claim_id"]
+        ops.delete_customer(kid)
+        # the RUT claim record survives (amount/state kept), only customer_id detached
+        row = ops.conn.execute(
+            "SELECT customer_id, rut_amount_ore FROM rut_claim WHERE id=?", (claim_id,)).fetchone()
+        assert row is not None and row["customer_id"] is None
+        assert row["rut_amount_ore"] == 25000
+
+    def test_delete_removes_relations_and_support(self, ops):
+        a = ops.create_customer("private", first_name="A", last_name="A", personnummer="811218-9876")
+        b = ops.create_customer("private", first_name="B", last_name="B", personnummer="670919-9530")
+        ops.link_customers(a, b)
+        ops.record_support_entry(a, 15, "addition", "bonus")
+        ops.delete_customer(a)
+        assert ops.conn.execute("SELECT COUNT(*) FROM customer_relation").fetchone()[0] == 0
+        assert ops.conn.execute("SELECT COUNT(*) FROM support_ledger WHERE customer_id=?",
+                                (a,)).fetchone()[0] == 0

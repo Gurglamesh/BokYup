@@ -316,6 +316,14 @@ class TestMigration:
                 qty_in_centi INTEGER, qty_remaining_centi INTEGER, unit_cost_ore INTEGER,
                 supplier_id INTEGER, purchase_transaktion_id INTEGER, received_date TEXT,
                 note TEXT, created_at TEXT);
+            CREATE TABLE customer (kundnummer INTEGER PRIMARY KEY AUTOINCREMENT);
+            CREATE TABLE rut_claim (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transaktion_id INTEGER NOT NULL, customer_id INTEGER NOT NULL,
+                rut_amount_ore INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+                customer_payment_date TEXT, skatteverket_payment_date TEXT,
+                skatteverket_verifikation_id INTEGER, skatteverket_received_ore INTEGER,
+                shortfall_invoice_id INTEGER, skatteverket_reference TEXT,
+                claim_year INTEGER NOT NULL, created_at TEXT NOT NULL);
         """)
         db.execute("PRAGMA user_version = 25")
         db.execute("INSERT INTO account VALUES (3001,'x','t')")
@@ -347,6 +355,28 @@ class TestMigration:
         assert S.migrate(db) == S.SCHEMA_VERSION
         cols = {r["name"] for r in db.execute("PRAGMA table_info(category)")}
         assert "parent_id" in cols
+
+    def test_migrate_v27_makes_rut_claim_customer_nullable(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        S.initialize_schema(db)
+        # rebuild rut_claim in the v27 shape (customer_id NOT NULL), then migrate
+        db.execute("DROP TABLE rut_claim")
+        db.execute("""CREATE TABLE rut_claim (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaktion_id INTEGER NOT NULL REFERENCES transaktion(id),
+            customer_id INTEGER NOT NULL REFERENCES customer(kundnummer),
+            rut_amount_ore INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            customer_payment_date TEXT, skatteverket_payment_date TEXT,
+            skatteverket_verifikation_id INTEGER, skatteverket_received_ore INTEGER,
+            shortfall_invoice_id INTEGER, skatteverket_reference TEXT,
+            claim_year INTEGER NOT NULL, created_at TEXT NOT NULL)""")
+        db.execute("PRAGMA user_version = 27")
+        db.commit()
+        assert S.migrate(db) == S.SCHEMA_VERSION
+        info = {r["name"]: r for r in db.execute("PRAGMA table_info(rut_claim)")}
+        assert info["customer_id"]["notnull"] == 0
 
     def test_migrate_is_idempotent(self, conn):
         before = S.get_schema_version(conn)

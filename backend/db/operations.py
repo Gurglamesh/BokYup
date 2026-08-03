@@ -664,6 +664,28 @@ class BookOps:
                 self.conn.execute(f"UPDATE customer SET {sets} WHERE kundnummer=?",
                                   (*params, kundnummer))
 
+    def delete_customer(self, kundnummer: int) -> dict:
+        """Remove a customer card from the register. Invoices, transaktioner, offerter and
+        RUT/ROT-ärenden are KEPT (each carries a frozen buyer snapshot + immutable
+        bookings); only their live link to this customer is detached. The customer's
+        household relations and support-time ledger are removed with the card."""
+        if self.conn.execute("SELECT 1 FROM customer WHERE kundnummer=?",
+                             (kundnummer,)).fetchone() is None:
+            raise KeyError(f"No customer {kundnummer}")
+        with self.conn:
+            # Detach the (nullable) live links — the frozen snapshots keep each record whole.
+            for tbl in ("invoice", "transaktion", "rut_recipient", "rut_claim",
+                        "offert", "invoice_draft"):
+                self.conn.execute(f"UPDATE {tbl} SET customer_id=NULL WHERE customer_id=?",
+                                  (kundnummer,))
+            # Household links + this customer's support ledger go with the card.
+            self.conn.execute(
+                "DELETE FROM customer_relation WHERE customer_a=? OR customer_b=?",
+                (kundnummer, kundnummer))
+            self.conn.execute("DELETE FROM support_ledger WHERE customer_id=?", (kundnummer,))
+            self.conn.execute("DELETE FROM customer WHERE kundnummer=?", (kundnummer,))
+        return {"deleted": True, "kundnummer": kundnummer}
+
     def get_customer(self, kundnummer: int) -> dict:
         """Return a customer as a dict with the personnummer decrypted."""
         row = self.conn.execute(
@@ -690,6 +712,7 @@ class BookOps:
         earned_rows = self.conn.execute(
             "SELECT invoice_number, invoice_date, inc_moms_ore, support_minutes_earned, "
             "support_expiry_date FROM invoice WHERE customer_id=? AND husavdrag_shortfall_ore=0 "
+            "AND cancelled_at IS NULL "     # makulerade fakturor ger ingen supporttid
             "AND support_minutes_earned>0 ORDER BY invoice_number", (customer_id,)).fetchall()
         active = [dict(r) for r in earned_rows if (r["support_expiry_date"] or "") >= today]
         earned_active = sum(r["support_minutes_earned"] for r in active)

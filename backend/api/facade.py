@@ -319,6 +319,9 @@ class AppFacade:
         ops.update_customer(int(p["kundnummer"]), **_clean(b))
         return {"kundnummer": int(p["kundnummer"])}
 
+    def h_delete_customer(self, p, b, q):
+        return self._ops(p["book_id"]).delete_customer(int(p["kundnummer"]))
+
     # ---- customer household relations (for RUT/ROT recipients) ----
     def h_list_customer_relations(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -761,6 +764,7 @@ _route("DELETE", "/books/{book_id}/customers/{kundnummer}/relations/{other_kundn
 _route("GET", "/books/{book_id}/customers/{kundnummer}", "h_get_customer")
 _route("POST", "/books/{book_id}/customers", "h_create_customer", 201)
 _route("PATCH", "/books/{book_id}/customers/{kundnummer}", "h_update_customer")
+_route("DELETE", "/books/{book_id}/customers/{kundnummer}", "h_delete_customer")
 _route("GET", "/books/{book_id}/reduction-config", "h_reduction_config")
 
 _route("GET", "/books/{book_id}/suppliers", "h_list_suppliers")
