@@ -688,6 +688,15 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       existing categories (lowest unused) and renumbers existing batches per article.
       Tests pass (349); browser-smoke-tested (inköp → article 0000-XXXX → batch
       0000-XXXX-1 @ 600 kr → Lager/Artiklar; duplicate-prefix rejection).
+- [x] **Faktura line à-pris defaults to article cost (0 % marginal baseline) (frontend,
+      2026-08).** On a faktura article row, picking an article that has stock now auto-picks
+      its **oldest open batch (FIFO)** and sets the **à-pris = that batch's inköpskostnad**
+      (ex moms) instead of the catalog sale price; switching the Lagerbatch re-baselines the
+      price to the new batch's cost. So every stocked line starts at **0 % marginal** and the
+      user marks up/down from the real cost, with the live "Marginal (N %)" showing the
+      result. Articles without stock keep their catalog sale price (no cost to baseline from);
+      draft restore is unaffected (keeps the saved price/batch). Frontend-only
+      (`lineItemsEditor` in `app.js`); JS `node --check`'d, web tests pass (15).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

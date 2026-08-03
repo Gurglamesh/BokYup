@@ -3306,9 +3306,13 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatch
       const sel = batchCache.find((b) => String(b.id) === batchSel.value);
       batchCost = sel ? sel.unit_cost_ore : null;
     }
+    // Default the price-to-customer to a picked batch's inköpskostnad (0 % marginal
+    // baseline); you then mark it up/down and the live "Marginal" shows the result.
+    function priceToCost() { if (batchCost != null) price.value = toKr(batchCost); }
     batchSel.onchange = () => {
       const sel = (batchCache || []).find((b) => String(b.id) === batchSel.value);
       batchCost = sel ? sel.unit_cost_ore : null;
+      priceToCost();
       fire();
     };
     const desc = el("input", { type: "text", placeholder: "Beskrivning", value: v.description || "" });
@@ -3351,7 +3355,18 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatch
       if (a.rate_code) rate.value = a.rate_code;
       red.value = a.reduction_type || "";
       cat.value = a.category_id ? String(a.category_id) : "";
-      guard(() => refreshBatches());
+      // When the article has stock, auto-pick its oldest open batch (FIFO) and default the
+      // price-to-customer to that batch's cost → 0 % marginal baseline you adjust from.
+      guard(async () => {
+        await refreshBatches();
+        if (batchCache && batchCache.length) {
+          const oldest = batchCache.slice().sort((x, y) => x.batch_number - y.batch_number)[0];
+          batchSel.value = String(oldest.id);
+          batchCost = oldest.unit_cost_ore;
+          priceToCost();
+          fire();
+        }
+      });
       fire();
     };
     // Typing a fresh description detaches the row from a picked article.
