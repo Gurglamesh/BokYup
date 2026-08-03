@@ -1279,3 +1279,106 @@ class TestOresavrundning:
             lines=[{"description": "X", "quantity_centi": 100, "unit_price_ore": 100000, "rate_code": "25"}])
         ops.pay_invoice(inv["invoice_id"], date="2026-03-15")
         assert 3740 not in self._net(ops)                       # no öresavrundning needed
+
+
+# ---------------------------------------------------------------------------
+# Stock / lager (inventory batches + real margin)
+# ---------------------------------------------------------------------------
+
+class TestStock:
+    def _art(self, ops):
+        return ops.create_article("Router", "1000", unit_price_ore=100000)["id"]
+
+    def _cust(self, ops):
+        ops.create_category("Försäljning", "income", 3001)  # ensure a category exists
+        return ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")
+
+    def test_add_batch_assigns_sequential_number(self, ops):
+        aid = self._art(ops)
+        b1 = ops.add_stock_batch(aid, 500, 60000, received_date="2026-03-01")
+        b2 = ops.add_stock_batch(aid, 300, 65000, received_date="2026-04-01")
+        assert b1["batch_number"] == 1 and b2["batch_number"] == 2
+        batches = ops.list_article_batches(aid)
+        assert [b["batch_number"] for b in batches] == [2, 1]      # newest first
+        assert batches[1]["qty_remaining_centi"] == 500
+
+    def test_list_stock_summary(self, ops):
+        aid = self._art(ops)
+        ops.add_stock_batch(aid, 500, 60000)   # 5 * 600 = 3000 kr
+        ops.add_stock_batch(aid, 300, 65000)   # 3 * 650 = 1950 kr
+        stock = ops.list_stock()
+        assert len(stock) == 1
+        row = stock[0]
+        assert row["qty_remaining_centi"] == 800
+        assert row["batch_count"] == 2
+        assert row["value_ore"] == 60000 * 5 + 65000 * 3   # 495000
+
+    def test_invoice_line_consumes_batch_and_freezes_margin(self, ops):
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")
+        aid = ops.create_article("Router", "1000")["id"]
+        batch = ops.add_stock_batch(aid, 500, 60000)   # 5 st @ 600 kr cost
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Router", "quantity_centi": 200, "unit_price_ore": 100000,
+                    "rate_code": "25", "article_id": aid, "stock_batch_id": batch["id"]}])
+        # 2 st sold: cost 2*600 = 1200 kr; revenue ex 2000 kr -> margin 800 kr
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["cost_ore"] == 120000
+        assert got["margin_ore"] == 200000 - 120000
+        assert got["has_cost"] is True
+        assert got["lines"][0]["batch_number"] == 1
+        # batch consumed: 5 - 2 = 3 remaining
+        assert ops.list_article_batches(aid)[0]["qty_remaining_centi"] == 300
+        # list_invoices carries the same margin
+        summ = [i for i in ops.list_invoices() if i["id"] == inv["invoice_id"]][0]
+        assert summ["cost_ore"] == 120000 and summ["margin_ore"] == 80000
+
+    def test_invoice_without_batch_has_unknown_cost(self, ops):
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Konsult", "quantity_centi": 100, "unit_price_ore": 100000,
+                    "rate_code": "25"}])
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["cost_ore"] == 0 and got["has_cost"] is False
+
+    def test_overconsumption_refused(self, ops):
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")
+        aid = ops.create_article("Router", "1000")["id"]
+        batch = ops.add_stock_batch(aid, 100, 60000)   # only 1 in stock
+        with pytest.raises(InvalidState):
+            ops.create_invoice(
+                customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+                lines=[{"description": "Router", "quantity_centi": 200, "unit_price_ore": 100000,
+                        "rate_code": "25", "stock_batch_id": batch["id"]}])
+
+    def test_makulera_restocks_batch(self, ops):
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")
+        aid = ops.create_article("Router", "1000")["id"]
+        batch = ops.add_stock_batch(aid, 500, 60000)
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Router", "quantity_centi": 200, "unit_price_ore": 100000,
+                    "rate_code": "25", "stock_batch_id": batch["id"]}])
+        assert ops.list_article_batches(aid)[0]["qty_remaining_centi"] == 300
+        ops.cancel_invoice(inv["invoice_id"])       # makulera -> goods return
+        assert ops.list_article_batches(aid)[0]["qty_remaining_centi"] == 500
+
+    def test_delete_batch_only_when_untouched(self, ops):
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")
+        aid = ops.create_article("Router", "1000")["id"]
+        b1 = ops.add_stock_batch(aid, 500, 60000)
+        b2 = ops.add_stock_batch(aid, 500, 60000)
+        ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Router", "quantity_centi": 100, "unit_price_ore": 100000,
+                    "rate_code": "25", "stock_batch_id": b2["id"]}])
+        with pytest.raises(InvalidState):
+            ops.delete_stock_batch(b2["id"])         # partially consumed
+        ops.delete_stock_batch(b1["id"])             # untouched -> ok
+        assert all(b["id"] != b1["id"] for b in ops.list_article_batches(aid))

@@ -303,6 +303,25 @@ class TestMigration:
         assert S.migrate(conn) == before     # already current -> no-op
         assert S.migrate(conn) == before
 
+    def test_migrate_adds_stock_batch_to_v24_db(self, tmp_path: Path):
+        # Simulate a pre-inventory (v24) book: full schema minus stock_batch + the
+        # invoice_line stock columns.
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        S.initialize_schema(db)
+        db.execute("DROP TABLE stock_batch")
+        db.execute("ALTER TABLE invoice_line RENAME COLUMN stock_batch_id TO _sbi_old")
+        db.execute("ALTER TABLE invoice_line DROP COLUMN _sbi_old")
+        db.execute("ALTER TABLE invoice_line DROP COLUMN cost_ore")
+        db.execute("PRAGMA user_version = 24")
+        db.commit()
+        assert S.migrate(db) == S.SCHEMA_VERSION
+        names = {r["name"] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "stock_batch" in names
+        cols = {r["name"] for r in db.execute("PRAGMA table_info(invoice_line)")}
+        assert {"stock_batch_id", "cost_ore"} <= cols
+
 
 class TestInvoiceSchema:
     def test_new_tables_exist(self, conn):

@@ -623,6 +623,26 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       `phone/assets/icon-only|foreground|background.png` → `@capacitor/assets generate
       --android` in the release workflow. This is the app/brand icon, separate from the
       per-book company logo on invoices.
+- [x] **Lager (inventory) + verklig marginal (schema v25, 2026-08).** A buy-in of a catalog
+      **article** creates a **batch** with its own cost — buying the same article again adds
+      a new batch, so one article can carry several costs. `stock_batch` (global sequential
+      `batch_number` shown only in the Lager tab, `qty_in`/`qty_remaining_centi`,
+      `unit_cost_ore` ex moms, optional `supplier_id`/`purchase_transaktion_id`/note/date).
+      `BookOps.add_stock_batch`/`list_stock` (per-article on-hand + lagervärde)/
+      `list_article_batches`/`delete_stock_batch` (only while wholly unconsumed). **Pure
+      tracking — no ledger impact** (any cost side lives in the linked Inköp transaktion).
+      On an invoice, an article line may **pick a batch** (`invoice_line.stock_batch_id`):
+      `create_invoice` freezes the line's inköpskostnad (`invoice_line.cost_ore` = qty ×
+      unit cost) and **consumes** the batch (decrements qty_remaining; refuses
+      over-consumption); makulera restocks it. `get_invoice`/`list_invoices` expose
+      `cost_ore`/`margin_ore`/`has_cost` (**revenue ex moms − cost**). API `GET/POST /stock`,
+      `GET /articles/{id}/batches`, `DELETE /stock/{id}`; `InvoiceLineReq.stock_batch_id`.
+      UI: a **"Lager"** tab (per-article rows, expand to see batches + costs, manual
+      "+ Lägg till i lager", total lagervärde); the faktura line editor gained a
+      **Lagerbatch** picker (open batches per article) with a **live "Marginal (N %)"** in
+      the Summering, and the Ordrar→Fakturor list shows a **Marginal** column. OCR-scanned
+      buy-ins (auto-add articles/prices) are the deferred next step. Tests pass (336);
+      browser-smoke-tested (add batch → pick on faktura → margin 800 kr end-to-end).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

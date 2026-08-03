@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -352,6 +352,8 @@ CREATE TABLE invoice_line (
     reduction_type TEXT CHECK (reduction_type IN ('rut','rot')),  -- husavdrag kind (NULL = none)
     article_id     INTEGER REFERENCES article(id),    -- catalog article this line came from
     discount_pct_centi INTEGER NOT NULL DEFAULT 0,    -- per-line % rabatt * 100 (15 % -> 1500)
+    stock_batch_id INTEGER REFERENCES stock_batch(id),-- picked stock batch (for real margin)
+    cost_ore       INTEGER NOT NULL DEFAULT 0,        -- frozen inköpskostnad for this line (margin)
     ex_moms_ore    INTEGER NOT NULL,                  -- line total ex moms, AFTER discount
     moms_ore       INTEGER NOT NULL
 );
@@ -372,6 +374,25 @@ CREATE TABLE article (
     active         INTEGER NOT NULL DEFAULT 1,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
+);
+
+-- ----- stock (lager): each buy-in of an article creates a BATCH with its own cost.
+-- Buying the same article again adds a new batch, so one article can carry several
+-- costs. The batch_number is a global sequential label shown in the Lager tab. When an
+-- invoice line picks a batch, qty_remaining_centi is decremented so on-hand stock and
+-- the real margin (revenue − batch cost) fall out. Pure tracking — no ledger impact.
+CREATE TABLE stock_batch (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_number            INTEGER NOT NULL UNIQUE,   -- global sequential (visible in Lager)
+    article_id              INTEGER NOT NULL REFERENCES article(id),
+    qty_in_centi            INTEGER NOT NULL,           -- quantity bought in * 100
+    qty_remaining_centi     INTEGER NOT NULL,           -- decremented as it is sold
+    unit_cost_ore           INTEGER NOT NULL,           -- ex-moms inköpspris per unit
+    supplier_id             INTEGER REFERENCES supplier(id),        -- optional source supplier
+    purchase_transaktion_id INTEGER REFERENCES transaktion(id),     -- optional linked inköp
+    received_date           TEXT NOT NULL,
+    note                    TEXT,
+    created_at              TEXT NOT NULL
 );
 
 -- ----- RUT/ROT recipients: a household can split the skattereduktion across ----
@@ -444,6 +465,7 @@ CREATE INDEX idx_invoice_line_inv    ON invoice_line(invoice_id);
 CREATE INDEX idx_rut_recipient_inv   ON rut_recipient(invoice_id);
 CREATE INDEX idx_invoice_event_inv   ON invoice_event(invoice_id);
 CREATE INDEX idx_support_ledger_cust ON support_ledger(customer_id);
+CREATE INDEX idx_stock_batch_article ON stock_batch(article_id);
 """
 
 # ---------------------------------------------------------------------------
@@ -810,6 +832,24 @@ _MIGRATIONS: dict[int, str] = {
     """,
     24: """
         ALTER TABLE offert ADD COLUMN invoice_id INTEGER REFERENCES invoice(id);
+    """,
+    25: """
+        CREATE TABLE IF NOT EXISTS stock_batch (
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_number            INTEGER NOT NULL UNIQUE,
+            article_id              INTEGER NOT NULL REFERENCES article(id),
+            qty_in_centi            INTEGER NOT NULL,
+            qty_remaining_centi     INTEGER NOT NULL,
+            unit_cost_ore           INTEGER NOT NULL,
+            supplier_id             INTEGER REFERENCES supplier(id),
+            purchase_transaktion_id INTEGER REFERENCES transaktion(id),
+            received_date           TEXT NOT NULL,
+            note                    TEXT,
+            created_at              TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_stock_batch_article ON stock_batch(article_id);
+        ALTER TABLE invoice_line ADD COLUMN stock_batch_id INTEGER;
+        ALTER TABLE invoice_line ADD COLUMN cost_ore INTEGER NOT NULL DEFAULT 0;
     """,
 }
 

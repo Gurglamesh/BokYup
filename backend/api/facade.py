@@ -254,6 +254,26 @@ class AppFacade:
         self._ops(p["book_id"]).delete_article(int(p["article_id"]))
         return {"deleted": True}
 
+    # ---- stock / lager ----
+    def h_list_stock(self, p, b, q):
+        return self._ops(p["book_id"]).list_stock(
+            include_empty=str(q.get("include_empty", "")).lower() in ("1", "true"))
+
+    def h_list_article_batches(self, p, b, q):
+        return self._ops(p["book_id"]).list_article_batches(
+            int(p["article_id"]),
+            open_only=str(q.get("open_only", "")).lower() in ("1", "true"))
+
+    def h_add_stock_batch(self, p, b, q):
+        return self._ops(p["book_id"]).add_stock_batch(
+            int(b["article_id"]), int(b["qty_centi"]), int(b["unit_cost_ore"]),
+            received_date=b.get("received_date"), supplier_id=b.get("supplier_id"),
+            purchase_transaktion_id=b.get("purchase_transaktion_id"), note=b.get("note"))
+
+    def h_delete_stock_batch(self, p, b, q):
+        self._ops(p["book_id"]).delete_stock_batch(int(p["batch_id"]))
+        return {"deleted": True}
+
     # ---- reference: customers ----
     def h_list_customers(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -682,6 +702,10 @@ _route("GET", "/books/{book_id}/articles", "h_list_articles")
 _route("POST", "/books/{book_id}/articles", "h_create_article", 201)
 _route("PATCH", "/books/{book_id}/articles/{article_id}", "h_update_article")
 _route("DELETE", "/books/{book_id}/articles/{article_id}", "h_delete_article")
+_route("GET", "/books/{book_id}/stock", "h_list_stock")
+_route("POST", "/books/{book_id}/stock", "h_add_stock_batch", 201)
+_route("GET", "/books/{book_id}/articles/{article_id}/batches", "h_list_article_batches")
+_route("DELETE", "/books/{book_id}/stock/{batch_id}", "h_delete_stock_batch")
 _route("POST", "/books/{book_id}/categories", "h_create_category", 201)
 _route("PATCH", "/books/{book_id}/categories/{category_id}", "h_update_category")
 _route("DELETE", "/books/{book_id}/categories/{category_id}", "h_delete_category")

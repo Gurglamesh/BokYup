@@ -1117,6 +1117,48 @@ class TestArticles:
         assert client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()["ex_moms_ore"] == 90000
 
 
+class TestStock:
+    def _art(self, client, book):
+        return client.post(f"/books/{book}/articles", json={
+            "description": "Router", "prefix": "1000", "unit_price_ore": 100000}).json()["id"]
+
+    def test_add_batch_and_list_stock(self, client, book):
+        aid = self._art(client, book)
+        r = client.post(f"/books/{book}/stock", json={
+            "article_id": aid, "qty_centi": 500, "unit_cost_ore": 60000,
+            "received_date": "2026-03-01"})
+        assert r.status_code == 201 and r.json()["batch_number"] == 1
+        stock = client.get(f"/books/{book}/stock").json()
+        assert len(stock) == 1 and stock[0]["qty_remaining_centi"] == 500
+        batches = client.get(f"/books/{book}/articles/{aid}/batches").json()
+        assert batches[0]["unit_cost_ore"] == 60000
+
+    def test_invoice_picks_batch_and_reports_margin(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Försäljning", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "X AB"}).json()["kundnummer"]
+        aid = self._art(client, book)
+        bid = client.post(f"/books/{book}/stock", json={
+            "article_id": aid, "qty_centi": 500, "unit_cost_ore": 60000}).json()["id"]
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "Router", "quantity_centi": 200, "unit_price_ore": 100000,
+                       "rate_code": "25", "article_id": aid, "stock_batch_id": bid}]}).json()
+        got = client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()
+        assert got["cost_ore"] == 120000 and got["margin_ore"] == 80000
+        # stock consumed
+        assert client.get(f"/books/{book}/articles/{aid}/batches").json()[0]["qty_remaining_centi"] == 300
+
+    def test_delete_untouched_batch(self, client, book):
+        aid = self._art(client, book)
+        bid = client.post(f"/books/{book}/stock", json={
+            "article_id": aid, "qty_centi": 500, "unit_cost_ore": 60000}).json()["id"]
+        assert client.delete(f"/books/{book}/stock/{bid}").status_code == 200
+        assert client.get(f"/books/{book}/stock").json() == []
+
+
 class TestBasKontonAndAddress:
     def test_accounts_endpoint_lists_system_konton(self, client, book):
         client.post(f"/books/{book}/categories",

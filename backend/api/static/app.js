@@ -347,6 +347,7 @@ const SECTIONS = [
   ["invoices", "Ordrar"],
   ["purchases", "Inköp"],
   ["articles", "Artiklar"],
+  ["stock", "Lager"],
   ["customers", "Kunder"],
   ["suppliers", "Leverantörer"],
   ["categories", "BAS-konton"],
@@ -568,6 +569,52 @@ const SECTION_RENDERERS = {
             toast("Artikel borttagen"); renderWorkspace();
           }) }, "Ta bort"))]),
     ));
+  },
+
+  // ----- stock / lager -----
+  async stock(panel) {
+    const [stock, articles, suppliers] = await Promise.all([
+      api("GET", `/books/${bid()}/stock`),
+      api("GET", `/books/${bid()}/articles`),
+      api("GET", `/books/${bid()}/suppliers`),
+    ]);
+    panel.appendChild(headerWithAdd("Lager", "+ Lägg till i lager",
+      () => guard(() => addStockBatchFlow(articles, suppliers))));
+    panel.appendChild(el("p", { class: "muted", style: "margin-top:6px" },
+      "Varje inköp av en artikel blir en batch med sin egen kostnad. Köper du samma artikel "
+      + "igen får den en ny batch (samma artikel kan ha flera kostnader). Batchnumret syns "
+      + "bara här. När du väljer en batch på en fakturarad ser du den verkliga marginalen."));
+    if (stock.length === 0) {
+      panel.appendChild(el("p", { class: "muted" }, "Inget i lager ännu."));
+      return;
+    }
+    const totalValue = stock.reduce((s, r) => s + (r.value_ore || 0), 0);
+    for (const r of stock) {
+      const details = el("div", { style: "display:none;padding:6px 0 12px 12px" });
+      let loaded = false;
+      const toggle = el("button", { class: "btn small ghost", onclick: () => guard(async () => {
+        const open = details.style.display === "none";
+        details.style.display = open ? "block" : "none";
+        if (open && !loaded) {
+          loaded = true;
+          details.appendChild(await stockBatchesTable(r.article_id, suppliers));
+        }
+      }) }, "Batchar ▾");
+      const head = el("div", {
+        style: "display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--line)",
+      },
+        el("strong", { style: "min-width:90px" }, r.article_number),
+        el("span", { style: "flex:1" }, r.description),
+        el("span", { class: "num" }, `${(r.qty_remaining_centi / 100).toLocaleString("sv-SE")} ${r.unit || "st"}`),
+        el("span", { class: "muted", style: "min-width:70px;text-align:right" }, `${r.batch_count} batch`),
+        el("span", { class: "num", style: "min-width:110px;text-align:right", title: "Lagervärde (inköp)" },
+          toKr(r.value_ore) + " kr"),
+        toggle);
+      panel.appendChild(head);
+      panel.appendChild(details);
+    }
+    panel.appendChild(el("p", { style: "margin-top:12px;text-align:right;font-weight:600" },
+      "Totalt lagervärde: " + toKr(totalValue) + " kr"));
   },
 
   // ----- customers -----
@@ -1525,12 +1572,19 @@ const SECTION_RENDERERS = {
         }
       }
       const kvar = owed ? ("−" + toKr(owed) + " kr") : (toKr(iv.outstanding_ore) + " kr");
+      // Real margin from picked lager-batches (revenue ex moms − inköpskostnad). Only
+      // shown when at least one line carried a cost; otherwise unknown ("—").
+      const marginCell = iv.has_cost
+        ? el("td", { class: "num", title: `Inköpskostnad ${toKr(iv.cost_ore)} kr` },
+            toKr(iv.margin_ore) + " kr")
+        : el("td", { class: "num muted", title: "Ingen lagerbatch vald" }, "—");
       return el("tr", {},
         el("td", { class: "num" }, String(iv.invoice_number)),
         el("td", {}, custName[iv.customer_id] || ("Kund " + iv.customer_id)),
         el("td", {}, iv.invoice_date),
         el("td", {}, iv.due_date),
         el("td", { class: "num" }, toKr(iv.inc_moms_ore) + " kr"),
+        marginCell,
         el("td", { class: "num", title: owed ? "Att återbetala till kund" : "Kvar att betala" }, kvar),
         el("td", {}, el("span", { class: "pill " + cls }, label),
           owed ? el("span", { class: "pill", style: "margin-left:4px" }, "återbet.") : null),
@@ -1554,7 +1608,7 @@ const SECTION_RENDERERS = {
         const shown = q ? rows.filter((iv) => ivMatch(iv, q)) : rows;
         tbody.innerHTML = "";
         if (q && shown.length === 0) {
-          tbody.appendChild(el("tr", {}, el("td", { colspan: "8", class: "muted" }, "Inga träffar.")));
+          tbody.appendChild(el("tr", {}, el("td", { colspan: "9", class: "muted" }, "Inga träffar.")));
         } else {
           for (const iv of shown) tbody.appendChild(rowFor(iv));
         }
@@ -1566,6 +1620,7 @@ const SECTION_RENDERERS = {
         el("thead", {}, el("tr", {},
           el("th", { class: "num" }, "Nr"), el("th", {}, "Kund"), el("th", {}, "Datum"),
           el("th", {}, "Förfaller"), el("th", { class: "num" }, "Summa"),
+          el("th", { class: "num" }, "Marginal"),
           el("th", { class: "num" }, "Kvar"), el("th", {}, "Status"), el("th", {}, ""))),
         tbody));
     }
@@ -2077,6 +2132,62 @@ async function editArticleFlow(a, incomeCats) {
   renderWorkspace();
 }
 
+async function addStockBatchFlow(articles, suppliers) {
+  if (!articles || articles.length === 0) {
+    toast("Skapa en artikel först (fliken Artiklar)", true);
+    return;
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const f = await modal("Lägg till i lager (inköp)", [
+    { name: "article_id", label: "Artikel", type: "select",
+      options: articles.map((a) => ({ value: String(a.id),
+        label: `${a.article_number} — ${a.description}` })) },
+    { name: "qty", label: "Antal (st)", value: "1" },
+    { name: "unit_cost_kr", label: "Inköpspris per st (kr, ex moms)", value: "0,00" },
+    { name: "supplier_id", label: "Leverantör (valfri)", type: "select", value: "",
+      options: [{ value: "", label: "—" },
+        ...(suppliers || []).map((s) => ({ value: String(s.id), label: s.name }))] },
+    { name: "received_date", label: "Inköpsdatum", type: "date", value: today },
+    { name: "note", label: "Notering (valfri)" },
+  ], "Lägg till");
+  if (!f) return;
+  const qty = Math.round(parseFloat(String(f.qty).replace(",", ".")) * 100);
+  if (!(qty > 0)) { toast("Antalet måste vara större än 0", true); return; }
+  const res = await api("POST", `/books/${bid()}/stock`, {
+    article_id: parseInt(f.article_id, 10), qty_centi: qty,
+    unit_cost_ore: toOre(f.unit_cost_kr),
+    supplier_id: f.supplier_id ? parseInt(f.supplier_id, 10) : null,
+    received_date: f.received_date || null, note: f.note || null,
+  });
+  toast(`Batch ${res.batch_number} tillagd i lager`);
+  renderWorkspace();
+}
+
+async function stockBatchesTable(articleId, suppliers) {
+  const batches = await api("GET", `/books/${bid()}/articles/${articleId}/batches`);
+  return simpleTable(
+    ["Batchnr", "Kvar", "Inköpt", "À-kostnad", "Datum", "Leverantör", "Notering", ""],
+    batches.map((b) => [
+      el("strong", {}, "#" + b.batch_number),
+      (b.qty_remaining_centi / 100).toLocaleString("sv-SE"),
+      (b.qty_in_centi / 100).toLocaleString("sv-SE"),
+      toKr(b.unit_cost_ore) + " kr",
+      b.received_date || "—",
+      b.supplier_name || el("span", { class: "muted" }, "—"),
+      b.note || "",
+      b.qty_remaining_centi === b.qty_in_centi
+        ? el("button", { class: "btn small ghost danger", title: "Ta bort (oanvänd batch)",
+            onclick: () => guard(async () => {
+              const c = await modal(`Ta bort batch #${b.batch_number}?`, [], "Ta bort");
+              if (!c) return;
+              await api("DELETE", `/books/${bid()}/stock/${b.id}`);
+              toast("Batch borttagen"); renderWorkspace();
+            }) }, "Ta bort")
+        : el("span", { class: "muted", title: "Delvis förbrukad – kan inte tas bort" }, "förbrukad"),
+    ]),
+  );
+}
+
 async function addCategoryFlow() {
   const f = await modal("Ny kategori", [
     { name: "name", label: "Namn (t.ex. Försäljning IT-tjänster)" },
@@ -2538,6 +2649,15 @@ async function invoiceForm(panel, draft) {
     + "padding:2px 0;" + (opts.bold ? "font-weight:700;font-size:16px;border-top:1px solid var(--border,#ccc);margin-top:4px;padding-top:6px;" : "")
     + (opts.red ? "color:var(--danger,#c33);" : "") },
     el("span", {}, k), el("span", { style: "font-variant-numeric:tabular-nums" }, toKr(ore) + " kr"));
+  // Lazy per-article stock-batch loader (open batches only), cached across rows.
+  const batchCache = new Map();
+  async function loadBatches(articleId) {
+    if (!batchCache.has(articleId)) {
+      batchCache.set(articleId, await api("GET",
+        `/books/${bid()}/articles/${articleId}/batches?open_only=1`));
+    }
+    return batchCache.get(articleId);
+  }
   function updateTotals() {
     const t = invoiceTotals(lines.get(), redCfg.rut_pct, redCfg.rot_pct);
     totalsBox.innerHTML = "";
@@ -2551,8 +2671,16 @@ async function invoiceForm(panel, draft) {
       if (t.rot) totalsBox.appendChild(kvRow("− ROT-avdrag", -t.rot, { red: true }));
     }
     totalsBox.appendChild(kvRow(t.husavdrag ? "Att betala för kund (ca)" : "Att betala (ca)", t.attBetala, { bold: true }));
+    // Real margin from picked lager-batches (revenue − inköpskostnad for those lines).
+    const m = lines.getMargin();
+    if (m.hasCost) {
+      totalsBox.appendChild(el("div", { style: "border-top:1px solid var(--border,#ccc);margin-top:6px;padding-top:6px" }));
+      totalsBox.appendChild(kvRow("Inköpskostnad (lagerförda rader)", m.cost));
+      const pct = m.revenue ? Math.round(m.margin / m.revenue * 100) : 0;
+      totalsBox.appendChild(kvRow(`Marginal (${pct} %)`, m.margin, { bold: true }));
+    }
   }
-  const lines = lineItemsEditor(incomeCats, () => { recips.recompute(); updateTotals(); }, dp.lines || [], articles);
+  const lines = lineItemsEditor(incomeCats, () => { recips.recompute(); updateTotals(); }, dp.lines || [], articles, loadBatches);
   customer.onchange = () => recips.reloadPeople();
   invDate.onchange = () => recips.refreshCaps();
 
@@ -2639,7 +2767,7 @@ async function invoiceForm(panel, draft) {
   }
 }
 
-function lineItemsEditor(incomeCats, onChange, initialLines, articles) {
+function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatches) {
   const rowsBox = el("div", {});
   const cats = incomeCats || [];
   const arts = articles || [];
@@ -2651,6 +2779,31 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles) {
       el("option", { value: "" }, "— välj artikel —"),
       ...arts.map((a) => el("option", { value: a.id }, `${a.article_number} ${a.description}`)));
     let articleId = v.article_id || null;
+    // Stock-batch picker: choose which lager-batch this line is sold from → real margin
+    // (revenue − batch cost). Only populated once an article with stock is picked.
+    const batchSel = el("select", { style: "min-width:150px" },
+      el("option", { value: "" }, "— ingen batch —"));
+    let batchCost = null;                 // unit_cost_ore of the selected batch (for margin)
+    let batchCache = null;                // this row's loaded batches
+    async function refreshBatches(selectId) {
+      batchSel.innerHTML = "";
+      batchSel.appendChild(el("option", { value: "" }, "— ingen batch —"));
+      batchCost = null;
+      if (!articleId || !loadBatches) return;
+      batchCache = await loadBatches(articleId);
+      for (const b of batchCache) {
+        batchSel.appendChild(el("option", { value: b.id },
+          `#${b.batch_number} · ${(b.qty_remaining_centi / 100).toLocaleString("sv-SE")} kvar · ${toKr(b.unit_cost_ore)} kr/st`));
+      }
+      if (selectId != null) batchSel.value = String(selectId);
+      const sel = batchCache.find((b) => String(b.id) === batchSel.value);
+      batchCost = sel ? sel.unit_cost_ore : null;
+    }
+    batchSel.onchange = () => {
+      const sel = (batchCache || []).find((b) => String(b.id) === batchSel.value);
+      batchCost = sel ? sel.unit_cost_ore : null;
+      fire();
+    };
     const desc = el("input", { type: "text", placeholder: "Beskrivning", value: v.description || "" });
     const cat = el("select", {},
       el("option", { value: "" }, "(standard)"),
@@ -2677,7 +2830,7 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles) {
     // Picking an article prefills everything (price included — still editable).
     pick.onchange = () => {
       const a = arts.find((x) => String(x.id) === pick.value);
-      if (!a) { articleId = null; return; }
+      if (!a) { articleId = null; guard(() => refreshBatches()); return; }
       articleId = a.id;
       desc.value = a.description || "";
       price.value = a.unit_price_ore != null ? toKr(a.unit_price_ore) : price.value;
@@ -2685,28 +2838,36 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles) {
       if (a.rate_code) rate.value = a.rate_code;
       red.value = a.reduction_type || "";
       cat.value = a.category_id ? String(a.category_id) : "";
+      guard(() => refreshBatches());
       fire();
     };
     // Typing a fresh description detaches the row from a picked article.
-    desc.oninput = () => { articleId = null; pick.value = ""; };
+    desc.oninput = () => { articleId = null; pick.value = ""; guard(() => refreshBatches()); };
     // Save this row's current values to the catalog as a new article.
     const saveBtn = el("button", { class: "btn small ghost", type: "button", title: "Spara som artikel",
       onclick: () => guard(() => saveRowAsArticle(row)) }, "★");
     const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end;flex-wrap:wrap" },
       wrap("Artikel", pick), wrap("Beskrivning", desc), wrap("Kategori (BAS)", cat),
       wrap("Antal", qty), wrap("Enhet", unit), wrap("À-pris ex moms", price),
-      wrap("% rabatt", disc), wrap("Moms", rate), wrap("Husavdrag", red), saveBtn,
+      wrap("% rabatt", disc), wrap("Moms", rate), wrap("Husavdrag", red),
+      wrap("Lagerbatch", batchSel), saveBtn,
       el("button", { class: "btn small ghost", onclick: (e) => { e.target.closest(".row").remove(); fire(); } }, "✕"));
     row._desc = desc; row._cat = cat; row._unit = unit; row._price = price; row._disc = disc; row._rate = rate; row._red = red;
+    const qtyCenti = () => Math.round(parseFloat((qty.value || "0").replace(",", ".")) * 100);
     row._get = () => ({
       description: desc.value.trim(),
       category_id: cat.value ? parseInt(cat.value, 10) : null,
-      quantity_centi: Math.round(parseFloat((qty.value || "0").replace(",", ".")) * 100),
+      quantity_centi: qtyCenti(),
       unit: unit.value || null, unit_price_ore: toOre(price.value),
       discount_pct_centi: Math.round(parseFloat((disc.value || "0").replace(",", ".")) * 100) || 0,
       rate_code: rate.value, reduction_type: red.value || null, article_id: articleId,
+      stock_batch_id: batchSel.value ? parseInt(batchSel.value, 10) : null,
     });
+    // Margin preview (ören): the frozen inköpskostnad of this line if a batch is picked,
+    // else null (unknown cost). Revenue side comes from _get() ex moms.
+    row._costPreview = () => (batchSel.value && batchCost != null ? Math.round(qtyCenti() * batchCost / 100) : null);
     rowsBox.appendChild(row);
+    if (v.article_id) guard(() => refreshBatches(v.stock_batch_id));
   }
   async function saveRowAsArticle(row) {
     if (!row._desc.value.trim()) { toast("Fyll i beskrivning först", true); return; }
@@ -2729,7 +2890,25 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles) {
   if (initialLines && initialLines.length) initialLines.forEach(addRow); else addRow();
   const element = el("div", {}, rowsBox,
     el("button", { class: "btn small ghost", onclick: () => addRow() }, "+ Rad"));
-  return { element, get: () => [...rowsBox.children].map((r) => r._get()).filter((l) => l.description) };
+  // Aggregate real margin from rows that picked a stock batch: revenue ex moms (after
+  // rabatt) of those rows − their frozen cost. `hasCost` says whether any row is costed.
+  const getMargin = () => {
+    let cost = 0, revenue = 0, hasCost = false;
+    for (const r of rowsBox.children) {
+      const c = r._costPreview();
+      if (c == null) continue;
+      hasCost = true;
+      cost += c;
+      const g = r._get();
+      const gross = Math.round((g.quantity_centi || 0) * (g.unit_price_ore || 0) / 100);
+      revenue += gross - Math.round(gross * (g.discount_pct_centi || 0) / 10000);
+    }
+    return { cost, revenue, margin: revenue - cost, hasCost };
+  };
+  return {
+    element, getMargin,
+    get: () => [...rowsBox.children].map((r) => r._get()).filter((l) => l.description),
+  };
 }
 
 // Recipient editor: pick the invoice customer or a linked household member (or add a

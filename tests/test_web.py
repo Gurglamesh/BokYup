@@ -39,6 +39,13 @@ class TestStaticUI:
         for marker in ("momsLinesEditor", "receiptPicker", "cameraCaptureModal", "receiptsFlow"):
             assert marker in js, f"missing {marker} in app.js"
 
+    def test_app_js_has_stock_lager(self, client):
+        # Inventory (Lager) tab + invoice batch picker + margin are wired in the frontend.
+        js = client.get("/app/app.js").text
+        for marker in ("addStockBatchFlow", "stockBatchesTable", "refreshBatches",
+                       "getMargin", "Lagerbatch"):
+            assert marker in js, f"missing {marker} in app.js"
+
     def test_styles_served(self, client):
         resp = client.get("/app/styles.css")
         assert resp.status_code == 200

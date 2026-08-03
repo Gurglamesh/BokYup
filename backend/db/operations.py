@@ -367,6 +367,92 @@ class BookOps:
                               (article_id,))
             self.conn.execute("DELETE FROM article WHERE id=?", (article_id,))
 
+    # ==================================================================
+    # Stock / lager (inventory batches — pure tracking, no ledger impact)
+    # ==================================================================
+
+    def _next_batch_number(self) -> int:
+        """The next global sequential batch number (max + 1, starting at 1)."""
+        row = self.conn.execute("SELECT MAX(batch_number) FROM stock_batch").fetchone()
+        return (row[0] or 0) + 1
+
+    def add_stock_batch(self, article_id: int, qty_centi: int, unit_cost_ore: int, *,
+                        received_date: Optional[str] = None,
+                        supplier_id: Optional[int] = None,
+                        purchase_transaktion_id: Optional[int] = None,
+                        note: Optional[str] = None) -> dict:
+        """Add a buy-in of `article_id` to stock as a new batch. `qty_centi` is the
+        purchased quantity ×100; `unit_cost_ore` the ex-moms cost per unit. Returns the
+        new batch's id + its (visible-in-Lager) batch_number. Pure inventory tracking —
+        it books nothing (any ledger side lives in the linked purchase transaktion)."""
+        if self.conn.execute("SELECT 1 FROM article WHERE id=?", (article_id,)).fetchone() is None:
+            raise KeyError(f"No article {article_id}")
+        qty_centi = int(qty_centi)
+        if qty_centi <= 0:
+            raise ValueError("Antalet måste vara större än 0")
+        unit_cost_ore = int(unit_cost_ore)
+        if unit_cost_ore < 0:
+            raise ValueError("Inköpspriset kan inte vara negativt")
+        if supplier_id is not None and self.conn.execute(
+                "SELECT 1 FROM supplier WHERE id=?", (supplier_id,)).fetchone() is None:
+            raise KeyError(f"No supplier {supplier_id}")
+        number = self._next_batch_number()
+        date = received_date or _now()[:10]
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO stock_batch(batch_number, article_id, qty_in_centi, "
+                "qty_remaining_centi, unit_cost_ore, supplier_id, purchase_transaktion_id, "
+                "received_date, note, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (number, article_id, qty_centi, qty_centi, unit_cost_ore, supplier_id,
+                 purchase_transaktion_id, date, note, _now()))
+        return {"id": cur.lastrowid, "batch_number": number}
+
+    def list_stock(self, include_empty: bool = False) -> list[dict]:
+        """Per-article stock summary: quantity on hand, number of open batches and the
+        total value (Σ qty_remaining × unit_cost). Only articles that have ever been
+        stocked appear; set include_empty to also show fully-consumed articles."""
+        rows = self.conn.execute(
+            "SELECT a.id AS article_id, a.article_number, a.description, a.unit, "
+            "COUNT(sb.id) AS batch_count, "
+            "COALESCE(SUM(sb.qty_remaining_centi), 0) AS qty_remaining_centi, "
+            "COALESCE(SUM(sb.qty_remaining_centi * sb.unit_cost_ore) / 100, 0) AS value_ore "
+            "FROM stock_batch sb JOIN article a ON a.id = sb.article_id "
+            "GROUP BY a.id ORDER BY a.article_number").fetchall()
+        out = [dict(r) for r in rows]
+        if not include_empty:
+            out = [r for r in out if r["qty_remaining_centi"] > 0]
+        return out
+
+    def list_article_batches(self, article_id: int, open_only: bool = False) -> list[dict]:
+        """All stock batches for one article (newest first), each with batch_number,
+        quantities, unit cost and source. `open_only` hides fully-consumed batches."""
+        sql = ("SELECT sb.id, sb.batch_number, sb.article_id, sb.qty_in_centi, "
+               "sb.qty_remaining_centi, sb.unit_cost_ore, sb.supplier_id, s.name AS supplier_name, "
+               "sb.purchase_transaktion_id, sb.received_date, sb.note "
+               "FROM stock_batch sb LEFT JOIN supplier s ON s.id = sb.supplier_id "
+               "WHERE sb.article_id=? ")
+        if open_only:
+            sql += "AND sb.qty_remaining_centi > 0 "
+        sql += "ORDER BY sb.batch_number DESC"
+        return [dict(r) for r in self.conn.execute(sql, (article_id,)).fetchall()]
+
+    def delete_stock_batch(self, batch_id: int) -> None:
+        """Delete a stock batch. Refused once any of it has been consumed (sold on an
+        invoice line) — the cost is then part of a frozen margin; adjust with a new
+        counter-batch instead."""
+        row = self.conn.execute(
+            "SELECT qty_in_centi, qty_remaining_centi FROM stock_batch WHERE id=?",
+            (batch_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No stock batch {batch_id}")
+        if row["qty_remaining_centi"] != row["qty_in_centi"]:
+            raise InvalidState("Batchen är delvis förbrukad och kan inte tas bort")
+        if self.conn.execute("SELECT 1 FROM invoice_line WHERE stock_batch_id=? LIMIT 1",
+                             (batch_id,)).fetchone():
+            raise InvalidState("Batchen används på en faktura och kan inte tas bort")
+        with self.conn:
+            self.conn.execute("DELETE FROM stock_batch WHERE id=?", (batch_id,))
+
     def create_customer(self, type: str, **fields) -> int:
         """
         Create a customer. type='private'|'business'. Returns the stable kundnummer.
@@ -1433,13 +1519,29 @@ class BookOps:
                 reduction_type = "rut"
             if reduction_type not in (None, "rut", "rot"):
                 raise ValueError(f"Unknown reduction_type {reduction_type!r}")
+            # Optional stock batch: freeze this line's inköpskostnad (qty × unit cost) so
+            # the real margin (revenue − cost) is known, and consume the batch on issue.
+            stock_batch_id = ln.get("stock_batch_id")
+            cost_ore = 0
+            if stock_batch_id is not None:
+                batch = self.conn.execute(
+                    "SELECT article_id, qty_remaining_centi, unit_cost_ore FROM stock_batch "
+                    "WHERE id=?", (int(stock_batch_id),)).fetchone()
+                if batch is None:
+                    raise KeyError(f"No stock batch {stock_batch_id}")
+                if qty_centi > batch["qty_remaining_centi"]:
+                    raise InvalidState(
+                        f"Batchen har inte tillräckligt i lager "
+                        f"(kvar {batch['qty_remaining_centi'] / 100:g}, begärt {qty_centi / 100:g})")
+                cost_ore = round(qty_centi * batch["unit_cost_ore"] / 100)
             computed.append({
                 "line_no": i, "description": ln["description"], "category_id": line_cat,
                 "quantity_centi": qty_centi, "unit": ln.get("unit"),
                 "unit_price_ore": unit_price_ore, "rate_code": rate_code,
                 "reduction_type": reduction_type, "rut_eligible": 1 if reduction_type else 0,
                 "article_id": ln.get("article_id"), "discount_pct_centi": discount_pct_centi,
-                "ex_moms_ore": ex, "moms_ore": moms,
+                "stock_batch_id": int(stock_batch_id) if stock_batch_id is not None else None,
+                "cost_ore": cost_ore, "ex_moms_ore": ex, "moms_ore": moms,
             })
             agg[(line_cat, rate_code)] = agg.get((line_cat, rate_code), 0) + ex
         moms_lines = [{"rate_code": rc, "amount_ore": ex, "inclusive": False, "category_id": cat}
@@ -1542,12 +1644,18 @@ class BookOps:
                 self.conn.execute(
                     "INSERT INTO invoice_line(invoice_id, line_no, description, category_id, "
                     "quantity_centi, unit, unit_price_ore, rate_code, rut_eligible, reduction_type, "
-                    "article_id, discount_pct_centi, ex_moms_ore, moms_ore) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "article_id, discount_pct_centi, stock_batch_id, cost_ore, ex_moms_ore, moms_ore) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (invoice_id, cl["line_no"], cl["description"], cl["category_id"],
                      cl["quantity_centi"], cl["unit"], cl["unit_price_ore"], cl["rate_code"],
                      cl["rut_eligible"], cl["reduction_type"], cl["article_id"],
-                     cl["discount_pct_centi"], cl["ex_moms_ore"], cl["moms_ore"]))
+                     cl["discount_pct_centi"], cl["stock_batch_id"], cl["cost_ore"],
+                     cl["ex_moms_ore"], cl["moms_ore"]))
+                # Consume the picked stock batch (decrement on-hand quantity).
+                if cl["stock_batch_id"] is not None:
+                    self.conn.execute(
+                        "UPDATE stock_batch SET qty_remaining_centi = qty_remaining_centi - ? "
+                        "WHERE id=?", (cl["quantity_centi"], cl["stock_batch_id"]))
             for r in clean_recipients:
                 self.conn.execute(
                     "INSERT INTO rut_recipient(invoice_id, customer_id, first_name, last_name, "
@@ -1892,13 +2000,21 @@ class BookOps:
     def list_invoices(self) -> list[dict]:
         rows = self.conn.execute(
             "SELECT id, invoice_number, invoice_date, due_date, customer_id, transaktion_id, "
-            "inc_moms_ore, rut_total_ore, rot_total_ore, parent_invoice_id, "
+            "ex_moms_ore, inc_moms_ore, rut_total_ore, rot_total_ore, parent_invoice_id, "
             "husavdrag_shortfall_ore, relation_note FROM invoice ORDER BY invoice_number"
             ).fetchall()
         out = []
         for r in rows:
             d = dict(r)
             d.update(self._invoice_balances(r["id"]))
+            # Real margin from picked stock batches (revenue ex moms − frozen cost).
+            crow = self.conn.execute(
+                "SELECT COALESCE(SUM(cost_ore), 0) AS cost_ore, "
+                "COUNT(stock_batch_id) AS with_cost FROM invoice_line WHERE invoice_id=?",
+                (r["id"],)).fetchone()
+            d["cost_ore"] = crow["cost_ore"]
+            d["has_cost"] = bool(crow["with_cost"])
+            d["margin_ore"] = r["ex_moms_ore"] - crow["cost_ore"]
             d["credit_notes"] = [dict(c) for c in self.conn.execute(
                 "SELECT id, credit_note_number, date, amount_ore FROM invoice_event "
                 "WHERE invoice_id=? AND kind='credit' AND credit_note_number IS NOT NULL "
@@ -1939,9 +2055,15 @@ class BookOps:
             "SELECT il.line_no, il.description, il.category_id, c.name AS category_name, "
             "c.bas_konto AS category_bas_konto, il.quantity_centi, il.unit, il.unit_price_ore, "
             "il.rate_code, il.rut_eligible, il.reduction_type, il.discount_pct_centi, "
-            "il.ex_moms_ore, il.moms_ore "
+            "il.stock_batch_id, sb.batch_number, il.cost_ore, il.ex_moms_ore, il.moms_ore "
             "FROM invoice_line il LEFT JOIN category c ON c.id = il.category_id "
+            "LEFT JOIN stock_batch sb ON sb.id = il.stock_batch_id "
             "WHERE il.invoice_id=? ORDER BY il.line_no", (invoice_id,)).fetchall()]
+        # Real margin from any picked stock batches (revenue ex moms − frozen cost).
+        # `has_cost` says whether any line carried a cost (else margin is unknown).
+        inv["cost_ore"] = sum(ln["cost_ore"] for ln in inv["lines"])
+        inv["has_cost"] = any(ln["stock_batch_id"] for ln in inv["lines"])
+        inv["margin_ore"] = inv["ex_moms_ore"] - inv["cost_ore"]
         inv["recipients"] = [{
             "customer_id": r["customer_id"],
             "first_name": r["first_name"], "last_name": r["last_name"],
@@ -1981,6 +2103,16 @@ class BookOps:
                              (invoice_id,)).fetchone():
             raise InvalidState("Invoice has payments/credits; kreditera/återbetala it instead")
         with self.conn:
+            # Return any consumed stock to its batch (the goods were never sold).
+            for ln in self.conn.execute(
+                    "SELECT stock_batch_id, quantity_centi FROM invoice_line "
+                    "WHERE invoice_id=? AND stock_batch_id IS NOT NULL", (invoice_id,)).fetchall():
+                self.conn.execute(
+                    "UPDATE stock_batch SET qty_remaining_centi = qty_remaining_centi + ? "
+                    "WHERE id=?", (ln["quantity_centi"], ln["stock_batch_id"]))
+            self.conn.execute(
+                "UPDATE invoice_line SET stock_batch_id=NULL, cost_ore=0 WHERE invoice_id=?",
+                (invoice_id,))
             # Detach the invoice first so deleting the transaktion can't trip the FK.
             self.conn.execute(
                 "UPDATE invoice SET cancelled_at=?, transaktion_id=NULL WHERE id=?",

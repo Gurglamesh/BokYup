@@ -203,6 +203,26 @@ def _build_router():
     def delete_article(book_id: str, article_id: int, request: Request):
         return fac(request).h_delete_article({"book_id": book_id, "article_id": article_id}, {}, {})
 
+    # ---- stock / lager ----
+    @r.get("/books/{book_id}/stock")
+    def list_stock(book_id: str, request: Request, include_empty: bool = False):
+        return fac(request).h_list_stock(
+            {"book_id": book_id}, {}, {"include_empty": include_empty})
+
+    @r.post("/books/{book_id}/stock", status_code=201)
+    def add_stock_batch(book_id: str, body: sc.StockBatchReq, request: Request):
+        return fac(request).h_add_stock_batch({"book_id": book_id}, body.model_dump(), {})
+
+    @r.get("/books/{book_id}/articles/{article_id}/batches")
+    def list_article_batches(book_id: str, article_id: int, request: Request,
+                             open_only: bool = False):
+        return fac(request).h_list_article_batches(
+            {"book_id": book_id, "article_id": article_id}, {}, {"open_only": open_only})
+
+    @r.delete("/books/{book_id}/stock/{batch_id}")
+    def delete_stock_batch(book_id: str, batch_id: int, request: Request):
+        return fac(request).h_delete_stock_batch({"book_id": book_id, "batch_id": batch_id}, {}, {})
+
     @r.post("/books/{book_id}/categories", status_code=201)
     def create_category(book_id: str, body: sc.CategoryReq, request: Request):
         return fac(request).h_create_category({"book_id": book_id}, body.model_dump(), {})
