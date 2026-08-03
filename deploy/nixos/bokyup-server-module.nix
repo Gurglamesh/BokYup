@@ -57,11 +57,26 @@ in
 
     tokenFile = lib.mkOption {
       type = lib.types.path;
+      default = "/var/lib/bokyup-token";
       description = ''
         Path to a file containing ONLY the API bearer token (just the token, no KEY=VALUE).
-        It is bind-mounted read-only into the container; keep it off the Nix store (agenix/
-        sops secret, or a root-only file). Generate one:
-          python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+        It is bind-mounted read-only into the container; it is kept off the Nix store.
+        With generateToken = true (the default) this file is created for you on first
+        activation and left alone thereafter — read it with `sudo cat` to configure a client.
+        Set generateToken = false to manage it yourself (agenix/sops) and point this at the
+        decrypted secret's path.
+      '';
+    };
+
+    generateToken = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Declaratively ensure tokenFile exists: on activation, if it is missing (or is the
+        empty directory a first bind-mount can leave behind) a fresh random token is written
+        there, 0600 root:root, OUTSIDE the Nix store. It is generated ONCE and never rotated
+        automatically — delete the file to force a new one. Set false to provision the token
+        yourself with agenix/sops-nix and just point tokenFile at it.
       '';
     };
 
@@ -95,6 +110,34 @@ in
         virtualisation.podman.enable = true;).
       '';
     }];
+
+    # Declaratively materialise the API token on the host (never in the Nix store).
+    # Runs before the container and heals the empty directory a first bind-mount can leave
+    # at tokenFile when the file doesn't exist yet.
+    systemd.services.bokyup-token = lib.mkIf cfg.generateToken {
+      description = "Ensure the BokYup API token file exists (generate once if missing)";
+      path = [ pkgs.coreutils ];
+      serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
+      script = ''
+        set -euo pipefail
+        tok=${lib.escapeShellArg (toString cfg.tokenFile)}
+        # A first `docker run` with a missing bind-mount source creates a DIRECTORY there.
+        if [ -d "$tok" ]; then rm -rf "$tok"; fi
+        if [ ! -s "$tok" ]; then
+          umask 077
+          # 32 random bytes, url-safe base64, no padding/newlines — same shape as
+          # secrets.token_urlsafe(32); only needs coreutils.
+          head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n' > "$tok"
+          chmod 600 "$tok"
+        fi
+      '';
+    };
+
+    # Make the container wait for the token to be in place.
+    systemd.services."${backend}-bokyup-server" = lib.mkIf cfg.generateToken {
+      after = [ "bokyup-token.service" ];
+      requires = [ "bokyup-token.service" ];
+    };
 
     virtualisation.oci-containers = {
       backend = lib.mkDefault "docker";

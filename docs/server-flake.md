@@ -59,14 +59,24 @@ Keep the runtime a separate concern in your own `server-tools.nix` (see
 }
 ```
 
-## 2. A token secret
+## 2. The API token
 
-The service reads the token from a file via systemd `LoadCredential`, so it never lands in
-the Nix store or the environment. Easiest with **agenix** or **sops-nix**; or a plain
-root-only file:
+By default (`generateToken = true`) the module **creates the token for you** on first
+activation: a random 32-byte url-safe token written to `tokenFile` (default
+`/var/lib/bokyup-token`), `0600 root:root`, **outside the Nix store**, generated once and
+never rotated on its own. Nothing imperative to run — just rebuild. Read it back to
+configure a client:
 
 ```bash
-sudo install -m600 /dev/stdin /var/lib/bokyup-token <<< "$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
+sudo cat /var/lib/bokyup-token
+```
+
+Prefer to manage the secret yourself? Set `generateToken = false` and point `tokenFile` at
+an **agenix**/**sops-nix** decrypted path (or any root-only file you provision):
+
+```nix
+services.bokyup-server.generateToken = false;
+services.bokyup-server.tokenFile = config.age.secrets.bokyup-token.path;
 ```
 
 ## 3. Configure the service — `bokyup.nix`
@@ -76,7 +86,10 @@ sudo install -m600 /dev/stdin /var/lib/bokyup-token <<< "$(python3 -c 'import se
 {
   services.bokyup-server = {
     enable = true;
-    tokenFile = "/var/lib/bokyup-token";   # or config.age.secrets.bokyup-token.path
+    # Token is auto-generated at /var/lib/bokyup-token (read it with `sudo cat`).
+    # To manage it yourself instead:
+    #   generateToken = false;
+    #   tokenFile = config.age.secrets.bokyup-token.path;
     # host/port default to 127.0.0.1:8756 (publish via tailscale serve, below)
     backup.enable = true;                  # nightly consistent local backup of the data dir
     # backup.dir = "/mnt/backup/bokyup";   # put on another disk if you can
