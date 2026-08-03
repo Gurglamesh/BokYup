@@ -82,8 +82,19 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    # Container runtime (Docker by default; set oci-containers.backend = "podman" to switch).
-    virtualisation.docker.enable = lib.mkDefault true;
+    # We do NOT enable a container runtime here — declare it yourself (e.g. in a
+    # server-tools.nix: `virtualisation.docker.enable = true;`). This module only runs the
+    # container on whatever backend is configured, and asserts one is actually enabled.
+    assertions = [{
+      assertion = (backend == "docker" -> config.virtualisation.docker.enable)
+               && (backend == "podman" -> config.virtualisation.podman.enable);
+      message = ''
+        services.bokyup-server needs a container backend enabled. Declare it yourself,
+        e.g. in your server-tools.nix:  virtualisation.docker.enable = true;
+        (or set virtualisation.oci-containers.backend = "podman" and enable
+        virtualisation.podman.enable = true;).
+      '';
+    }];
 
     virtualisation.oci-containers = {
       backend = lib.mkDefault "docker";

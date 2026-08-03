@@ -32,6 +32,7 @@ In your **system flake** (`/etc/nixos/flake.nix` or wherever your config lives):
       system = "x86_64-linux";
       modules = [
         ./configuration.nix
+        ./server-tools.nix                             # YOU declare Docker + Tailscale here
         bokyup.nixosModules.bokyup-server              # the server service
         ./bokyup.nix                                   # your settings (below)
       ];
@@ -40,8 +41,23 @@ In your **system flake** (`/etc/nixos/flake.nix` or wherever your config lives):
 }
 ```
 
-The module enables Docker for you (it runs the server as an oci-container), so you only
-need `services.tailscale.enable = true;` for the network path — no separate Docker setup.
+The BokYup module does **not** install Docker — it runs the server as an oci-container on
+whatever backend you declare (and asserts one is enabled, so you get a clear error if not).
+Keep the runtime a separate concern in your own `server-tools.nix` (see
+`deploy/nixos/servertools.nix` for a ready one):
+
+```nix
+# server-tools.nix
+{ config, pkgs, ... }:
+{
+  virtualisation.docker.enable = true;
+  services.tailscale.enable = true;
+  networking.firewall = {
+    trustedInterfaces = [ "tailscale0" ];
+    allowedUDPPorts = [ config.services.tailscale.port ];
+  };
+}
+```
 
 ## 2. A token secret
 
