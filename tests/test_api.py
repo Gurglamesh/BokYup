@@ -1158,6 +1158,44 @@ class TestStock:
         assert client.delete(f"/books/{book}/stock/{bid}").status_code == 200
         assert client.get(f"/books/{book}/stock").json() == []
 
+    def test_inkop_items_create_articles_and_batches(self, client, book):
+        prod = client.post(f"/books/{book}/categories",
+                           json={"name": "Nätverk", "kind": "income", "bas_konto": 3001,
+                                 "prefix": "0007"}).json()["id"]
+        expcat = client.post(f"/books/{book}/categories",
+                             json={"name": "Inköp varor", "kind": "expense", "bas_konto": 4010}).json()["id"]
+        # An inköp with line-items: one stocked article + one pure cost line (no name).
+        res = client.post(f"/books/{book}/expenses", json={
+            "category_id": expcat, "trans_date": "2026-05-01", "paid_date": "2026-05-01",
+            "items": [
+                {"description": "Router X", "category_id": prod, "quantity_centi": 500,
+                 "unit_cost_ore": 60000, "rate_code": "25"},
+                {"description": "", "quantity_centi": 100, "unit_cost_ore": 5000, "rate_code": "25"},
+            ]}).json()
+        assert len(res["batches"]) == 1                       # only the named line stocked
+        aid = res["batches"][0]["article_id"]
+        art = [a for a in client.get(f"/books/{book}/articles").json() if a["id"] == aid][0]
+        assert art["article_number"].startswith("0007-")      # article uses product prefix
+        stock = client.get(f"/books/{book}/stock").json()
+        assert stock[0]["qty_remaining_centi"] == 500
+        # buying the same article again adds a 2nd batch to the SAME article
+        res2 = client.post(f"/books/{book}/expenses", json={
+            "category_id": expcat, "trans_date": "2026-06-01", "paid_date": "2026-06-01",
+            "items": [{"description": "Router X", "category_id": prod, "quantity_centi": 300,
+                       "unit_cost_ore": 65000, "rate_code": "25"}]}).json()
+        assert res2["batches"][0]["article_id"] == aid
+        assert res2["batches"][0]["batch_number"] == 2
+        assert client.get(f"/books/{book}/stock").json()[0]["qty_remaining_centi"] == 800
+
+    def test_next_prefix_and_duplicate_rejected(self, client, book):
+        p = client.get(f"/books/{book}/categories/next-prefix").json()["prefix"]
+        assert p == "0000"
+        client.post(f"/books/{book}/categories",
+                    json={"name": "A", "kind": "income", "bas_konto": 3001, "prefix": "0500"})
+        dup = client.post(f"/books/{book}/categories",
+                          json={"name": "B", "kind": "income", "bas_konto": 3002, "prefix": "0500"})
+        assert dup.status_code == 409          # prefix in use -> InvalidState
+
 
 class TestBasKontonAndAddress:
     def test_accounts_endpoint_lists_system_konton(self, client, book):

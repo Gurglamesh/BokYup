@@ -1282,6 +1282,65 @@ class TestOresavrundning:
 
 
 # ---------------------------------------------------------------------------
+# Category prefixes + category-driven article numbering
+# ---------------------------------------------------------------------------
+
+class TestCategoryPrefix:
+    def test_auto_prefix_is_lowest_unused(self, ops):
+        c1 = ops.create_category("A", "income", 3001)
+        c2 = ops.create_category("B", "income", 3002)
+        p1 = ops.conn.execute("SELECT prefix FROM category WHERE id=?", (c1,)).fetchone()[0]
+        p2 = ops.conn.execute("SELECT prefix FROM category WHERE id=?", (c2,)).fetchone()[0]
+        assert p1 == "0000" and p2 == "0001"
+
+    def test_explicit_prefix_and_duplicate_rejected(self, ops):
+        ops.create_category("A", "income", 3001, prefix="0500")
+        assert ops.prefix_in_use("0500") is True
+        with pytest.raises(InvalidState):
+            ops.create_category("B", "income", 3002, prefix="0500")
+
+    def test_bad_prefix_rejected(self, ops):
+        with pytest.raises(ValueError):
+            ops.create_category("A", "income", 3001, prefix="12")
+
+    def test_article_number_uses_category_prefix(self, ops):
+        cid = ops.create_category("Nätverk", "income", 3001, prefix="0007")
+        art = ops.create_article("Router", category_id=cid)
+        assert art["article_number"].startswith("0007-")
+
+    def test_uncategorised_article_gets_NY_then_renumbers_on_categorise(self, ops):
+        art = ops.create_article("Lös pryl")               # no category
+        assert art["article_number"].startswith("NY-")
+        cid = ops.create_category("Prylar", "income", 3001, prefix="0042")
+        ops.update_article(art["id"], category_id=cid)
+        num = ops.conn.execute("SELECT article_number FROM article WHERE id=?",
+                               (art["id"],)).fetchone()[0]
+        assert num.startswith("0042-")
+
+    def test_invoiced_article_number_frozen_on_recategorise(self, ops):
+        c_sell = ops.create_category("Tjänst", "income", 3001, prefix="0001")
+        kid = ops.create_customer("business", company_name="X AB", org_nr="556000-0001")
+        art = ops.create_article("Vara", category_id=c_sell)
+        ops.create_invoice(customer_id=kid, category_id=c_sell, invoice_date="2026-03-01",
+            due_date="2026-03-31",
+            lines=[{"description": "Vara", "quantity_centi": 100, "unit_price_ore": 10000,
+                    "rate_code": "25", "category_id": c_sell, "article_id": art["id"]}])
+        before = ops.conn.execute("SELECT article_number FROM article WHERE id=?",
+                                  (art["id"],)).fetchone()[0]
+        c2 = ops.create_category("Annat", "income", 3002, prefix="0099")
+        ops.update_article(art["id"], category_id=c2)       # used -> number frozen
+        after = ops.conn.execute("SELECT article_number FROM article WHERE id=?",
+                                 (art["id"],)).fetchone()[0]
+        assert after == before
+
+    def test_find_or_create_reuses_same_article(self, ops):
+        cid = ops.create_category("Nät", "income", 3001, prefix="0003")
+        a = ops.find_or_create_article("Kabel", cid)
+        b = ops.find_or_create_article(" kabel ", cid)      # trimmed + case-insensitive
+        assert a == b
+
+
+# ---------------------------------------------------------------------------
 # Stock / lager (inventory batches + real margin)
 # ---------------------------------------------------------------------------
 
@@ -1301,6 +1360,18 @@ class TestStock:
         batches = ops.list_article_batches(aid)
         assert [b["batch_number"] for b in batches] == [2, 1]      # newest first
         assert batches[1]["qty_remaining_centi"] == 500
+
+    def test_batch_number_is_per_article(self, ops):
+        a1 = ops.create_article("Router", "1000")["id"]
+        a2 = ops.create_article("Switch", "1000")["id"]
+        ops.add_stock_batch(a1, 100, 500)
+        ops.add_stock_batch(a2, 100, 700)              # separate article -> also starts at 1
+        b1 = ops.add_stock_batch(a1, 100, 550)
+        assert ops.list_article_batches(a2)[0]["batch_number"] == 1
+        assert b1["batch_number"] == 2                 # a1's second batch
+        # full batch id = article_number + batch_number
+        full = ops.list_article_batches(a2)[0]["full_batch_id"]
+        assert full.endswith("-1")
 
     def test_list_stock_summary(self, ops):
         aid = self._art(ops)

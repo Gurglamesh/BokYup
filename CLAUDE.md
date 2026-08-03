@@ -643,6 +643,30 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       the Summering, and the Ordrar→Fakturor list shows a **Marginal** column. OCR-scanned
       buy-ins (auto-add articles/prices) are the deferred next step. Tests pass (336);
       browser-smoke-tested (add batch → pick on faktura → margin 800 kr end-to-end).
+- [x] **Category prefixes + inköp line-items → articles/batches (schema v26, 2026-08).**
+      Each **category owns a unique 4-digit prefix** (`category.prefix`, 0000–9999 → up to
+      10 000 categories, 0000 included). `create_category(prefix=…)` takes an explicit
+      prefix (rejected with InvalidState→409 if taken) or auto-assigns the lowest unused;
+      `_next_unused_prefix`/`prefix_in_use` + API `GET /categories/next-prefix`. A new
+      **article's number = `<category-prefix>-XXXX`** (random suffix; provisional **`NY-`**
+      bucket while uncategorised). Assigning/changing an article's category **re-issues its
+      number** to the new prefix — but only while it has **never been invoiced**
+      (`article_in_use` → frozen once printed on a faktura). **Batch numbers are now per
+      article** (`stock_batch` rebuilt: `UNIQUE(article_id, batch_number)`), so the full
+      batch id reads **`<article_number>-<batch_number>`** (`full_batch_id`). The **Inköp**
+      form is now a **line-item editor**: each row = product (income) category + article
+      name + qty + à-cost (ex moms) + moms rate; on booking the cost books to the chosen
+      **expense** konto and every **named** row is find-or-created as an article (buying the
+      same one again adds a batch to the SAME article) and gets a **stock batch** linked to
+      the purchase transaktion (a blank-name row is a pure cost line, no stock).
+      `find_or_create_article`; `record_expense` via facade `items[]`
+      (`RecordExpenseReq.items` / `ExpenseItemReq`). UI: category modal suggests the next
+      unused prefix + inline "används redan"; article create drops the manual prefix
+      (derives from category); **Artiklar** tab gained a **category filter**; Lager +
+      faktura batch pickers show the full batch id. Migration 26 assigns prefixes to
+      existing categories (lowest unused) and renumbers existing batches per article.
+      Tests pass (349); browser-smoke-tested (inköp → article 0000-XXXX → batch
+      0000-XXXX-1 @ 600 kr → Lager/Artiklar; duplicate-prefix rejection).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

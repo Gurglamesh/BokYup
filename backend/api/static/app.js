@@ -560,20 +560,38 @@ const SECTION_RENDERERS = {
       panel.appendChild(el("p", { class: "muted" }, "Inga artiklar ännu."));
       return;
     }
-    panel.appendChild(simpleTable(
-      ["Artikelnr", "Beskrivning", "À-pris", "Moms", "Husavdrag", "Kategori", ""],
-      list.map((a) => [a.article_number, a.description, toKr(a.unit_price_ore) + " kr",
-        rateLabel(a.rate_code), a.reduction_type ? a.reduction_type.toUpperCase() : "—",
-        a.category_name || el("span", { class: "muted" }, "Okategoriserad"),
-        el("span", { style: "display:inline-flex;gap:4px" },
-          editBtn(() => guard(() => editArticleFlow(a, incomeCats))),
-          el("button", { class: "btn small ghost danger", onclick: () => guard(async () => {
-            const f = await modal(`Ta bort artikel ${a.article_number}?`, [], "Ta bort");
-            if (!f) return;
-            await api("DELETE", `/books/${bid()}/articles/${a.id}`);
-            toast("Artikel borttagen"); renderWorkspace();
-          }) }, "Ta bort"))]),
-    ));
+    // Category filter: "alla" + one option per category actually used by articles.
+    const usedCatIds = [...new Set(list.map((a) => a.category_id).filter((x) => x != null))];
+    const catFilter = el("select", { style: "max-width:280px;margin-top:8px" },
+      el("option", { value: "" }, "— Alla kategorier —"),
+      el("option", { value: "none" }, "Okategoriserade"),
+      ...incomeCats.filter((c) => usedCatIds.includes(c.id))
+        .map((c) => el("option", { value: c.id }, `${c.prefix || "?"} · ${c.name}`)));
+    catFilter.value = state.articlesCat || "";
+    const tableBox = el("div", {});
+    const draw = () => {
+      const v = catFilter.value;
+      const rows = list.filter((a) => v === "" ? true
+        : v === "none" ? a.category_id == null : String(a.category_id) === v);
+      tableBox.innerHTML = "";
+      tableBox.appendChild(simpleTable(
+        ["Artikelnr", "Beskrivning", "À-pris", "Moms", "Husavdrag", "Kategori", ""],
+        rows.map((a) => [a.article_number, a.description, toKr(a.unit_price_ore) + " kr",
+          rateLabel(a.rate_code), a.reduction_type ? a.reduction_type.toUpperCase() : "—",
+          a.category_name || el("span", { class: "muted" }, "Okategoriserad"),
+          el("span", { style: "display:inline-flex;gap:4px" },
+            editBtn(() => guard(() => editArticleFlow(a, incomeCats))),
+            el("button", { class: "btn small ghost danger", onclick: () => guard(async () => {
+              const f = await modal(`Ta bort artikel ${a.article_number}?`, [], "Ta bort");
+              if (!f) return;
+              await api("DELETE", `/books/${bid()}/articles/${a.id}`);
+              toast("Artikel borttagen"); renderWorkspace();
+            }) }, "Ta bort"))])));
+    };
+    catFilter.onchange = () => { state.articlesCat = catFilter.value; draw(); };
+    panel.appendChild(wrap("Filtrera på kategori", catFilter));
+    panel.appendChild(tableBox);
+    draw();
   },
 
   // ----- stock / lager -----
@@ -2106,18 +2124,17 @@ function articleFields(a, incomeCats) {
 }
 
 async function addArticleFlow(incomeCats) {
-  const f = await modal("Ny artikel", [
-    { name: "prefix", label: "Artikelnr-prefix (4 siffror)", value: "1000" },
-    ...articleFields(null, incomeCats),
-  ], "Skapa");
+  // No manual prefix — the article number's prefix comes from the chosen category (or
+  // the provisional "NY-" bucket when uncategorised; assign a category later to reissue).
+  const f = await modal("Ny artikel", articleFields(null, incomeCats), "Skapa");
   if (!f || !f.description) return;
-  await api("POST", `/books/${bid()}/articles`, {
-    prefix: (f.prefix || "").trim(), description: f.description,
+  const res = await api("POST", `/books/${bid()}/articles`, {
+    description: f.description,
     unit_price_ore: toOre(f.unit_price_kr), unit: f.unit || null,
     rate_code: f.rate_code, reduction_type: f.reduction_type || null,
     category_id: f.category_id ? parseInt(f.category_id, 10) : null,
   });
-  toast("Artikel skapad");
+  toast(`Artikel ${res.article_number} skapad`);
   renderWorkspace();
 }
 
@@ -2127,12 +2144,18 @@ async function editArticleFlow(a, incomeCats) {
     ...articleFields(a, incomeCats),
   ], "Spara");
   if (!f || !f.description) return;
-  await api("PATCH", `/books/${bid()}/articles/${a.id}`, {
-    article_number: f.article_number || null, description: f.description,
+  const newCat = f.category_id ? parseInt(f.category_id, 10) : null;
+  const body = {
+    description: f.description,
     unit_price_ore: toOre(f.unit_price_kr), unit: f.unit || null,
     rate_code: f.rate_code, reduction_type: f.reduction_type || null,
-    category_id: f.category_id ? parseInt(f.category_id, 10) : null,
-  });
+    category_id: newCat,
+  };
+  // Only send an explicit article_number if the user actually changed it. Leaving it out
+  // lets the backend re-issue the number to the new category's prefix (when the category
+  // changed and the article has never been invoiced).
+  if ((f.article_number || "") !== a.article_number) body.article_number = f.article_number || null;
+  await api("PATCH", `/books/${bid()}/articles/${a.id}`, body);
   toast("Artikel uppdaterad");
   renderWorkspace();
 }
@@ -2171,9 +2194,10 @@ async function addStockBatchFlow(articles, suppliers) {
 async function stockBatchesTable(articleId, suppliers) {
   const batches = await api("GET", `/books/${bid()}/articles/${articleId}/batches`);
   return simpleTable(
-    ["Batchnr", "Kvar", "Inköpt", "À-kostnad", "Datum", "Leverantör", "Notering", ""],
+    ["Batch-ID", "Kvar", "Inköpt", "À-kostnad", "Datum", "Leverantör", "Notering", ""],
     batches.map((b) => [
-      el("strong", {}, "#" + b.batch_number),
+      el("strong", { title: `Batch ${b.batch_number} av ${b.article_number}` },
+        b.full_batch_id || (b.article_number + "-" + b.batch_number)),
       (b.qty_remaining_centi / 100).toLocaleString("sv-SE"),
       (b.qty_in_centi / 100).toLocaleString("sv-SE"),
       toKr(b.unit_cost_ore) + " kr",
@@ -2194,20 +2218,27 @@ async function stockBatchesTable(articleId, suppliers) {
 }
 
 async function addCategoryFlow() {
+  // Suggest the lowest unused 4-digit prefix; the user may type another (a taken one is
+  // rejected by the backend with a clear message).
+  let suggested = "";
+  try { suggested = (await api("GET", `/books/${bid()}/categories/next-prefix`)).prefix; }
+  catch (e) { /* offline / none — leave blank, backend auto-assigns */ }
   const f = await modal("Ny kategori", [
     { name: "name", label: "Namn (t.ex. Försäljning IT-tjänster)" },
     { name: "kind", label: "Typ", type: "select", value: "expense",
       options: [{ value: "income", label: "Inkomst" }, { value: "expense", label: "Utgift" }] },
     { name: "bas_konto", label: "BAS-konto (t.ex. 3001 eller 5460)" },
+    { name: "prefix", label: "Artikelnr-prefix (4 siffror, 0000–9999)", value: suggested },
     { name: "default_rate_code", label: "Standardmoms", type: "select", value: "25",
       options: RATE_OPTIONS.map((r) => ({ value: r, label: rateLabel(r) })) },
   ], "Spara");
   if (!f || !f.name || !f.bas_konto) return;
   await api("POST", `/books/${bid()}/categories`, {
     name: f.name, kind: f.kind, bas_konto: parseInt(f.bas_konto, 10),
+    prefix: (f.prefix || "").trim() || null,
     default_rate_code: f.default_rate_code || null,
   });
-  toast("Kategori sparad");
+  toast(`Kategori sparad (prefix ${(f.prefix || "").trim() || "auto"})`);
   renderWorkspace();
 }
 
@@ -2546,12 +2577,64 @@ async function offertToInvoiceFlow(o) {
   renderWorkspace();
 }
 
+// Inköp line-item editor: each row is an article (name + product category) bought at a
+// qty × à-cost (ex moms) + moms rate. A named row becomes a stock batch on booking; a
+// blank-name row is a pure cost line (still booked, no stock). Picking an existing
+// article prefills the row (so buying it again just adds a batch to the same article).
+function purchaseItemsEditor(incomeCats, articles, onChange) {
+  const rowsBox = el("div", {});
+  const cats = incomeCats || [];
+  const arts = articles || [];
+  const fire = () => { if (onChange) onChange(); };
+  function addRow(v) {
+    v = v || {};
+    const pick = el("select", { style: "min-width:150px" },
+      el("option", { value: "" }, "— ny artikel —"),
+      ...arts.map((a) => el("option", { value: a.id }, `${a.article_number} ${a.description}`)));
+    const name = el("input", { type: "text", placeholder: "Artikelnamn (tomt = ren kostnad)",
+      value: v.description || "", oninput: fire });
+    const cat = el("select", {}, el("option", { value: "" }, "(ingen)"),
+      ...cats.map((c) => el("option", { value: c.id }, `${c.prefix || "?"} · ${c.name}`)));
+    if (v.category_id) cat.value = String(v.category_id);
+    const qty = el("input", { type: "text", value: v.qty || "1", style: "width:60px", oninput: fire });
+    const cost = el("input", { type: "text", value: v.cost || "0,00", style: "width:96px", oninput: fire });
+    const rate = el("select", { onchange: fire }, ...RATE_OPTIONS.map((r) => el("option", { value: r }, rateLabel(r))));
+    if (v.rate_code) rate.value = v.rate_code;
+    pick.onchange = () => {
+      const a = arts.find((x) => String(x.id) === pick.value);
+      if (!a) return;
+      name.value = a.description || "";
+      cat.value = a.category_id ? String(a.category_id) : "";
+      if (a.rate_code) rate.value = a.rate_code;
+      fire();
+    };
+    name.addEventListener("input", () => { pick.value = ""; });
+    const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end;flex-wrap:wrap" },
+      wrap("Befintlig", pick), wrap("Artikelnamn", name), wrap("Produktkategori", cat),
+      wrap("Antal", qty), wrap("À-pris ex moms", cost), wrap("Moms", rate),
+      el("button", { class: "btn small ghost", onclick: (e) => { e.target.closest(".row").remove(); fire(); } }, "✕"));
+    row._get = () => ({
+      description: name.value.trim() || null,
+      category_id: cat.value ? parseInt(cat.value, 10) : null,
+      quantity_centi: Math.round(parseFloat((qty.value || "0").replace(",", ".")) * 100),
+      unit_cost_ore: toOre(cost.value), rate_code: rate.value, to_stock: true,
+    });
+    rowsBox.appendChild(row);
+  }
+  addRow();
+  const element = el("div", {}, rowsBox,
+    el("button", { class: "btn small ghost", onclick: () => addRow() }, "+ Rad"));
+  return { element, get: () => [...rowsBox.children].map((r) => r._get()).filter((l) => l.quantity_centi > 0) };
+}
+
 async function purchaseForm(panel) {
-  const [cats, suppliers] = await Promise.all([
+  const [cats, suppliers, articles] = await Promise.all([
     api("GET", `/books/${bid()}/categories`),
     api("GET", `/books/${bid()}/suppliers`),
+    api("GET", `/books/${bid()}/articles`),
   ]);
   const expenseCats = cats.filter((c) => c.kind === "expense");
+  const incomeCats = cats.filter((c) => c.kind === "income");
   if (expenseCats.length === 0) {
     toast("Lägg till minst en utgiftskategori (BAS-konto) först", true);
     return;
@@ -2570,30 +2653,41 @@ async function purchaseForm(panel) {
   const payDate = el("input", { type: "date", value: today });
   const payDateWrap = wrap("Betaldatum", payDate);
   paidNow.onchange = () => { payDateWrap.style.display = paidNow.value === "yes" ? "" : "none"; };
-  const linesEd = momsLinesEditor();
+  const totalsBox = el("p", { class: "muted", style: "margin-top:6px" });
+  const updateTotals = () => {
+    let ex = 0, moms = 0;
+    for (const it of items.get()) {
+      const lineEx = Math.round(it.quantity_centi * it.unit_cost_ore / 100);
+      ex += lineEx; moms += Math.round(lineEx * (RATE_PCT[it.rate_code] || 0));
+    }
+    totalsBox.textContent = `Summa: ${toKr(ex)} kr ex moms + ${toKr(moms)} kr moms = ${toKr(ex + moms)} kr`;
+  };
+  const items = purchaseItemsEditor(incomeCats, articles, updateTotals);
   const receipt = receiptPicker();
 
   panel.appendChild(el("div", { class: "row" },
-    wrap("Leverantör", supplier), wrap("Kategori (BAS-konto)", cat),
+    wrap("Leverantör", supplier), wrap("Bokförs på (kostnadskonto)", cat),
     wrap("Kvitto-/fakturanummer", extRef)));
   panel.appendChild(el("div", { class: "row" },
     wrap("Inköpsdatum", date), wrap("Betald?", paidNow), payDateWrap));
   panel.appendChild(el("div", { style: "margin-top:6px" },
-    el("label", {}, "Belopp & moms (en rad per momssats)"), linesEd.element));
+    el("label", {}, "Artiklar (namnge en rad → den läggs i lager som en batch)"), items.element));
+  panel.appendChild(totalsBox);
   panel.appendChild(el("div", { style: "margin-top:6px" },
     el("label", {}, "Kvitto/faktura (bild eller PDF, valfritt)"), receipt.element));
   panel.appendChild(el("div", { style: "margin-top:14px" },
     el("button", { class: "btn brand", onclick: () => guard(submit) }, "Bokför inköp"),
     el("button", { class: "btn ghost", style: "margin-left:8px",
       onclick: () => { state.section = "purchases"; renderWorkspace(); } }, "Avbryt")));
+  updateTotals();
 
   async function submit() {
-    const lines = linesEd.getLines();
-    if (lines.length === 0) { toast("Lägg till minst en beloppsrad", true); return; }
+    const rows = items.get();
+    if (rows.length === 0) { toast("Lägg till minst en rad med belopp", true); return; }
     const paid_date = paidNow.value === "yes" ? payDate.value : null;
     const res = await api("POST", `/books/${bid()}/expenses`, {
       supplier_id: supplier.value ? parseInt(supplier.value, 10) : null,
-      category_id: parseInt(cat.value, 10), lines, trans_date: date.value,
+      category_id: parseInt(cat.value, 10), items: rows, trans_date: date.value,
       ext_ref: extRef.value || null, paid_date,
     });
     const staged = receipt.getStaged();
@@ -2604,7 +2698,9 @@ async function purchaseForm(panel) {
     }
     state.section = "purchases";
     renderWorkspace();
-    toast(paid_date ? "Inköp bokfört (betalt)" : "Leverantörsfaktura bokförd (väntar på betalning)");
+    const n = (res.batches || []).length;
+    toast((paid_date ? "Inköp bokfört (betalt)" : "Leverantörsfaktura bokförd (väntar på betalning)")
+      + (n ? ` — ${n} artikel${n > 1 ? "/artiklar" : ""} lagd i lager` : ""));
   }
 }
 
@@ -2797,8 +2893,9 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatch
       if (!articleId || !loadBatches) return;
       batchCache = await loadBatches(articleId);
       for (const b of batchCache) {
+        const label = b.full_batch_id || ("#" + b.batch_number);
         batchSel.appendChild(el("option", { value: b.id },
-          `#${b.batch_number} · ${(b.qty_remaining_centi / 100).toLocaleString("sv-SE")} kvar · ${toKr(b.unit_cost_ore)} kr/st`));
+          `${label} · ${(b.qty_remaining_centi / 100).toLocaleString("sv-SE")} kvar · ${toKr(b.unit_cost_ore)} kr/st`));
       }
       if (selectId != null) batchSel.value = String(selectId);
       const sel = batchCache.find((b) => String(b.id) === batchSel.value);

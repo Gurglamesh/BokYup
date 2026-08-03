@@ -181,6 +181,10 @@ def _build_router():
     def list_categories(book_id: str, request: Request):
         return fac(request).h_list_categories({"book_id": book_id}, {}, {})
 
+    @r.get("/books/{book_id}/categories/next-prefix")
+    def next_prefix(book_id: str, request: Request):
+        return fac(request).h_next_prefix({"book_id": book_id}, {}, {})
+
     @r.get("/books/{book_id}/accounts")
     def list_accounts(book_id: str, request: Request):
         return fac(request).h_list_accounts({"book_id": book_id}, {}, {})

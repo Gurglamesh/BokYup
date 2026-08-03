@@ -202,38 +202,76 @@ class BookOps:
             )
         return bas_konto
 
+    def _next_unused_prefix(self) -> str:
+        """Lowest unused 4-digit article-number prefix ('0000'..'9999'). Each category
+        owns one; there is room for 10 000 categories (0000 included)."""
+        used = {r[0] for r in self.conn.execute(
+            "SELECT prefix FROM category WHERE prefix IS NOT NULL")}
+        for n in range(10000):
+            p = f"{n:04d}"
+            if p not in used:
+                return p
+        raise OperationError("Inga lediga prefix kvar (max 10000 kategorier)")
+
+    def prefix_in_use(self, prefix: str, exclude_id: Optional[int] = None) -> bool:
+        """Whether a 4-digit category prefix is already taken (optionally ignoring one
+        category, for edit-in-place)."""
+        row = self.conn.execute(
+            "SELECT id FROM category WHERE prefix=?", (str(prefix),)).fetchone()
+        return row is not None and row["id"] != exclude_id
+
+    def _validate_prefix(self, prefix: str, exclude_id: Optional[int] = None) -> str:
+        prefix = str(prefix).strip()
+        if not (prefix.isdigit() and len(prefix) == 4):
+            raise ValueError("Prefixet måste vara exakt 4 siffror (0000–9999)")
+        if self.prefix_in_use(prefix, exclude_id):
+            raise InvalidState(f"Prefixet {prefix} används redan")
+        return prefix
+
+    def _category_prefix(self, category_id: int) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT prefix FROM category WHERE id=?", (category_id,)).fetchone()
+        return row["prefix"] if row else None
+
     def create_category(self, name: str, kind: str, bas_konto: int,
                         account_name: Optional[str] = None,
-                        default_rate_code: Optional[str] = None) -> int:
+                        default_rate_code: Optional[str] = None,
+                        prefix: Optional[str] = None) -> int:
         """Create a category linked to a BAS-konto (auto-creating the account).
 
         `default_rate_code` is the moms rate the UI pre-fills for lines booked to this
-        category (e.g. "Försäljning av IT-tjänster, 25 %"). Optional; validated."""
+        category. `prefix` is the unique 4-digit article-number prefix; if omitted the
+        lowest unused one is assigned. Raises InvalidState if a given prefix is taken."""
         if kind not in ("income", "expense"):
             raise ValueError("kind must be 'income' or 'expense'")
         if default_rate_code is not None and default_rate_code not in S.MOMS_RATES:
             raise ValueError(f"Unknown moms rate {default_rate_code!r}")
+        prefix = self._validate_prefix(prefix) if prefix is not None else self._next_unused_prefix()
         self.ensure_account(bas_konto, account_name or name)
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO category(name, kind, bas_konto, default_rate_code, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (name, kind, bas_konto, default_rate_code, _now()),
+                "INSERT INTO category(name, kind, bas_konto, default_rate_code, prefix, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (name, kind, bas_konto, default_rate_code, prefix, _now()),
             )
         return cur.lastrowid
 
     def update_category(self, category_id: int, *, name: Optional[str] = None,
                         bas_konto: Optional[int] = None, active: Optional[bool] = None,
                         account_name: Optional[str] = None,
-                        default_rate_code: Optional[str] = None) -> None:
-        """Edit reference data freely. Does not touch already-booked verifikationer."""
+                        default_rate_code: Optional[str] = None,
+                        prefix: Optional[str] = None) -> None:
+        """Edit reference data freely. Does not touch already-booked verifikationer.
+        Changing the prefix only affects future article numbers (issued ones are frozen)."""
         if bas_konto is not None:
             self.ensure_account(bas_konto, account_name or name or f"Konto {bas_konto}")
         if default_rate_code is not None and default_rate_code not in S.MOMS_RATES:
             raise ValueError(f"Unknown moms rate {default_rate_code!r}")
+        if prefix is not None:
+            prefix = self._validate_prefix(prefix, exclude_id=category_id)
         sets, params = _build_update(
             {"name": name, "bas_konto": bas_konto, "default_rate_code": default_rate_code,
-             "active": None if active is None else int(active)}
+             "prefix": prefix, "active": None if active is None else int(active)}
         )
         if sets:
             with self.conn:
@@ -284,11 +322,11 @@ class BookOps:
     # Article catalog (reusable invoice line items)
     # ==================================================================
 
-    def _next_article_number(self, prefix: str) -> str:
-        """Build a unique article number `<prefix>-XXXX` (prefix = 4 digits the user
-        picks; XXXX random). Retries on the rare collision."""
-        if not (isinstance(prefix, str) and prefix.isdigit() and len(prefix) == 4):
-            raise ValueError("Prefixet måste vara exakt 4 siffror")
+    def _gen_article_number(self, prefix: str) -> str:
+        """Build a unique article number `<prefix>-XXXX` (XXXX random). `prefix` is a
+        category's 4-digit prefix, or the provisional 'NY' bucket for an uncategorised
+        article. Retries on the rare collision."""
+        prefix = str(prefix or "NY")
         for _ in range(50):
             number = f"{prefix}-{secrets.randbelow(10000):04d}"
             if self.conn.execute("SELECT 1 FROM article WHERE article_number=?",
@@ -296,12 +334,21 @@ class BookOps:
                 return number
         raise OperationError("Kunde inte skapa ett unikt artikelnummer")
 
-    def create_article(self, description: str, prefix: str, *,
+    def article_in_use(self, article_id: int) -> bool:
+        """Whether the article appears on any invoice line (issued) — once it does its
+        number is frozen (it may be printed on a legal faktura)."""
+        return self.conn.execute(
+            "SELECT 1 FROM invoice_line WHERE article_id=? LIMIT 1",
+            (article_id,)).fetchone() is not None
+
+    def create_article(self, description: str, prefix: Optional[str] = None, *,
                        unit_price_ore: int = 0, rate_code: str = "25",
                        reduction_type: Optional[str] = None,
                        category_id: Optional[int] = None,
                        unit: Optional[str] = None) -> dict:
-        """Create a catalog article. `prefix` is the user-chosen 4-digit number prefix."""
+        """Create a catalog article. The article number's prefix comes from the chosen
+        category's prefix (or the provisional 'NY' bucket when uncategorised); an explicit
+        `prefix` overrides that. The suffix is random and unique."""
         if not description:
             raise ValueError("Artikeln behöver en beskrivning")
         if rate_code not in S.MOMS_RATES:
@@ -310,7 +357,13 @@ class BookOps:
             raise ValueError(f"Unknown reduction_type {reduction_type!r}")
         if category_id is not None:
             self._check_category(category_id, "income")
-        number = self._next_article_number(prefix)
+        if prefix is not None:
+            # An explicit override must still be a valid 4-digit prefix.
+            if not (str(prefix).isdigit() and len(str(prefix)) == 4):
+                raise ValueError("Prefixet måste vara exakt 4 siffror")
+        else:
+            prefix = self._category_prefix(category_id) if category_id is not None else "NY"
+        number = self._gen_article_number(prefix)
         now = _now()
         with self.conn:
             cur = self.conn.execute(
@@ -324,7 +377,8 @@ class BookOps:
     def list_articles(self, active_only: bool = False) -> list[dict]:
         sql = ("SELECT a.id, a.article_number, a.description, a.unit, a.unit_price_ore, "
                "a.rate_code, a.reduction_type, a.category_id, c.name AS category_name, "
-               "a.active FROM article a LEFT JOIN category c ON c.id = a.category_id ")
+               "c.prefix AS category_prefix, a.active "
+               "FROM article a LEFT JOIN category c ON c.id = a.category_id ")
         if active_only:
             sql += "WHERE a.active = 1 "
         sql += "ORDER BY a.article_number"
@@ -332,13 +386,26 @@ class BookOps:
 
     def update_article(self, article_id: int, **fields) -> None:
         """Edit an article (e.g. categorise it, change price/moms, rename). Does not
-        touch already-issued invoice lines (they carry their own frozen values)."""
-        if self.conn.execute("SELECT 1 FROM article WHERE id=?", (article_id,)).fetchone() is None:
+        touch already-issued invoice lines (they carry their own frozen values).
+
+        Assigning/changing the category re-issues the article number to the new
+        category's prefix — but only while the article has never appeared on an issued
+        invoice (once it has, the number is frozen)."""
+        row = self.conn.execute(
+            "SELECT category_id, article_number FROM article WHERE id=?",
+            (article_id,)).fetchone()
+        if row is None:
             raise KeyError(f"No article {article_id}")
         if fields.get("rate_code") is not None and fields["rate_code"] not in S.MOMS_RATES:
             raise ValueError("Unknown moms rate")
         if fields.get("category_id") is not None:
             self._check_category(fields["category_id"], "income")
+        # Re-issue the number to the new category's prefix (unless frozen / explicit).
+        if ("category_id" in fields and fields["category_id"] != row["category_id"]
+                and "article_number" not in fields and not self.article_in_use(article_id)):
+            new_prefix = (self._category_prefix(fields["category_id"])
+                          if fields["category_id"] is not None else "NY")
+            fields["article_number"] = self._gen_article_number(new_prefix)
         if "article_number" in fields and fields["article_number"]:
             num = fields["article_number"]
             clash = self.conn.execute(
@@ -371,10 +438,37 @@ class BookOps:
     # Stock / lager (inventory batches — pure tracking, no ledger impact)
     # ==================================================================
 
-    def _next_batch_number(self) -> int:
-        """The next global sequential batch number (max + 1, starting at 1)."""
-        row = self.conn.execute("SELECT MAX(batch_number) FROM stock_batch").fetchone()
+    def _next_batch_number(self, article_id: int) -> int:
+        """The next batch number WITHIN an article (max + 1, starting at 1). The full
+        batch id is article_number + batch_number."""
+        row = self.conn.execute(
+            "SELECT MAX(batch_number) FROM stock_batch WHERE article_id=?",
+            (article_id,)).fetchone()
         return (row[0] or 0) + 1
+
+    def find_or_create_article(self, description: str, category_id: Optional[int] = None,
+                               *, rate_code: str = "25",
+                               reduction_type: Optional[str] = None,
+                               unit: Optional[str] = None) -> int:
+        """Return an existing active article matching (description, category) or create a
+        new one. Used by the Inköp flow so buying the same article again adds a batch to
+        the SAME article. Match is on trimmed, case-insensitive description + category."""
+        desc = (description or "").strip()
+        if not desc:
+            raise ValueError("Artikeln behöver en beskrivning")
+        if category_id is None:
+            row = self.conn.execute(
+                "SELECT id FROM article WHERE active=1 AND category_id IS NULL "
+                "AND lower(trim(description))=lower(?) ORDER BY id LIMIT 1", (desc,)).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT id FROM article WHERE active=1 AND category_id=? "
+                "AND lower(trim(description))=lower(?) ORDER BY id LIMIT 1",
+                (category_id, desc)).fetchone()
+        if row:
+            return row["id"]
+        return self.create_article(desc, category_id=category_id, rate_code=rate_code,
+                                   reduction_type=reduction_type, unit=unit)["id"]
 
     def add_stock_batch(self, article_id: int, qty_centi: int, unit_cost_ore: int, *,
                         received_date: Optional[str] = None,
@@ -396,7 +490,7 @@ class BookOps:
         if supplier_id is not None and self.conn.execute(
                 "SELECT 1 FROM supplier WHERE id=?", (supplier_id,)).fetchone() is None:
             raise KeyError(f"No supplier {supplier_id}")
-        number = self._next_batch_number()
+        number = self._next_batch_number(article_id)
         date = received_date or _now()[:10]
         with self.conn:
             cur = self.conn.execute(
@@ -426,10 +520,12 @@ class BookOps:
     def list_article_batches(self, article_id: int, open_only: bool = False) -> list[dict]:
         """All stock batches for one article (newest first), each with batch_number,
         quantities, unit cost and source. `open_only` hides fully-consumed batches."""
-        sql = ("SELECT sb.id, sb.batch_number, sb.article_id, sb.qty_in_centi, "
-               "sb.qty_remaining_centi, sb.unit_cost_ore, sb.supplier_id, s.name AS supplier_name, "
-               "sb.purchase_transaktion_id, sb.received_date, sb.note "
+        sql = ("SELECT sb.id, sb.batch_number, sb.article_id, a.article_number, "
+               "(a.article_number || '-' || sb.batch_number) AS full_batch_id, "
+               "sb.qty_in_centi, sb.qty_remaining_centi, sb.unit_cost_ore, sb.supplier_id, "
+               "s.name AS supplier_name, sb.purchase_transaktion_id, sb.received_date, sb.note "
                "FROM stock_batch sb LEFT JOIN supplier s ON s.id = sb.supplier_id "
+               "LEFT JOIN article a ON a.id = sb.article_id "
                "WHERE sb.article_id=? ")
         if open_only:
             sql += "AND sb.qty_remaining_centi > 0 "

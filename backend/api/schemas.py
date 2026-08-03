@@ -62,6 +62,7 @@ class CategoryReq(BaseModel):
     bas_konto: int
     default_rate_code: Optional[str] = None   # default moms for lines on this category
     account_name: Optional[str] = None
+    prefix: Optional[str] = None  # unique 4-digit article-number prefix (auto if omitted)
 
 
 class CategoryUpdateReq(BaseModel):
@@ -70,6 +71,7 @@ class CategoryUpdateReq(BaseModel):
     default_rate_code: Optional[str] = None
     active: Optional[bool] = None
     account_name: Optional[str] = None
+    prefix: Optional[str] = None
 
 
 class CustomerReq(BaseModel):
@@ -133,10 +135,25 @@ class MomsLineReq(BaseModel):
     inclusive: bool = True
 
 
+class ExpenseItemReq(BaseModel):
+    # One inköp line: qty × à-cost (ex moms) at a rate. A non-empty `description` makes it
+    # a stocked article (find-or-created under its product category) → a batch on booking.
+    quantity_centi: int
+    unit_cost_ore: int                 # à-pris ex moms per unit
+    rate_code: str
+    description: Optional[str] = None   # article name (blank = pure cost line, no stock)
+    category_id: Optional[int] = None  # the article's product (income) category
+    reduction_type: Optional[str] = None
+    unit: Optional[str] = None
+    to_stock: bool = True
+    note: Optional[str] = None
+
+
 class RecordExpenseReq(BaseModel):
     category_id: int
-    lines: list[MomsLineReq]
     trans_date: str
+    lines: Optional[list[MomsLineReq]] = None     # legacy: raw moms lines
+    items: Optional[list[ExpenseItemReq]] = None  # new: article line-items (create batches)
     supplier_id: Optional[int] = None
     note: Optional[str] = None
     receipt_original_format: Optional[str] = None   # 'paper' | 'digital'
@@ -241,7 +258,7 @@ class PaymentMethodUpdateReq(BaseModel):
 
 class ArticleReq(BaseModel):
     description: str
-    prefix: str                   # the user-chosen 4-digit article-number prefix
+    prefix: Optional[str] = None  # override; normally the number's prefix comes from the category
     unit_price_ore: int = 0
     rate_code: str = "25"
     reduction_type: Optional[str] = None

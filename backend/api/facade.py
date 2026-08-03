@@ -201,11 +201,15 @@ class AppFacade:
         ops = self._ops(p["book_id"])
         # `used` flags categories already touched by the books (cannot be deleted).
         return _rows(ops,
-                     "SELECT id, name, kind, bas_konto, default_rate_code, active, "
+                     "SELECT id, name, kind, bas_konto, default_rate_code, prefix, active, "
                      "(EXISTS(SELECT 1 FROM transaktion t WHERE t.category_id=category.id) "
                      " OR EXISTS(SELECT 1 FROM moms_line m WHERE m.category_id=category.id) "
                      " OR EXISTS(SELECT 1 FROM invoice_line il WHERE il.category_id=category.id)) "
                      "AS used FROM category ORDER BY bas_konto")
+
+    def h_next_prefix(self, p, b, q):
+        """Suggest the lowest unused 4-digit category prefix (for the create form)."""
+        return {"prefix": self._ops(p["book_id"])._next_unused_prefix()}
 
     def h_list_accounts(self, p, b, q):
         """All BAS-konton, each tagged with whether it is a system account (the
@@ -223,8 +227,9 @@ class AppFacade:
     def h_create_category(self, p, b, q):
         ops = self._ops(p["book_id"])
         cid = ops.create_category(b["name"], b["kind"], b["bas_konto"],
-                                  b.get("account_name"), b.get("default_rate_code"))
-        return {"id": cid}
+                                  b.get("account_name"), b.get("default_rate_code"),
+                                  prefix=b.get("prefix"))
+        return {"id": cid, "prefix": ops._category_prefix(cid)}
 
     def h_update_category(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -241,7 +246,7 @@ class AppFacade:
 
     def h_create_article(self, p, b, q):
         return self._ops(p["book_id"]).create_article(
-            b["description"], b["prefix"], unit_price_ore=b.get("unit_price_ore", 0),
+            b["description"], b.get("prefix"), unit_price_ore=b.get("unit_price_ore", 0),
             rate_code=b.get("rate_code", "25"), reduction_type=b.get("reduction_type"),
             category_id=b.get("category_id"), unit=b.get("unit"))
 
@@ -355,6 +360,39 @@ class AppFacade:
     # ---- bookkeeping ----
     def h_record_expense(self, p, b, q):
         ops = self._ops(p["book_id"])
+        items = b.get("items")
+        if items:
+            # New line-item inköp: each item is qty × à-cost (ex moms) at a rate; the cost
+            # books to the single expense konto (b["category_id"]). An item that names an
+            # article gets a stock batch under its product (income) category.
+            moms_lines = []
+            for it in items:
+                ex = round(int(it["quantity_centi"]) * int(it["unit_cost_ore"]) / 100)
+                if ex > 0:
+                    moms_lines.append({"rate_code": it["rate_code"], "amount_ore": ex,
+                                       "inclusive": False})
+            if not moms_lines:
+                raise ValueError("Inköpet behöver minst en rad med belopp")
+            res = ops.record_expense(
+                b.get("supplier_id"), b["category_id"], moms_lines, b["trans_date"],
+                note=b.get("note"), receipt_original_format=b.get("receipt_original_format"),
+                ext_ref=b.get("ext_ref"), paid_date=b.get("paid_date"))
+            tid = res["transaktion_id"]
+            batches = []
+            for it in items:
+                desc = (it.get("description") or "").strip()
+                if not desc or not it.get("to_stock", True):
+                    continue
+                aid = ops.find_or_create_article(
+                    desc, it.get("category_id"), rate_code=it.get("rate_code", "25"),
+                    reduction_type=it.get("reduction_type"), unit=it.get("unit"))
+                batch = ops.add_stock_batch(
+                    aid, int(it["quantity_centi"]), int(it["unit_cost_ore"]),
+                    received_date=b["trans_date"], supplier_id=b.get("supplier_id"),
+                    purchase_transaktion_id=tid, note=it.get("note"))
+                batches.append({"article_id": aid, **batch})
+            res["batches"] = batches
+            return res
         return ops.record_expense(
             b.get("supplier_id"), b["category_id"], b["lines"], b["trans_date"],
             note=b.get("note"), receipt_original_format=b.get("receipt_original_format"),
@@ -697,6 +735,7 @@ _route("GET", "/books/{book_id}/recovery-key", "h_recovery_key_status")
 _route("POST", "/books/{book_id}/recovery-key", "h_add_recovery_key", 201)
 
 _route("GET", "/books/{book_id}/categories", "h_list_categories")
+_route("GET", "/books/{book_id}/categories/next-prefix", "h_next_prefix")
 _route("GET", "/books/{book_id}/accounts", "h_list_accounts")
 _route("GET", "/books/{book_id}/articles", "h_list_articles")
 _route("POST", "/books/{book_id}/articles", "h_create_article", 201)

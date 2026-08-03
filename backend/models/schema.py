@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -104,6 +104,7 @@ CREATE TABLE category (
     bas_konto  INTEGER NOT NULL REFERENCES account(bas_konto),
     default_rate_code TEXT CHECK (default_rate_code IN
                        ('25','12','6','0','momsfri','ej_avdragsgill')),  -- default moms
+    prefix     TEXT UNIQUE,   -- unique 4-digit article-number prefix (articles: <prefix>-XXXX)
     active     INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
 );
@@ -383,7 +384,7 @@ CREATE TABLE article (
 -- the real margin (revenue − batch cost) fall out. Pure tracking — no ledger impact.
 CREATE TABLE stock_batch (
     id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-    batch_number            INTEGER NOT NULL UNIQUE,   -- global sequential (visible in Lager)
+    batch_number            INTEGER NOT NULL,           -- sequential WITHIN the article
     article_id              INTEGER NOT NULL REFERENCES article(id),
     qty_in_centi            INTEGER NOT NULL,           -- quantity bought in * 100
     qty_remaining_centi     INTEGER NOT NULL,           -- decremented as it is sold
@@ -392,7 +393,8 @@ CREATE TABLE stock_batch (
     purchase_transaktion_id INTEGER REFERENCES transaktion(id),     -- optional linked inköp
     received_date           TEXT NOT NULL,
     note                    TEXT,
-    created_at              TEXT NOT NULL
+    created_at              TEXT NOT NULL,
+    UNIQUE (article_id, batch_number)   -- full batch id = article_number + batch_number
 );
 
 -- ----- RUT/ROT recipients: a household can split the skattereduktion across ----
@@ -850,6 +852,40 @@ _MIGRATIONS: dict[int, str] = {
         CREATE INDEX IF NOT EXISTS idx_stock_batch_article ON stock_batch(article_id);
         ALTER TABLE invoice_line ADD COLUMN stock_batch_id INTEGER;
         ALTER TABLE invoice_line ADD COLUMN cost_ore INTEGER NOT NULL DEFAULT 0;
+    """,
+    26: """
+        ALTER TABLE category ADD COLUMN prefix TEXT;
+        UPDATE category SET prefix = printf('%04d',
+            (SELECT COUNT(*) FROM category c2 WHERE c2.id <= category.id) - 1)
+            WHERE prefix IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_category_prefix ON category(prefix);
+        DROP INDEX IF EXISTS idx_stock_batch_article;
+        ALTER TABLE stock_batch RENAME TO stock_batch_old;
+        CREATE TABLE stock_batch (
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_number            INTEGER NOT NULL,
+            article_id              INTEGER NOT NULL REFERENCES article(id),
+            qty_in_centi            INTEGER NOT NULL,
+            qty_remaining_centi     INTEGER NOT NULL,
+            unit_cost_ore           INTEGER NOT NULL,
+            supplier_id             INTEGER REFERENCES supplier(id),
+            purchase_transaktion_id INTEGER REFERENCES transaktion(id),
+            received_date           TEXT NOT NULL,
+            note                    TEXT,
+            created_at              TEXT NOT NULL,
+            UNIQUE (article_id, batch_number)
+        );
+        INSERT INTO stock_batch (id, batch_number, article_id, qty_in_centi,
+            qty_remaining_centi, unit_cost_ore, supplier_id, purchase_transaktion_id,
+            received_date, note, created_at)
+            SELECT o.id,
+                (SELECT COUNT(*) FROM stock_batch_old b2
+                     WHERE b2.article_id = o.article_id AND b2.id <= o.id),
+                o.article_id, o.qty_in_centi, o.qty_remaining_centi, o.unit_cost_ore,
+                o.supplier_id, o.purchase_transaktion_id, o.received_date, o.note, o.created_at
+            FROM stock_batch_old o;
+        DROP TABLE stock_batch_old;
+        CREATE INDEX IF NOT EXISTS idx_stock_batch_article ON stock_batch(article_id);
     """,
 }
 

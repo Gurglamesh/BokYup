@@ -46,6 +46,14 @@ class TestStaticUI:
                        "getMargin", "Lagerbatch"):
             assert marker in js, f"missing {marker} in app.js"
 
+    def test_app_js_has_inkop_items_and_prefix(self, client):
+        # Inköp line-items (create articles + batches), category prefix picker and the
+        # article category filter are wired in the frontend.
+        js = client.get("/app/app.js").text
+        for marker in ("purchaseItemsEditor", "next-prefix", "articlesCat",
+                       "full_batch_id", "Produktkategori"):
+            assert marker in js, f"missing {marker} in app.js"
+
     def test_styles_served(self, client):
         resp = client.get("/app/styles.css")
         assert resp.status_code == 200
