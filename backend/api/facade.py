@@ -71,6 +71,9 @@ class AppFacade:
         self.manager = manager
         self.autolock_seconds = autolock_seconds
         self.last_activity: dict[str, float] = {}
+        # Server mode: when set, all books live under this directory and clients supply a
+        # name (never a server filesystem path). None = local/desktop (client picks paths).
+        self.books_dir: Optional[str] = None
 
     # ----- dispatch -------------------------------------------------------
     def dispatch(self, method: str, path: str,
@@ -141,10 +144,28 @@ class AppFacade:
         return [rec.to_dict() for rec in self.manager.list_books()]
 
     def h_create_book(self, p, b, q):
-        record, session = self.manager.create_book(b["display_name"], b["db_path"], b["passphrase"])
+        db_path = self._server_book_path(b["display_name"], b.get("db_path"))
+        record, session = self.manager.create_book(b["display_name"], db_path, b["passphrase"])
         S.initialize_schema(session.connection())
         self._touch(record.id)
         return record.to_dict()
+
+    def _server_book_path(self, display_name: str, client_path):
+        """In server mode, place books under books_dir with a safe name derived from the
+        display name (ignore any client-supplied path). Local mode: use the client path."""
+        if not self.books_dir:
+            return client_path
+        import re
+        from pathlib import Path
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "_", (display_name or "book").strip()) or "book"
+        base = Path(self.books_dir) / "books"
+        base.mkdir(parents=True, exist_ok=True)
+        path = base / f"{safe}.db"
+        n = 2
+        while path.exists():                       # never clobber an existing server book
+            path = base / f"{safe}-{n}.db"
+            n += 1
+        return str(path)
 
     def h_unlock(self, p, b, q):
         self.manager.open_book(p["book_id"], b["passphrase"])
@@ -179,8 +200,11 @@ class AppFacade:
         return {"out_path": str(out)}
 
     def h_import_book(self, p, b, q):
+        dest = b["dest_db_path"]
+        if self.books_dir and not b.get("overwrite"):     # place restores under the server dir
+            dest = self._server_book_path(b.get("display_name") or "restored", dest)
         rec = self.manager.import_book(
-            b["bundle_path"], b["dest_db_path"],
+            b["bundle_path"], dest,
             display_name=b.get("display_name"), overwrite=b.get("overwrite", False),
         )
         return rec.to_dict()

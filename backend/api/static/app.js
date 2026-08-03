@@ -14,16 +14,27 @@ const state = { books: [], activeBook: null, section: "transactions" };
 // ---------------------------------------------------------------------------
 // HTTP helper
 // ---------------------------------------------------------------------------
-async function api(method, path, body) {
-  // Phone build: the Python backend runs in-process under Pyodide (no HTTP).
-  if (window.__BOKYUP_NATIVE__) return nativeApi(method, path, body);
+// ----- connection mode (local vs a self-hosted server) ---------------------
+// state.conn: null (not chosen yet) | {mode:"local"} | {mode:"server", base, token}.
+// Persisted in localStorage so the choice sticks; switchable from the home screen.
+function loadConn() { try { return JSON.parse(localStorage.getItem("bokyup.conn") || "null"); } catch { return null; } }
+function saveConn(c) { state.conn = c; localStorage.setItem("bokyup.conn", JSON.stringify(c)); }
+function clearConn() { state.conn = null; localStorage.removeItem("bokyup.conn"); }
+function isServer() { return !!(state.conn && state.conn.mode === "server"); }
+function apiBase() { return isServer() ? state.conn.base.replace(/\/+$/, "") : API; }
+function authHeaders() { return isServer() && state.conn.token ? { Authorization: "Bearer " + state.conn.token } : {}; }
 
-  const opts = { method, headers: {} };
+async function api(method, path, body) {
+  // Phone build: the Python backend runs in-process under Pyodide (no HTTP) — unless the
+  // user chose a server, in which case we go over HTTP to that server instead.
+  if (!isServer() && window.__BOKYUP_NATIVE__) return nativeApi(method, path, body);
+
+  const opts = { method, headers: { ...authHeaders() } };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  const resp = await fetch(API + path, opts);
+  const resp = await fetch(apiBase() + path, opts);
   const isJson = (resp.headers.get("content-type") || "").includes("application/json");
   const data = isJson ? await resp.json() : await resp.text();
   if (!resp.ok) {
@@ -31,6 +42,23 @@ async function api(method, path, body) {
     throw new ApiError(detail, resp.status);
   }
   return data;
+}
+
+// A usable src for binary media (PDF/receipt/logo). In server mode a plain URL can't carry
+// the bearer token, so fetch it authed and hand back a blob: URL; local same-origin uses
+// the URL directly; phone (WASM) returns a data: URL from the in-process call.
+async function mediaUrl(path) {
+  if (!isServer() && window.__BOKYUP_NATIVE__) {
+    const r = await api("GET", path);
+    return { src: `data:${r.media_type};base64,${r.base64}`, revoke: null };
+  }
+  if (isServer()) {
+    const resp = await fetch(apiBase() + path, { headers: authHeaders() });
+    if (!resp.ok) throw new ApiError("HTTP " + resp.status, resp.status);
+    const url = URL.createObjectURL(await resp.blob());
+    return { src: url, revoke: url };
+  }
+  return { src: API + path, revoke: null };
 }
 
 // In-process transport (phone). Mirrors the fetch path's return/throw contract:
@@ -53,11 +81,7 @@ async function nativeApi(method, path, body) {
 
 // Source for a receipt <img>: an HTTP URL on desktop, a data: URL on the phone.
 async function receiptSrc(receiptId) {
-  if (window.__BOKYUP_NATIVE__) {
-    const r = await api("GET", `/books/${bid()}/receipts/${receiptId}`);
-    return `data:${r.media_type};base64,${r.base64}`;
-  }
-  return `/books/${bid()}/receipts/${receiptId}`;
+  return (await mediaUrl(`/books/${bid()}/receipts/${receiptId}`)).src;
 }
 class ApiError extends Error {
   constructor(msg, status) { super(msg); this.status = status; }
@@ -166,12 +190,14 @@ function renderTabs() {
 }
 
 async function newBookFlow() {
-  const f = await modal("Ny bok", [
-    { name: "display_name", label: "Namn (t.ex. Enskild firma 2026)" },
-    { name: "db_path", label: "Filsökväg (t.ex. C:\\bokforing\\firma.db)" },
-    { name: "passphrase", label: "Lösenord", type: "password" },
-  ], "Skapa");
+  // In server mode the server assigns the file path (under its data dir), so we only ask
+  // for a name + passphrase; locally we still ask where to store the .db file.
+  const fields = [{ name: "display_name", label: "Namn (t.ex. Enskild firma 2026)" }];
+  if (!isServer()) fields.push({ name: "db_path", label: "Filsökväg (t.ex. C:\\bokforing\\firma.db)" });
+  fields.push({ name: "passphrase", label: "Lösenord", type: "password" });
+  const f = await modal("Ny bok", fields, "Skapa");
   if (!f) return;
+  if (isServer()) f.db_path = f.display_name || "book";   // ignored server-side; real path assigned there
   const rec = await api("POST", "/books", f);
   await loadBooks();
   state.activeBook = rec;
@@ -267,8 +293,65 @@ function renderHome() {
               onclick: () => guard(() => removeBookFlow(b)) }, "Ta bort"),
           ))),
   ));
+  v.appendChild(connectionPanel());
   v.appendChild(updatePanel());
   maybeAutoCheckUpdates();
+}
+
+// ---------------------------------------------------------------------------
+// Connection: use the app locally, or connect to a self-hosted BokYup server.
+// ---------------------------------------------------------------------------
+function renderConnectionChooser() {
+  const v = $("#view");
+  v.innerHTML = "";
+  v.appendChild(el("div", { class: "panel" },
+    el("h2", {}, "Hur vill du använda BokYup?"),
+    el("p", { class: "muted" },
+      "Lokalt: böckerna lagras på den här enheten. Server: anslut till din egen "
+      + "BokYup-server (t.ex. via Tailscale) — böckerna lagras där och kan nås från flera "
+      + "enheter. Du kan byta senare."),
+    el("div", { class: "row", style: "margin-top:12px" },
+      el("button", { class: "btn brand", onclick: () => guard(async () => {
+        saveConn({ mode: "local" }); await afterConnect();
+      }) }, "Använd lokalt"),
+      el("button", { class: "btn", style: "margin-left:8px",
+        onclick: () => guard(connectServerFlow) }, "Anslut till server"))));
+}
+
+async function connectServerFlow() {
+  const f = await modal("Anslut till BokYup-server", [
+    { name: "base", label: "Server-URL (t.ex. https://dator.tailnet.ts.net eller http://127.0.0.1:8756)",
+      value: (state.conn && state.conn.base) || "" },
+    { name: "token", label: "API-token", type: "password",
+      value: (state.conn && state.conn.token) || "" },
+  ], "Anslut");
+  if (!f) return;
+  const base = (f.base || "").trim().replace(/\/+$/, "");
+  if (!base) { toast("Ange en server-URL", true); return; }
+  const prev = state.conn;
+  state.conn = { mode: "server", base, token: (f.token || "").trim() };
+  try {
+    await api("GET", "/");            // reachable?
+    await api("GET", "/books");       // token valid? (401 if not)
+  } catch (e) {
+    state.conn = prev;                // revert; don't persist a broken connection
+    toast(e.status === 401 ? "Fel API-token." : ("Kunde inte nå servern: " + (e.message || e)), true);
+    return;
+  }
+  saveConn(state.conn);
+  toast("Ansluten till servern.");
+  await afterConnect();
+}
+
+function connectionPanel() {
+  const label = isServer() ? `Server: ${state.conn.base}` : "Lokalt (den här enheten)";
+  return el("div", { class: "panel", style: "margin-top:16px" },
+    el("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px" },
+      el("div", {}, el("div", { style: "font-weight:600" }, "Anslutning"),
+        el("div", { class: "muted", style: "font-size:13px" }, label)),
+      el("button", { class: "btn small ghost", onclick: () => guard(() => {
+        clearConn(); renderConnectionChooser();
+      }) }, "Byt anslutning")));
 }
 
 // ---------------------------------------------------------------------------
@@ -1221,12 +1304,7 @@ const SECTION_RENDERERS = {
     async function showLogo(has) {
       removeLogo.style.display = has ? "" : "none";
       if (!has) { logoImg.style.display = "none"; logoImg.removeAttribute("src"); return; }
-      if (window.__BOKYUP_NATIVE__) {
-        const r = await api("GET", `/books/${bid()}/logo`);
-        logoImg.src = `data:${r.media_type};base64,${r.base64}`;
-      } else {
-        logoImg.src = `/books/${bid()}/logo?t=${Date.now()}`;
-      }
+      logoImg.src = (await mediaUrl(`/books/${bid()}/logo?t=${Date.now()}`)).src;
       logoImg.style.display = "block";
     }
 
@@ -2921,14 +2999,8 @@ function recipientsEditor(opts) {
 // HTTP) builds a blob from the base64 the native bridge returns.
 async function showPdf(path, fname) {
   let src, revoke = null;
-  if (window.__BOKYUP_NATIVE__) {
-    const r = await api("GET", path);                 // { raw, base64, media_type }
-    const bytes = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0));
-    src = URL.createObjectURL(new Blob([bytes], { type: r.media_type || "application/pdf" }));
-    revoke = src;
-  } else {
-    src = API + path;                                 // same-origin; rendered inline
-  }
+  const m = await mediaUrl(path);
+  src = m.src; revoke = m.revoke;
   $("#modal-title").textContent = fname;
   const body = $("#modal-body");
   body.innerHTML = "";
@@ -3096,7 +3168,14 @@ function searchTable(placeholder, headers, items, matchFn, rowFn) {
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
+async function afterConnect() {
+  state.appVersion = await api("GET", "/").then((r) => r.version).catch(() => "");
+  await loadBooks();
+  renderHome();
+}
+
 (async function boot() {
+  state.conn = loadConn();
   try {
     // Phone build: wait for the in-process Python backend (Pyodide) to finish
     // loading before the first call. Desktop has no BokYupReady and skips this.
@@ -3105,10 +3184,10 @@ function searchTable(placeholder, headers, items, matchFn, rowFn) {
       if (v) v.appendChild(el("p", { class: "muted" }, "Startar bokföringsmotorn…"));
       await window.BokYupReady;
     }
-    state.appVersion = await api("GET", "/").then((r) => r.version).catch(() => "");
-    await loadBooks();
-    renderHome();
+    if (!state.conn) { renderConnectionChooser(); return; }   // first launch: ask local vs server
+    await afterConnect();
   } catch (e) {
     toast("Kunde inte nå servern: " + e.message, true);
+    renderConnectionChooser();
   }
 })();

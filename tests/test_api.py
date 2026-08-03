@@ -1183,3 +1183,40 @@ class TestBasKontonAndAddress:
         got = client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()
         cats = {ln["category_id"] for ln in got["lines"]}
         assert cats == {it, varor}
+
+
+# ---------------------------------------------------------------------------
+# Server mode (Phase 1): API token gate + server-side book placement
+# ---------------------------------------------------------------------------
+
+class TestServerMode:
+    def _server(self, tmp_path):
+        from backend.api import create_app
+        data = tmp_path / "srv"
+        return create_app(app_dir=data / "app", books_dir=data, api_token="SECRET",
+                          cors_origins=["*"], autolock_seconds=900), data
+
+    def test_token_gate(self, tmp_path):
+        app, _ = self._server(tmp_path)
+        with TestClient(app) as c:
+            assert c.get("/").status_code == 200                    # health open
+            assert c.get("/books").status_code == 401               # API needs token
+            assert c.get("/books", headers={"Authorization": "Bearer NOPE"}).status_code == 401
+            assert c.get("/books", headers={"Authorization": "Bearer SECRET"}).status_code == 200
+
+    def test_books_placed_under_server_dir(self, tmp_path):
+        app, data = self._server(tmp_path)
+        H = {"Authorization": "Bearer SECRET"}
+        with TestClient(app) as c:
+            r = c.post("/books", headers=H, json={"display_name": "Min Firma",
+                       "db_path": "/client/ignored/path.db", "passphrase": "pw"})
+            assert r.status_code == 201
+            dbp = r.json()["db_path"]
+            assert dbp.startswith(str((data / "books").resolve()))   # placed on the server
+            assert "ignored" not in dbp                              # client path ignored
+
+    def test_local_mode_unchanged(self, tmp_path):
+        from backend.api import create_app
+        app = create_app(app_dir=tmp_path / "local", autolock_seconds=900)
+        with TestClient(app) as c:
+            assert c.get("/books").status_code == 200                # no token needed locally

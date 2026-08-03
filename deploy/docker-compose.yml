@@ -1,0 +1,20 @@
+# BokYup self-hosted server.
+#   cd deploy && cp .env.example .env   # then set a strong BOKYUP_API_TOKEN
+#   docker compose up -d --build
+#
+# The port is bound to 127.0.0.1 only — NOT exposed on your LAN or the internet. Reach it
+# from your other devices over Tailscale (see docs/server.md), e.g.:
+#   tailscale serve --bg 8756
+services:
+  bokyup:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      BOKYUP_API_TOKEN: ${BOKYUP_API_TOKEN:?Set BOKYUP_API_TOKEN in deploy/.env}
+      BOKYUP_AUTOLOCK: ${BOKYUP_AUTOLOCK:-900}
+    volumes:
+      - ./bokyup-data:/data          # books live here — back this up
+    ports:
+      - "127.0.0.1:8756:8756"        # localhost only; publish via Tailscale, not 0.0.0.0
+    restart: unless-stopped

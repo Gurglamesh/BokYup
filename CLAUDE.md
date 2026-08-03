@@ -623,6 +623,27 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       `phone/assets/icon-only|foreground|background.png` → `@capacitor/assets generate
       --android` in the release workflow. This is the app/brand icon, separate from the
       per-book company logo on invoices.
+- [~] **Self-hosted online mode (branch `claude/bokyup-server`, Phase 1, 2026-07).**
+      DELIBERATELY REVISITS three earlier decisions on this branch only (kept out of main
+      until proven): "single authoritative *device*" → **single authoritative *server***;
+      "no server / localhost-only" → an opt-in networked server; phone stays local-first.
+      Model: the **server is the sole writer/authority** (verifikationsnummer integrity
+      preserved), clients connect over a secure channel (Tailscale first, TLS/public later),
+      the DEK lives in server RAM while a book is unlocked (same trust boundary as the
+      desktop, just networked; encrypted at rest). Phase 1 (additive — local mode is
+      byte-for-byte unchanged, no schema change): `create_app(api_token=, cors_origins=,
+      books_dir=)` adds a bearer-token gate (static UI + `/` stay open) + CORS; `backend/
+      server.py` headless run-mode (refuses to start without `BOKYUP_API_TOKEN`; books
+      placed under one server dir, clients send a *name* not a path); `deploy/` Docker
+      (127.0.0.1-bound, Tailscale-published) + `docs/server.md`. Client: `app.js` gained a
+      connection layer (`state.conn` local vs server, `apiBase`/`authHeaders`, media via
+      authed blob URLs) + a launch chooser "Använd lokalt / Anslut till server" + a "Byt
+      anslutning" panel; `newBookFlow` hides the path field in server mode. Tests pass (327;
+      token gate, server-side placement, local-mode-unchanged); browser-smoke-tested
+      (connect → create book on server → token-authed writes persist). **Phase 2 (next):**
+      live per-device encrypted replica + freshness dates + offline read-only + restore-
+      from-device. **Later:** per-book Local↔Server switch, easy installers, internet TLS.
+      Known Phase-1 gap: import-to-server needs a bundle upload (local import unaffected).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

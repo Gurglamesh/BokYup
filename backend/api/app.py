@@ -42,7 +42,14 @@ DEFAULT_SWEEP_INTERVAL = 60
 def create_app(app_dir: str | Path | None = None,
                autolock_seconds: int = DEFAULT_AUTOLOCK_SECONDS,
                sweep_interval: int = DEFAULT_SWEEP_INTERVAL,
-               serve_ui: bool = True) -> FastAPI:
+               serve_ui: bool = True,
+               api_token: str | None = None,
+               cors_origins: list[str] | None = None,
+               books_dir: str | Path | None = None) -> FastAPI:
+    """Build the app. Local/desktop passes no api_token (open on localhost, unchanged).
+    The self-hosted server passes api_token (bearer-token gate on the API), cors_origins
+    (for non-same-origin app clients) and books_dir (all books placed under one server
+    directory; clients supply a name, never a server path)."""
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         task = asyncio.create_task(_autolock_sweeper(app))
@@ -54,10 +61,34 @@ def create_app(app_dir: str | Path | None = None,
     app = FastAPI(title="BokYup API", version=APP_VERSION, lifespan=lifespan)
     manager = DatabaseManager(Path(app_dir)) if app_dir else DatabaseManager()
     facade = AppFacade(manager, autolock_seconds)
+    facade.books_dir = str(Path(books_dir).resolve()) if books_dir else None
     app.state.facade = facade
     app.state.manager = manager                  # kept for direct access / tests
     app.state.last_activity = facade.last_activity
     app.state.sweep_interval = sweep_interval
+
+    # CORS for app clients on a different origin (desktop/phone). Token-gated (no cookies),
+    # so origins may be permissive. Only added when explicitly configured (server mode).
+    if cors_origins:
+        from fastapi.middleware.cors import CORSMiddleware
+        app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_methods=["*"],
+                           allow_headers=["*"], allow_credentials=False)
+
+    # API token gate (server mode). The static UI (/app) and the health root (/) stay open
+    # so a client can load + probe; every API route requires the bearer token.
+    if api_token:
+        import hmac
+
+        @app.middleware("http")
+        async def _require_token(request: Request, call_next):
+            path = request.url.path
+            if request.method == "OPTIONS" or path == "/" or path.startswith("/app"):
+                return await call_next(request)
+            got = request.headers.get("authorization", "")
+            if not hmac.compare_digest(got, f"Bearer {api_token}"):
+                return JSONResponse(status_code=401,
+                                    content={"detail": "Ogiltig eller saknad API-token"})
+            return await call_next(request)
 
     _register_exception_handlers(app)
     app.include_router(_build_router())
