@@ -1350,3 +1350,13 @@ class TestServerMode:
         app = create_app(app_dir=tmp_path / "local", autolock_seconds=900)
         with TestClient(app) as c:
             assert c.get("/books").status_code == 200                # no token needed locally
+
+    def test_read_token_from_env_or_file(self, tmp_path):
+        from backend.server import read_token
+        assert read_token({"BOKYUP_API_TOKEN": "  abc  "}) == "abc"   # env wins, trimmed
+        tf = tmp_path / "token"
+        tf.write_text("filesecret\n")
+        assert read_token({"BOKYUP_API_TOKEN_FILE": str(tf)}) == "filesecret"
+        # env takes priority over the file
+        assert read_token({"BOKYUP_API_TOKEN": "envtok", "BOKYUP_API_TOKEN_FILE": str(tf)}) == "envtok"
+        assert read_token({}) == ""                                  # nothing set -> refuse

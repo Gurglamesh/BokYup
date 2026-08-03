@@ -9,8 +9,10 @@ clients supply a name, never a server path. Intended to sit behind Tailscale fir
     BOKYUP_API_TOKEN=<secret>  BOKYUP_DATA_DIR=/data  python -m backend.server
 
 Environment:
-    BOKYUP_API_TOKEN   (required) bearer token every client must send. Refuses to start
-                       without one, so the server is never accidentally open.
+    BOKYUP_API_TOKEN   bearer token every client must send. Refuses to start without a
+                       token (from here or the file below), so it is never accidentally open.
+    BOKYUP_API_TOKEN_FILE  (alternative) path to a file containing the token — for secret
+                       managers (agenix/sops, systemd LoadCredential) so it stays off the env.
     BOKYUP_DATA_DIR    where the registry + books live (default: ./bokyup-data)
     BOKYUP_HOST        bind address (default 0.0.0.0)
     BOKYUP_PORT        port (default 8756)
@@ -25,12 +27,26 @@ import sys
 from pathlib import Path
 
 
+def read_token(env=os.environ) -> str:
+    """The API token, from BOKYUP_API_TOKEN or (secret-manager friendly) the file named
+    by BOKYUP_API_TOKEN_FILE — so the secret never has to live in the environment or the
+    Nix store. Returns "" if neither is set (the server then refuses to start)."""
+    token = env.get("BOKYUP_API_TOKEN", "").strip()
+    if token:
+        return token
+    token_file = env.get("BOKYUP_API_TOKEN_FILE", "").strip()
+    if token_file and Path(token_file).exists():
+        return Path(token_file).read_text(encoding="utf-8").strip()
+    return ""
+
+
 def main() -> None:
-    token = os.environ.get("BOKYUP_API_TOKEN", "").strip()
+    token = read_token()
     if not token:
         sys.stderr.write(
-            "ERROR: BOKYUP_API_TOKEN is required — the server refuses to run without a token\n"
-            "so it is never accidentally open. Generate one with:\n"
+            "ERROR: an API token is required — the server refuses to run without one\n"
+            "so it is never accidentally open. Set BOKYUP_API_TOKEN, or point\n"
+            "BOKYUP_API_TOKEN_FILE at a file containing the token. Generate one with:\n"
             "  python -c \"import secrets; print(secrets.token_urlsafe(32))\"\n")
         raise SystemExit(2)
 
