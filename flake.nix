@@ -3,7 +3,9 @@
 
   # The server is the SAME backend as the app (single-sourced — a legal book must not run
   # divergent schema/verifikationsnummer logic), packaged here as an opt-in flake output.
-  # It runs ISOLATED IN A CONTAINER via a Nix-built OCI image + virtualisation.oci-containers.
+  # Run it however suits the host: services.bokyup-server.runtime = "docker" (default; a
+  # Nix-built OCI image via virtualisation.oci-containers, Docker enabled for you), "podman",
+  # or "native" (the server directly as a systemd service, no container).
   # Consume it from your system flake:
   #
   #   inputs.bokyup.url = "github:gurglamesh/bokyup";
@@ -68,9 +70,12 @@
         default = bokyup-server;
       });
 
-      # The NixOS service module, with the container image pre-wired to this flake's build.
+      # The NixOS service module, with both run-modes pre-wired to this flake's build:
+      # the launcher (native runtime) and the OCI image (docker/podman runtime).
       nixosModules.bokyup-server = { pkgs, lib, ... }: {
         imports = [ ./deploy/nixos/bokyup-server-module.nix ];
+        services.bokyup-server.package =
+          lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.bokyup-server;
         services.bokyup-server.imageFile =
           lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.container;
       };

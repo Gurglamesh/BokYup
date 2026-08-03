@@ -41,23 +41,33 @@ In your **system flake** (`/etc/nixos/flake.nix` or wherever your config lives):
 }
 ```
 
-The BokYup module does **not** install Docker — it runs the server as an oci-container on
-whatever backend you declare (and asserts one is enabled, so you get a clear error if not).
-Keep the runtime a separate concern in your own `server-tools.nix` (see
-`deploy/nixos/servertools.nix` for a ready one):
+BokYup is **runtime-agnostic** — you choose how to run it with `services.bokyup-server.runtime`:
+
+| `runtime` | what it does |
+| --------- | ------------ |
+| `"docker"` (default) | runs the Nix-built OCI image isolated in a container; **installs + enables Docker for you** if it isn't already |
+| `"podman"` | same, on Podman (enabled for you) |
+| `"native"` | runs the Python server directly as a systemd service — **no container runtime at all** |
+
+So on the container path you don't declare Docker yourself; `enable = true` is enough. The one
+thing you still bring is **Tailscale** (to reach the loopback-bound server). Keep that a
+separate concern in your own `server-tools.nix` (see `deploy/nixos/servertools.nix`):
 
 ```nix
 # server-tools.nix
 { config, pkgs, ... }:
 {
-  virtualisation.docker.enable = true;
   services.tailscale.enable = true;
   networking.firewall = {
     trustedInterfaces = [ "tailscale0" ];
     allowedUDPPorts = [ config.services.tailscale.port ];
   };
+  # Already run your own Docker? Declaring virtualisation.docker.enable = true here is fine —
+  # it just merges with what runtime = "docker" sets.
 }
 ```
+
+Don't want a container at all? Set `runtime = "native"` — nothing Docker/Podman gets pulled in.
 
 ## 2. The API token
 

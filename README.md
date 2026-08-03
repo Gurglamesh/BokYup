@@ -31,6 +31,45 @@ By default the registry of books lives in `~/.buyn` (override with the
 `.db.key`; there is no app-level password — every book is unlocked individually
 with its own passphrase, and idle books auto-lock (default 15 min).
 
+## Server (self-hosted, NixOS)
+
+BokYup can run as a self-hosted **authority server** that holds the encrypted books, so
+several devices share one set of books while the server stays the sole writer (this is what
+keeps the verifikationsnummer sequence unbroken). It is the **same backend** as the app —
+never a forked copy — packaged as a flake output and run **isolated in a Docker container**
+built by Nix. **NixOS with flakes is the supported install path** (the only one we currently
+focus on); a plain `docker compose` variant is noted in `docs/server-nixos.md`.
+
+Point your system flake at this repo and import the module:
+
+```nix
+# flake.nix inputs
+bokyup.url = "github:gurglamesh/bokyup";
+bokyup.inputs.nixpkgs.follows = "nixpkgs";
+
+# in your host's modules
+imports = [ inputs.bokyup.nixosModules.bokyup-server ];
+services.bokyup-server.enable = true;      # Docker + a 0600 API token are set up for you
+```
+
+Then bring Tailscale to reach it (the server binds to `127.0.0.1` only):
+
+```bash
+sudo nixos-rebuild switch --flake .#<yourhost>
+sudo cat /var/lib/bokyup-token        # the API token the app logs in with
+sudo tailscale serve --bg 8756        # publish over your tailnet (HTTPS, no open ports)
+```
+
+In the app: **Anslut till server** → the `https://<host>.<tailnet>.ts.net` URL + that token.
+
+BokYup stays **runtime-agnostic** — `services.bokyup-server.runtime` picks how it runs:
+`"docker"` (default; a Nix-built OCI image, and Docker is installed/enabled for you),
+`"podman"`, or `"native"` (the server directly as a systemd service, no container). Other
+niceties: a declaratively generated API token kept **out of the Nix store** (`generateToken`,
+or point `tokenFile` at an agenix/sops secret), books under `/var/lib/bokyup`, and an optional
+nightly consistent backup (`backup.enable`). **Full walkthrough:
+[`docs/server-flake.md`](docs/server-flake.md).**
+
 ## What works now
 - **Encryption** — per-database envelope encryption (Argon2id KEK wrapping a stable
   DEK), passphrase change with no data re-encryption, optional offline recovery key,
