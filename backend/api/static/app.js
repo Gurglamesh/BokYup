@@ -309,6 +309,11 @@ function renderUpdateResult(info, manual) {
     if (manual) result.appendChild(el("p", { class: "muted" }, "Kunde inte kontrollera uppdateringar (offline?)."));
     return;
   }
+  if (info.no_releases) {
+    if (manual) result.appendChild(el("p", { class: "muted" },
+      "Inga releaser är publicerade ännu – det finns inget att uppdatera till."));
+    return;
+  }
   if (!info.update_available) {
     if (manual) result.appendChild(el("p", { class: "muted" },
       "Du har den senaste versionen (" + (info.current || state.appVersion || "") + ")."));

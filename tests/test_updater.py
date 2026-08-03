@@ -60,6 +60,17 @@ def test_check_for_update_offline_is_soft(monkeypatch):
     assert info["update_available"] is False and "error" in info
 
 
+def test_check_for_update_no_releases_is_distinct_from_offline(monkeypatch):
+    import urllib.error
+    def not_found(*a, **k):
+        raise urllib.error.HTTPError("url", 404, "Not Found", {}, None)
+    monkeypatch.setattr(updater, "fetch_latest_release", not_found)
+    info = updater.check_for_update(current="0.1.0")
+    # A repo with no published release must NOT look like an offline error.
+    assert info["update_available"] is False
+    assert info.get("no_releases") is True and "error" not in info
+
+
 def test_check_for_update_success(monkeypatch):
     monkeypatch.setattr(updater, "fetch_latest_release", lambda *a, **k: _release())
     info = updater.check_for_update(current="0.1.0")

@@ -88,12 +88,20 @@ def fetch_latest_release(repo: str = GITHUB_REPO, timeout: float = 8.0) -> dict:
 
 
 def check_for_update(repo: str = GITHUB_REPO, current: str | None = None) -> dict:
-    """Fetch the latest release and evaluate it. Never raises — network errors come back
-    as {'error': ...} so the UI can show a soft message."""
+    """Fetch the latest release and evaluate it. Never raises — a real network problem
+    comes back as {'error': ...}; a repo that simply has no published release yet comes
+    back as {'no_releases': True} (GitHub's /releases/latest 404s in that case) so the UI
+    can tell "offline" apart from "nothing published yet"."""
+    import urllib.error
     cur = current or current_version()
     try:
         release = fetch_latest_release(repo)
-    except Exception as exc:                       # offline / rate-limited / no releases
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:                        # repo exists but has no published release
+            return {"current": cur, "update_available": False, "no_releases": True,
+                    "frozen": is_frozen()}
+        return {"current": cur, "update_available": False, "error": str(exc)}
+    except Exception as exc:                        # offline / DNS / TLS / rate-limited
         return {"current": cur, "update_available": False, "error": str(exc)}
     info = evaluate_release(release, cur)
     info["frozen"] = is_frozen()                   # can we self-update in-app?
