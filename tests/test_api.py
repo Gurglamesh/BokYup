@@ -1117,6 +1117,136 @@ class TestArticles:
         assert client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()["ex_moms_ore"] == 90000
 
 
+class TestExpenseDrafts:
+    def test_expense_draft_crud(self, client, book):
+        sup = client.post(f"/books/{book}/suppliers", json={"name": "Inet"}).json()["id"]
+        payload = {"supplier_id": sup, "trans_date": "2026-05-01",
+                   "items": [{"description": "Router", "quantity_centi": 100,
+                              "unit_cost_ore": 60000, "rate_code": "25"}]}
+        d = client.post(f"/books/{book}/expense-drafts", json={"payload": payload})
+        assert d.status_code == 201
+        did = d.json()["id"]
+        lst = client.get(f"/books/{book}/expense-drafts").json()
+        assert len(lst) == 1 and lst[0]["supplier_id"] == sup
+        got = client.get(f"/books/{book}/expense-drafts/{did}").json()
+        assert got["payload"]["items"][0]["description"] == "Router"
+        assert client.delete(f"/books/{book}/expense-drafts/{did}").status_code == 200
+        assert client.get(f"/books/{book}/expense-drafts").json() == []
+
+
+class TestCustomerDelete:
+    def test_delete_customer_keeps_invoice(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Tjänst", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "Acme AB"}).json()["kundnummer"]
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "X", "quantity_centi": 100, "unit_price_ore": 10000,
+                       "rate_code": "25"}]}).json()
+        r = client.delete(f"/books/{book}/customers/{kid}")
+        assert r.status_code == 200 and r.json()["deleted"] is True
+        assert all(c["kundnummer"] != kid for c in client.get(f"/books/{book}/customers").json())
+        # invoice kept with its frozen buyer, link detached
+        got = client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()
+        assert got["customer_id"] is None and got["buyer"]["company_name"] == "Acme AB"
+
+
+class TestStock:
+    def _art(self, client, book):
+        return client.post(f"/books/{book}/articles", json={
+            "description": "Router", "prefix": "1000", "unit_price_ore": 100000}).json()["id"]
+
+    def test_add_batch_and_list_stock(self, client, book):
+        aid = self._art(client, book)
+        r = client.post(f"/books/{book}/stock", json={
+            "article_id": aid, "qty_centi": 500, "unit_cost_ore": 60000,
+            "received_date": "2026-03-01"})
+        assert r.status_code == 201 and r.json()["batch_number"] == 1
+        stock = client.get(f"/books/{book}/stock").json()
+        assert len(stock) == 1 and stock[0]["qty_remaining_centi"] == 500
+        batches = client.get(f"/books/{book}/articles/{aid}/batches").json()
+        assert batches[0]["unit_cost_ore"] == 60000
+
+    def test_invoice_picks_batch_and_reports_margin(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Försäljning", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "X AB"}).json()["kundnummer"]
+        aid = self._art(client, book)
+        bid = client.post(f"/books/{book}/stock", json={
+            "article_id": aid, "qty_centi": 500, "unit_cost_ore": 60000}).json()["id"]
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "Router", "quantity_centi": 200, "unit_price_ore": 100000,
+                       "rate_code": "25", "article_id": aid, "stock_batch_id": bid}]}).json()
+        got = client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()
+        assert got["cost_ore"] == 120000 and got["margin_ore"] == 80000
+        # stock consumed
+        assert client.get(f"/books/{book}/articles/{aid}/batches").json()[0]["qty_remaining_centi"] == 300
+
+    def test_delete_untouched_batch(self, client, book):
+        aid = self._art(client, book)
+        bid = client.post(f"/books/{book}/stock", json={
+            "article_id": aid, "qty_centi": 500, "unit_cost_ore": 60000}).json()["id"]
+        assert client.delete(f"/books/{book}/stock/{bid}").status_code == 200
+        assert client.get(f"/books/{book}/stock").json() == []
+
+    def test_inkop_items_create_articles_and_batches(self, client, book):
+        prod = client.post(f"/books/{book}/categories",
+                           json={"name": "Nätverk", "kind": "income", "bas_konto": 3001,
+                                 "prefix": "0007"}).json()["id"]
+        expcat = client.post(f"/books/{book}/categories",
+                             json={"name": "Inköp varor", "kind": "expense", "bas_konto": 4010}).json()["id"]
+        # An inköp with line-items: one stocked article + one pure cost line (no name).
+        res = client.post(f"/books/{book}/expenses", json={
+            "category_id": expcat, "trans_date": "2026-05-01", "paid_date": "2026-05-01",
+            "items": [
+                {"description": "Router X", "category_id": prod, "quantity_centi": 500,
+                 "unit_cost_ore": 60000, "rate_code": "25"},
+                {"description": "", "quantity_centi": 100, "unit_cost_ore": 5000, "rate_code": "25"},
+            ]}).json()
+        assert len(res["batches"]) == 1                       # only the named line stocked
+        aid = res["batches"][0]["article_id"]
+        art = [a for a in client.get(f"/books/{book}/articles").json() if a["id"] == aid][0]
+        assert art["article_number"].startswith("0007-")      # article uses product prefix
+        stock = client.get(f"/books/{book}/stock").json()
+        assert stock[0]["qty_remaining_centi"] == 500
+        # buying the same article again adds a 2nd batch to the SAME article
+        res2 = client.post(f"/books/{book}/expenses", json={
+            "category_id": expcat, "trans_date": "2026-06-01", "paid_date": "2026-06-01",
+            "items": [{"description": "Router X", "category_id": prod, "quantity_centi": 300,
+                       "unit_cost_ore": 65000, "rate_code": "25"}]}).json()
+        assert res2["batches"][0]["article_id"] == aid
+        assert res2["batches"][0]["batch_number"] == 2
+        assert client.get(f"/books/{book}/stock").json()[0]["qty_remaining_centi"] == 800
+
+    def test_subcategory_inherits_and_cycle_guard(self, client, book):
+        parent = client.post(f"/books/{book}/categories",
+                             json={"name": "Hårdvara", "kind": "income", "bas_konto": 3010,
+                                   "default_rate_code": "25"}).json()["id"]
+        # subcategory: omit kind + bas_konto -> inherited from parent
+        sub = client.post(f"/books/{book}/categories",
+                          json={"name": "Nätverk", "parent_id": parent}).json()["id"]
+        cats = {c["id"]: c for c in client.get(f"/books/{book}/categories").json()}
+        assert cats[sub]["parent_id"] == parent
+        assert cats[sub]["kind"] == "income" and cats[sub]["bas_konto"] == 3010
+        # reparent the parent under its own child -> cycle -> 409
+        r = client.patch(f"/books/{book}/categories/{parent}", json={"parent_id": sub})
+        assert r.status_code == 409
+
+    def test_next_prefix_and_duplicate_rejected(self, client, book):
+        p = client.get(f"/books/{book}/categories/next-prefix").json()["prefix"]
+        assert p == "0000"
+        client.post(f"/books/{book}/categories",
+                    json={"name": "A", "kind": "income", "bas_konto": 3001, "prefix": "0500"})
+        dup = client.post(f"/books/{book}/categories",
+                          json={"name": "B", "kind": "income", "bas_konto": 3002, "prefix": "0500"})
+        assert dup.status_code == 409          # prefix in use -> InvalidState
+
+
 class TestBasKontonAndAddress:
     def test_accounts_endpoint_lists_system_konton(self, client, book):
         client.post(f"/books/{book}/categories",

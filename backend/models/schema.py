@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 30
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -104,6 +104,8 @@ CREATE TABLE category (
     bas_konto  INTEGER NOT NULL REFERENCES account(bas_konto),
     default_rate_code TEXT CHECK (default_rate_code IN
                        ('25','12','6','0','momsfri','ej_avdragsgill')),  -- default moms
+    prefix     TEXT UNIQUE,   -- unique 4-digit article-number prefix (articles: <prefix>-XXXX)
+    parent_id  INTEGER REFERENCES category(id),  -- NULL = top-level; else a subcategory
     active     INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
 );
@@ -189,6 +191,7 @@ CREATE TABLE transaktion (
     receipt_original_format TEXT CHECK (receipt_original_format IN ('paper','digital')),
     note                   TEXT,
     ext_ref                TEXT,        -- supplier's kvitto-/fakturanummer (purchases)
+    ores_rounding          INTEGER NOT NULL DEFAULT 0,  -- supplier rounded the total to whole krona
     created_at             TEXT NOT NULL
 );
 
@@ -209,7 +212,7 @@ CREATE TABLE moms_line (
 CREATE TABLE rut_claim (
     id                        INTEGER PRIMARY KEY AUTOINCREMENT,
     transaktion_id            INTEGER NOT NULL REFERENCES transaktion(id),
-    customer_id               INTEGER NOT NULL REFERENCES customer(kundnummer),
+    customer_id               INTEGER REFERENCES customer(kundnummer),  -- NULL if the customer card was deleted
     rut_amount_ore            INTEGER NOT NULL,
     state                     TEXT NOT NULL DEFAULT 'pending'
                               CHECK (state IN ('pending','customer_paid','skatteverket_paid')),
@@ -336,6 +339,15 @@ CREATE TABLE invoice_draft (
     updated_at  TEXT NOT NULL
 );
 
+-- ----- inköp (purchase) drafts: save an unbooked inköp and continue later ----
+CREATE TABLE expense_draft (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    supplier_id INTEGER,                          -- for the list view (nullable while editing)
+    payload_enc TEXT NOT NULL,                    -- AES-256-GCM(DEK) JSON of the form inputs
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
 -- ----- invoice line items (articles) -------------------------------------
 CREATE TABLE invoice_line (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -352,6 +364,8 @@ CREATE TABLE invoice_line (
     reduction_type TEXT CHECK (reduction_type IN ('rut','rot')),  -- husavdrag kind (NULL = none)
     article_id     INTEGER REFERENCES article(id),    -- catalog article this line came from
     discount_pct_centi INTEGER NOT NULL DEFAULT 0,    -- per-line % rabatt * 100 (15 % -> 1500)
+    stock_batch_id INTEGER REFERENCES stock_batch(id),-- picked stock batch (for real margin)
+    cost_ore       INTEGER NOT NULL DEFAULT 0,        -- frozen inköpskostnad for this line (margin)
     ex_moms_ore    INTEGER NOT NULL,                  -- line total ex moms, AFTER discount
     moms_ore       INTEGER NOT NULL
 );
@@ -372,6 +386,26 @@ CREATE TABLE article (
     active         INTEGER NOT NULL DEFAULT 1,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
+);
+
+-- ----- stock (lager): each buy-in of an article creates a BATCH with its own cost.
+-- Buying the same article again adds a new batch, so one article can carry several
+-- costs. The batch_number is a global sequential label shown in the Lager tab. When an
+-- invoice line picks a batch, qty_remaining_centi is decremented so on-hand stock and
+-- the real margin (revenue − batch cost) fall out. Pure tracking — no ledger impact.
+CREATE TABLE stock_batch (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_number            INTEGER NOT NULL,           -- sequential WITHIN the article
+    article_id              INTEGER NOT NULL REFERENCES article(id),
+    qty_in_centi            INTEGER NOT NULL,           -- quantity bought in * 100
+    qty_remaining_centi     INTEGER NOT NULL,           -- decremented as it is sold
+    unit_cost_ore           INTEGER NOT NULL,           -- ex-moms inköpspris per unit
+    supplier_id             INTEGER REFERENCES supplier(id),        -- optional source supplier
+    purchase_transaktion_id INTEGER REFERENCES transaktion(id),     -- optional linked inköp
+    received_date           TEXT NOT NULL,
+    note                    TEXT,
+    created_at              TEXT NOT NULL,
+    UNIQUE (article_id, batch_number)   -- full batch id = article_number + batch_number
 );
 
 -- ----- RUT/ROT recipients: a household can split the skattereduktion across ----
@@ -444,6 +478,7 @@ CREATE INDEX idx_invoice_line_inv    ON invoice_line(invoice_id);
 CREATE INDEX idx_rut_recipient_inv   ON rut_recipient(invoice_id);
 CREATE INDEX idx_invoice_event_inv   ON invoice_event(invoice_id);
 CREATE INDEX idx_support_ledger_cust ON support_ledger(customer_id);
+CREATE INDEX idx_stock_batch_article ON stock_batch(article_id);
 """
 
 # ---------------------------------------------------------------------------
@@ -810,6 +845,103 @@ _MIGRATIONS: dict[int, str] = {
     """,
     24: """
         ALTER TABLE offert ADD COLUMN invoice_id INTEGER REFERENCES invoice(id);
+    """,
+    25: """
+        CREATE TABLE IF NOT EXISTS stock_batch (
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_number            INTEGER NOT NULL UNIQUE,
+            article_id              INTEGER NOT NULL REFERENCES article(id),
+            qty_in_centi            INTEGER NOT NULL,
+            qty_remaining_centi     INTEGER NOT NULL,
+            unit_cost_ore           INTEGER NOT NULL,
+            supplier_id             INTEGER REFERENCES supplier(id),
+            purchase_transaktion_id INTEGER REFERENCES transaktion(id),
+            received_date           TEXT NOT NULL,
+            note                    TEXT,
+            created_at              TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_stock_batch_article ON stock_batch(article_id);
+        ALTER TABLE invoice_line ADD COLUMN stock_batch_id INTEGER;
+        ALTER TABLE invoice_line ADD COLUMN cost_ore INTEGER NOT NULL DEFAULT 0;
+    """,
+    26: """
+        ALTER TABLE category ADD COLUMN prefix TEXT;
+        UPDATE category SET prefix = printf('%04d',
+            (SELECT COUNT(*) FROM category c2 WHERE c2.id <= category.id) - 1)
+            WHERE prefix IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_category_prefix ON category(prefix);
+        DROP INDEX IF EXISTS idx_stock_batch_article;
+        ALTER TABLE stock_batch RENAME TO stock_batch_old;
+        CREATE TABLE stock_batch (
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_number            INTEGER NOT NULL,
+            article_id              INTEGER NOT NULL REFERENCES article(id),
+            qty_in_centi            INTEGER NOT NULL,
+            qty_remaining_centi     INTEGER NOT NULL,
+            unit_cost_ore           INTEGER NOT NULL,
+            supplier_id             INTEGER REFERENCES supplier(id),
+            purchase_transaktion_id INTEGER REFERENCES transaktion(id),
+            received_date           TEXT NOT NULL,
+            note                    TEXT,
+            created_at              TEXT NOT NULL,
+            UNIQUE (article_id, batch_number)
+        );
+        INSERT INTO stock_batch (id, batch_number, article_id, qty_in_centi,
+            qty_remaining_centi, unit_cost_ore, supplier_id, purchase_transaktion_id,
+            received_date, note, created_at)
+            SELECT o.id,
+                (SELECT COUNT(*) FROM stock_batch_old b2
+                     WHERE b2.article_id = o.article_id AND b2.id <= o.id),
+                o.article_id, o.qty_in_centi, o.qty_remaining_centi, o.unit_cost_ore,
+                o.supplier_id, o.purchase_transaktion_id, o.received_date, o.note, o.created_at
+            FROM stock_batch_old o;
+        DROP TABLE stock_batch_old;
+        CREATE INDEX IF NOT EXISTS idx_stock_batch_article ON stock_batch(article_id);
+    """,
+    27: """
+        ALTER TABLE category ADD COLUMN parent_id INTEGER REFERENCES category(id);
+    """,
+    28: """
+        DROP INDEX IF EXISTS idx_rut_state;
+        ALTER TABLE rut_claim RENAME TO rut_claim_old;
+        CREATE TABLE rut_claim (
+            id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaktion_id            INTEGER NOT NULL REFERENCES transaktion(id),
+            customer_id               INTEGER REFERENCES customer(kundnummer),
+            rut_amount_ore            INTEGER NOT NULL,
+            state                     TEXT NOT NULL DEFAULT 'pending'
+                                      CHECK (state IN ('pending','customer_paid','skatteverket_paid')),
+            customer_payment_date     TEXT,
+            skatteverket_payment_date TEXT,
+            skatteverket_verifikation_id INTEGER REFERENCES verifikation(id),
+            skatteverket_received_ore INTEGER,
+            shortfall_invoice_id      INTEGER REFERENCES invoice(id),
+            skatteverket_reference    TEXT,
+            claim_year                INTEGER NOT NULL,
+            created_at                TEXT NOT NULL
+        );
+        INSERT INTO rut_claim (id, transaktion_id, customer_id, rut_amount_ore, state,
+            customer_payment_date, skatteverket_payment_date, skatteverket_verifikation_id,
+            skatteverket_received_ore, shortfall_invoice_id, skatteverket_reference,
+            claim_year, created_at)
+            SELECT id, transaktion_id, customer_id, rut_amount_ore, state,
+                customer_payment_date, skatteverket_payment_date, skatteverket_verifikation_id,
+                skatteverket_received_ore, shortfall_invoice_id, skatteverket_reference,
+                claim_year, created_at FROM rut_claim_old;
+        DROP TABLE rut_claim_old;
+        CREATE INDEX IF NOT EXISTS idx_rut_state ON rut_claim(state);
+    """,
+    29: """
+        ALTER TABLE transaktion ADD COLUMN ores_rounding INTEGER NOT NULL DEFAULT 0;
+    """,
+    30: """
+        CREATE TABLE IF NOT EXISTS expense_draft (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            supplier_id INTEGER,
+            payload_enc TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
     """,
 }
 

@@ -225,11 +225,15 @@ class AppFacade:
         ops = self._ops(p["book_id"])
         # `used` flags categories already touched by the books (cannot be deleted).
         return _rows(ops,
-                     "SELECT id, name, kind, bas_konto, default_rate_code, active, "
+                     "SELECT id, name, kind, bas_konto, default_rate_code, prefix, parent_id, active, "
                      "(EXISTS(SELECT 1 FROM transaktion t WHERE t.category_id=category.id) "
                      " OR EXISTS(SELECT 1 FROM moms_line m WHERE m.category_id=category.id) "
                      " OR EXISTS(SELECT 1 FROM invoice_line il WHERE il.category_id=category.id)) "
                      "AS used FROM category ORDER BY bas_konto")
+
+    def h_next_prefix(self, p, b, q):
+        """Suggest the lowest unused 4-digit category prefix (for the create form)."""
+        return {"prefix": self._ops(p["book_id"])._next_unused_prefix()}
 
     def h_list_accounts(self, p, b, q):
         """All BAS-konton, each tagged with whether it is a system account (the
@@ -246,9 +250,10 @@ class AppFacade:
 
     def h_create_category(self, p, b, q):
         ops = self._ops(p["book_id"])
-        cid = ops.create_category(b["name"], b["kind"], b["bas_konto"],
-                                  b.get("account_name"), b.get("default_rate_code"))
-        return {"id": cid}
+        cid = ops.create_category(b["name"], b.get("kind"), b.get("bas_konto"),
+                                  b.get("account_name"), b.get("default_rate_code"),
+                                  prefix=b.get("prefix"), parent_id=b.get("parent_id"))
+        return {"id": cid, "prefix": ops._category_prefix(cid)}
 
     def h_update_category(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -265,7 +270,7 @@ class AppFacade:
 
     def h_create_article(self, p, b, q):
         return self._ops(p["book_id"]).create_article(
-            b["description"], b["prefix"], unit_price_ore=b.get("unit_price_ore", 0),
+            b["description"], b.get("prefix"), unit_price_ore=b.get("unit_price_ore", 0),
             rate_code=b.get("rate_code", "25"), reduction_type=b.get("reduction_type"),
             category_id=b.get("category_id"), unit=b.get("unit"))
 
@@ -276,6 +281,26 @@ class AppFacade:
 
     def h_delete_article(self, p, b, q):
         self._ops(p["book_id"]).delete_article(int(p["article_id"]))
+        return {"deleted": True}
+
+    # ---- stock / lager ----
+    def h_list_stock(self, p, b, q):
+        return self._ops(p["book_id"]).list_stock(
+            include_empty=str(q.get("include_empty", "")).lower() in ("1", "true"))
+
+    def h_list_article_batches(self, p, b, q):
+        return self._ops(p["book_id"]).list_article_batches(
+            int(p["article_id"]),
+            open_only=str(q.get("open_only", "")).lower() in ("1", "true"))
+
+    def h_add_stock_batch(self, p, b, q):
+        return self._ops(p["book_id"]).add_stock_batch(
+            int(b["article_id"]), int(b["qty_centi"]), int(b["unit_cost_ore"]),
+            received_date=b.get("received_date"), supplier_id=b.get("supplier_id"),
+            purchase_transaktion_id=b.get("purchase_transaktion_id"), note=b.get("note"))
+
+    def h_delete_stock_batch(self, p, b, q):
+        self._ops(p["book_id"]).delete_stock_batch(int(p["batch_id"]))
         return {"deleted": True}
 
     # ---- reference: customers ----
@@ -318,6 +343,9 @@ class AppFacade:
         ops.update_customer(int(p["kundnummer"]), **_clean(b))
         return {"kundnummer": int(p["kundnummer"])}
 
+    def h_delete_customer(self, p, b, q):
+        return self._ops(p["book_id"]).delete_customer(int(p["kundnummer"]))
+
     # ---- customer household relations (for RUT/ROT recipients) ----
     def h_list_customer_relations(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -359,11 +387,53 @@ class AppFacade:
     # ---- bookkeeping ----
     def h_record_expense(self, p, b, q):
         ops = self._ops(p["book_id"])
+        items = b.get("items")
+        if items:
+            # New line-item inköp: each item is qty × à-cost (ex moms) at a rate; the cost
+            # books to the single expense konto (b["category_id"]). An item that names an
+            # article gets a stock batch under its product (income) category.
+            moms_lines = []
+            for it in items:
+                ex = round(int(it["quantity_centi"]) * int(it["unit_cost_ore"]) / 100)
+                if ex > 0:
+                    moms_lines.append({"rate_code": it["rate_code"], "amount_ore": ex,
+                                       "inclusive": False})
+            if not moms_lines:
+                raise ValueError("Inköpet behöver minst en rad med belopp")
+            res = ops.record_expense(
+                b.get("supplier_id"), b["category_id"], moms_lines, b["trans_date"],
+                note=b.get("note"), receipt_original_format=b.get("receipt_original_format"),
+                ext_ref=b.get("ext_ref"), ores_rounding=bool(b.get("ores_rounding")),
+                paid_date=b.get("paid_date"))
+            tid = res["transaktion_id"]
+            batches = []
+            for it in items:
+                desc = (it.get("description") or "").strip()
+                if not desc or not it.get("to_stock", True):
+                    continue
+                aid = ops.find_or_create_article(
+                    desc, it.get("category_id"), rate_code=it.get("rate_code", "25"),
+                    reduction_type=it.get("reduction_type"), unit=it.get("unit"),
+                    unit_price_ore=int(it.get("unit_cost_ore") or 0))
+                batch = ops.add_stock_batch(
+                    aid, int(it["quantity_centi"]), int(it["unit_cost_ore"]),
+                    received_date=b["trans_date"], supplier_id=b.get("supplier_id"),
+                    purchase_transaktion_id=tid, note=it.get("note"))
+                batches.append({"article_id": aid, **batch})
+            res["batches"] = batches
+            return res
         return ops.record_expense(
             b.get("supplier_id"), b["category_id"], b["lines"], b["trans_date"],
             note=b.get("note"), receipt_original_format=b.get("receipt_original_format"),
-            ext_ref=b.get("ext_ref"), paid_date=b.get("paid_date"),
+            ext_ref=b.get("ext_ref"), ores_rounding=bool(b.get("ores_rounding")),
+            paid_date=b.get("paid_date"),
         )
+
+    def h_update_expense(self, p, b, q):
+        return self._ops(p["book_id"]).update_expense_meta(
+            int(p["transaktion_id"]), supplier_id=b.get("supplier_id"),
+            ext_ref=b.get("ext_ref"), note=b.get("note"),
+            receipt_original_format=b.get("receipt_original_format"))
 
     def h_record_income(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -457,7 +527,8 @@ class AppFacade:
         ops = self._ops(p["book_id"])
         cols = ("SELECT t.id, t.direction, t.status, t.trans_date, t.payment_date, "
                 "t.category_id, t.customer_id, t.supplier_id, t.verifikation_id, t.note, "
-                "t.ext_ref, (SELECT COALESCE(SUM(m.inc_moms_ore),0) FROM moms_line m "
+                "t.ext_ref, t.receipt_original_format, "
+                "(SELECT COALESCE(SUM(m.inc_moms_ore),0) FROM moms_line m "
                 "WHERE m.transaktion_id = t.id) AS amount_ore FROM transaktion t")
         if q.get("include_synthetic") in ("1", "true", True):
             return _rows(ops, cols + " ORDER BY t.id")
@@ -608,6 +679,23 @@ class AppFacade:
         self._ops(p["book_id"]).delete_draft(int(p["draft_id"]))
         return {"deleted": True}
 
+    # ---- inköp (expense) drafts ----
+    def h_list_expense_drafts(self, p, b, q):
+        return self._ops(p["book_id"]).list_expense_drafts()
+
+    def h_create_expense_draft(self, p, b, q):
+        return self._ops(p["book_id"]).save_expense_draft(b["payload"])
+
+    def h_get_expense_draft(self, p, b, q):
+        return self._ops(p["book_id"]).get_expense_draft(int(p["draft_id"]))
+
+    def h_update_expense_draft(self, p, b, q):
+        return self._ops(p["book_id"]).save_expense_draft(b["payload"], draft_id=int(p["draft_id"]))
+
+    def h_delete_expense_draft(self, p, b, q):
+        self._ops(p["book_id"]).delete_expense_draft(int(p["draft_id"]))
+        return {"deleted": True}
+
     # ---- offerter (quotes) ----
     def h_list_offerter(self, p, b, q):
         return self._ops(p["book_id"]).list_offerter()
@@ -701,11 +789,16 @@ _route("GET", "/books/{book_id}/recovery-key", "h_recovery_key_status")
 _route("POST", "/books/{book_id}/recovery-key", "h_add_recovery_key", 201)
 
 _route("GET", "/books/{book_id}/categories", "h_list_categories")
+_route("GET", "/books/{book_id}/categories/next-prefix", "h_next_prefix")
 _route("GET", "/books/{book_id}/accounts", "h_list_accounts")
 _route("GET", "/books/{book_id}/articles", "h_list_articles")
 _route("POST", "/books/{book_id}/articles", "h_create_article", 201)
 _route("PATCH", "/books/{book_id}/articles/{article_id}", "h_update_article")
 _route("DELETE", "/books/{book_id}/articles/{article_id}", "h_delete_article")
+_route("GET", "/books/{book_id}/stock", "h_list_stock")
+_route("POST", "/books/{book_id}/stock", "h_add_stock_batch", 201)
+_route("GET", "/books/{book_id}/articles/{article_id}/batches", "h_list_article_batches")
+_route("DELETE", "/books/{book_id}/stock/{batch_id}", "h_delete_stock_batch")
 _route("POST", "/books/{book_id}/categories", "h_create_category", 201)
 _route("PATCH", "/books/{book_id}/categories/{category_id}", "h_update_category")
 _route("DELETE", "/books/{book_id}/categories/{category_id}", "h_delete_category")
@@ -721,6 +814,7 @@ _route("DELETE", "/books/{book_id}/customers/{kundnummer}/relations/{other_kundn
 _route("GET", "/books/{book_id}/customers/{kundnummer}", "h_get_customer")
 _route("POST", "/books/{book_id}/customers", "h_create_customer", 201)
 _route("PATCH", "/books/{book_id}/customers/{kundnummer}", "h_update_customer")
+_route("DELETE", "/books/{book_id}/customers/{kundnummer}", "h_delete_customer")
 _route("GET", "/books/{book_id}/reduction-config", "h_reduction_config")
 
 _route("GET", "/books/{book_id}/suppliers", "h_list_suppliers")
@@ -728,6 +822,7 @@ _route("POST", "/books/{book_id}/suppliers", "h_create_supplier", 201)
 _route("PATCH", "/books/{book_id}/suppliers/{supplier_id}", "h_update_supplier")
 
 _route("POST", "/books/{book_id}/expenses", "h_record_expense", 201)
+_route("PATCH", "/books/{book_id}/transaktioner/{transaktion_id}", "h_update_expense")
 _route("POST", "/books/{book_id}/incomes", "h_record_income", 201)
 _route("POST", "/books/{book_id}/transaktioner/{transaktion_id}/pay", "h_register_payment")
 _route("POST", "/books/{book_id}/rut/{rut_claim_id}/skatteverket-payment", "h_rut_skatteverket_payment")
@@ -774,6 +869,11 @@ _route("POST", "/books/{book_id}/invoice-drafts", "h_create_draft", 201)
 _route("GET", "/books/{book_id}/invoice-drafts/{draft_id}", "h_get_draft")
 _route("PUT", "/books/{book_id}/invoice-drafts/{draft_id}", "h_update_draft")
 _route("DELETE", "/books/{book_id}/invoice-drafts/{draft_id}", "h_delete_draft")
+_route("GET", "/books/{book_id}/expense-drafts", "h_list_expense_drafts")
+_route("POST", "/books/{book_id}/expense-drafts", "h_create_expense_draft", 201)
+_route("GET", "/books/{book_id}/expense-drafts/{draft_id}", "h_get_expense_draft")
+_route("PUT", "/books/{book_id}/expense-drafts/{draft_id}", "h_update_expense_draft")
+_route("DELETE", "/books/{book_id}/expense-drafts/{draft_id}", "h_delete_expense_draft")
 _route("GET", "/books/{book_id}/offerter", "h_list_offerter")
 _route("POST", "/books/{book_id}/offerter", "h_create_offert", 201)
 _route("GET", "/books/{book_id}/offerter/{offert_id}/pdf", "h_offert_pdf")

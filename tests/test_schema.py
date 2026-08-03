@@ -298,10 +298,120 @@ class TestMigration:
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert "receipt" in names
 
+    def test_migrate_v25_adds_prefix_and_per_article_batches(self):
+        # A v25 book: category without prefix + stock_batch with a GLOBAL-unique number.
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.executescript("""
+            CREATE TABLE verifikation (id INTEGER PRIMARY KEY);
+            CREATE TABLE account (bas_konto INTEGER PRIMARY KEY, name TEXT, created_at TEXT);
+            CREATE TABLE category (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, kind TEXT,
+                bas_konto INTEGER, default_rate_code TEXT, active INTEGER DEFAULT 1, created_at TEXT);
+            CREATE TABLE supplier (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);
+            CREATE TABLE transaktion (id INTEGER PRIMARY KEY AUTOINCREMENT);
+            CREATE TABLE article (id INTEGER PRIMARY KEY AUTOINCREMENT, article_number TEXT,
+                description TEXT, created_at TEXT, updated_at TEXT);
+            CREATE TABLE stock_batch (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_number INTEGER NOT NULL UNIQUE, article_id INTEGER NOT NULL,
+                qty_in_centi INTEGER, qty_remaining_centi INTEGER, unit_cost_ore INTEGER,
+                supplier_id INTEGER, purchase_transaktion_id INTEGER, received_date TEXT,
+                note TEXT, created_at TEXT);
+            CREATE TABLE customer (kundnummer INTEGER PRIMARY KEY AUTOINCREMENT);
+            CREATE TABLE rut_claim (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transaktion_id INTEGER NOT NULL, customer_id INTEGER NOT NULL,
+                rut_amount_ore INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+                customer_payment_date TEXT, skatteverket_payment_date TEXT,
+                skatteverket_verifikation_id INTEGER, skatteverket_received_ore INTEGER,
+                shortfall_invoice_id INTEGER, skatteverket_reference TEXT,
+                claim_year INTEGER NOT NULL, created_at TEXT NOT NULL);
+        """)
+        db.execute("PRAGMA user_version = 25")
+        db.execute("INSERT INTO account VALUES (3001,'x','t')")
+        db.execute("INSERT INTO category(name,kind,bas_konto,created_at) VALUES ('A','income',3001,'t')")
+        db.execute("INSERT INTO category(name,kind,bas_konto,created_at) VALUES ('B','expense',3001,'t')")
+        db.execute("INSERT INTO article(article_number,description,created_at,updated_at) VALUES ('1000-1','R','t','t')")
+        db.execute("INSERT INTO article(article_number,description,created_at,updated_at) VALUES ('1000-2','S','t','t')")
+        # global batch numbers 1,2 on article 1; 3 on article 2
+        for n, a, c in [(1, 1, 500), (2, 1, 600), (3, 2, 700)]:
+            db.execute("INSERT INTO stock_batch(batch_number,article_id,qty_in_centi,"
+                       "qty_remaining_centi,unit_cost_ore,received_date,created_at) "
+                       "VALUES (?,?,100,100,?,'d','t')", (n, a, c))
+        db.commit()
+        assert S.migrate(db) == S.SCHEMA_VERSION
+        prefixes = [r["prefix"] for r in db.execute("SELECT prefix FROM category ORDER BY id")]
+        assert prefixes == ["0000", "0001"]
+        # batches renumbered per article: article 1 -> 1,2 ; article 2 -> 1
+        rows = {r["id"]: r["batch_number"] for r in db.execute(
+            "SELECT id, batch_number FROM stock_batch")}
+        assert rows == {1: 1, 2: 2, 3: 1}
+
+    def test_migrate_v26_adds_category_parent_id(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        S.initialize_schema(db)
+        db.execute("ALTER TABLE category DROP COLUMN parent_id")
+        db.execute("PRAGMA user_version = 26")
+        db.commit()
+        assert S.migrate(db) == S.SCHEMA_VERSION
+        cols = {r["name"] for r in db.execute("PRAGMA table_info(category)")}
+        assert "parent_id" in cols
+
+    def test_migrate_v27_makes_rut_claim_customer_nullable(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        S.initialize_schema(db)
+        # rebuild rut_claim in the v27 shape (customer_id NOT NULL), then migrate
+        db.execute("DROP TABLE rut_claim")
+        db.execute("""CREATE TABLE rut_claim (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaktion_id INTEGER NOT NULL REFERENCES transaktion(id),
+            customer_id INTEGER NOT NULL REFERENCES customer(kundnummer),
+            rut_amount_ore INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            customer_payment_date TEXT, skatteverket_payment_date TEXT,
+            skatteverket_verifikation_id INTEGER, skatteverket_received_ore INTEGER,
+            shortfall_invoice_id INTEGER, skatteverket_reference TEXT,
+            claim_year INTEGER NOT NULL, created_at TEXT NOT NULL)""")
+        db.execute("PRAGMA user_version = 27")
+        db.commit()
+        assert S.migrate(db) == S.SCHEMA_VERSION
+        info = {r["name"]: r for r in db.execute("PRAGMA table_info(rut_claim)")}
+        assert info["customer_id"]["notnull"] == 0
+
+    def test_migrate_v29_adds_expense_draft(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        S.initialize_schema(db)
+        db.execute("DROP TABLE expense_draft")
+        db.execute("PRAGMA user_version = 29")
+        db.commit()
+        assert S.migrate(db) == S.SCHEMA_VERSION
+        names = {r["name"] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "expense_draft" in names
+
     def test_migrate_is_idempotent(self, conn):
         before = S.get_schema_version(conn)
         assert S.migrate(conn) == before     # already current -> no-op
         assert S.migrate(conn) == before
+
+    def test_migrate_adds_stock_batch_to_v24_db(self, tmp_path: Path):
+        # Simulate a pre-inventory (v24) book: full schema minus stock_batch + the
+        # invoice_line stock columns.
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        S.initialize_schema(db)
+        db.execute("DROP TABLE stock_batch")
+        db.execute("ALTER TABLE invoice_line RENAME COLUMN stock_batch_id TO _sbi_old")
+        db.execute("ALTER TABLE invoice_line DROP COLUMN _sbi_old")
+        db.execute("ALTER TABLE invoice_line DROP COLUMN cost_ore")
+        db.execute("PRAGMA user_version = 24")
+        db.commit()
+        assert S.migrate(db) == S.SCHEMA_VERSION
+        names = {r["name"] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "stock_batch" in names
+        cols = {r["name"] for r in db.execute("PRAGMA table_info(invoice_line)")}
+        assert {"stock_batch_id", "cost_ore"} <= cols
 
 
 class TestInvoiceSchema:

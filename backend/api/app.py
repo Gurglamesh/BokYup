@@ -212,6 +212,10 @@ def _build_router():
     def list_categories(book_id: str, request: Request):
         return fac(request).h_list_categories({"book_id": book_id}, {}, {})
 
+    @r.get("/books/{book_id}/categories/next-prefix")
+    def next_prefix(book_id: str, request: Request):
+        return fac(request).h_next_prefix({"book_id": book_id}, {}, {})
+
     @r.get("/books/{book_id}/accounts")
     def list_accounts(book_id: str, request: Request):
         return fac(request).h_list_accounts({"book_id": book_id}, {}, {})
@@ -233,6 +237,26 @@ def _build_router():
     @r.delete("/books/{book_id}/articles/{article_id}")
     def delete_article(book_id: str, article_id: int, request: Request):
         return fac(request).h_delete_article({"book_id": book_id, "article_id": article_id}, {}, {})
+
+    # ---- stock / lager ----
+    @r.get("/books/{book_id}/stock")
+    def list_stock(book_id: str, request: Request, include_empty: bool = False):
+        return fac(request).h_list_stock(
+            {"book_id": book_id}, {}, {"include_empty": include_empty})
+
+    @r.post("/books/{book_id}/stock", status_code=201)
+    def add_stock_batch(book_id: str, body: sc.StockBatchReq, request: Request):
+        return fac(request).h_add_stock_batch({"book_id": book_id}, body.model_dump(), {})
+
+    @r.get("/books/{book_id}/articles/{article_id}/batches")
+    def list_article_batches(book_id: str, article_id: int, request: Request,
+                             open_only: bool = False):
+        return fac(request).h_list_article_batches(
+            {"book_id": book_id, "article_id": article_id}, {}, {"open_only": open_only})
+
+    @r.delete("/books/{book_id}/stock/{batch_id}")
+    def delete_stock_batch(book_id: str, batch_id: int, request: Request):
+        return fac(request).h_delete_stock_batch({"book_id": book_id, "batch_id": batch_id}, {}, {})
 
     @r.post("/books/{book_id}/categories", status_code=201)
     def create_category(book_id: str, body: sc.CategoryReq, request: Request):
@@ -265,6 +289,11 @@ def _build_router():
     def update_customer(book_id: str, kundnummer: int, body: sc.CustomerUpdateReq, request: Request):
         return fac(request).h_update_customer(
             {"book_id": book_id, "kundnummer": kundnummer}, body.model_dump(), {})
+
+    @r.delete("/books/{book_id}/customers/{kundnummer}")
+    def delete_customer(book_id: str, kundnummer: int, request: Request):
+        return fac(request).h_delete_customer(
+            {"book_id": book_id, "kundnummer": kundnummer}, {}, {})
 
     # ---- customer household relations (RUT/ROT) ----
     @r.get("/books/{book_id}/customers/{kundnummer}/relations")
@@ -318,6 +347,11 @@ def _build_router():
     @r.post("/books/{book_id}/expenses", status_code=201)
     def record_expense(book_id: str, body: sc.RecordExpenseReq, request: Request):
         return fac(request).h_record_expense({"book_id": book_id}, body.model_dump(), {})
+
+    @r.patch("/books/{book_id}/transaktioner/{transaktion_id}")
+    def update_expense(book_id: str, transaktion_id: int, body: sc.ExpenseMetaReq, request: Request):
+        return fac(request).h_update_expense(
+            {"book_id": book_id, "transaktion_id": transaktion_id}, body.model_dump(), {})
 
     @r.post("/books/{book_id}/incomes", status_code=201)
     def record_income(book_id: str, body: sc.RecordIncomeReq, request: Request):
@@ -531,6 +565,28 @@ def _build_router():
     @r.delete("/books/{book_id}/invoice-drafts/{draft_id}")
     def delete_draft(book_id: str, draft_id: int, request: Request):
         return fac(request).h_delete_draft({"book_id": book_id, "draft_id": draft_id}, {}, {})
+
+    # ---- inköp (expense) drafts ----
+    @r.get("/books/{book_id}/expense-drafts")
+    def list_expense_drafts(book_id: str, request: Request):
+        return fac(request).h_list_expense_drafts({"book_id": book_id}, {}, {})
+
+    @r.post("/books/{book_id}/expense-drafts", status_code=201)
+    def create_expense_draft(book_id: str, body: sc.InvoiceDraftReq, request: Request):
+        return fac(request).h_create_expense_draft({"book_id": book_id}, body.model_dump(), {})
+
+    @r.get("/books/{book_id}/expense-drafts/{draft_id}")
+    def get_expense_draft(book_id: str, draft_id: int, request: Request):
+        return fac(request).h_get_expense_draft({"book_id": book_id, "draft_id": draft_id}, {}, {})
+
+    @r.put("/books/{book_id}/expense-drafts/{draft_id}")
+    def update_expense_draft(book_id: str, draft_id: int, body: sc.InvoiceDraftReq, request: Request):
+        return fac(request).h_update_expense_draft(
+            {"book_id": book_id, "draft_id": draft_id}, body.model_dump(), {})
+
+    @r.delete("/books/{book_id}/expense-drafts/{draft_id}")
+    def delete_expense_draft(book_id: str, draft_id: int, request: Request):
+        return fac(request).h_delete_expense_draft({"book_id": book_id, "draft_id": draft_id}, {}, {})
 
     @r.get("/books/{book_id}/offerter")
     def list_offerter(book_id: str, request: Request):

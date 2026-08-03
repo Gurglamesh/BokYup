@@ -644,6 +644,50 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       live per-device encrypted replica + freshness dates + offline read-only + restore-
       from-device. **Later:** per-book Local↔Server switch, easy installers, internet TLS.
       Known Phase-1 gap: import-to-server needs a bundle upload (local import unaffected).
+- [x] **Lager (inventory) + verklig marginal (schema v25, 2026-08).** A buy-in of a catalog
+      **article** creates a **batch** with its own cost — buying the same article again adds
+      a new batch, so one article can carry several costs. `stock_batch` (global sequential
+      `batch_number` shown only in the Lager tab, `qty_in`/`qty_remaining_centi`,
+      `unit_cost_ore` ex moms, optional `supplier_id`/`purchase_transaktion_id`/note/date).
+      `BookOps.add_stock_batch`/`list_stock` (per-article on-hand + lagervärde)/
+      `list_article_batches`/`delete_stock_batch` (only while wholly unconsumed). **Pure
+      tracking — no ledger impact** (any cost side lives in the linked Inköp transaktion).
+      On an invoice, an article line may **pick a batch** (`invoice_line.stock_batch_id`):
+      `create_invoice` freezes the line's inköpskostnad (`invoice_line.cost_ore` = qty ×
+      unit cost) and **consumes** the batch (decrements qty_remaining; refuses
+      over-consumption); makulera restocks it. `get_invoice`/`list_invoices` expose
+      `cost_ore`/`margin_ore`/`has_cost` (**revenue ex moms − cost**). API `GET/POST /stock`,
+      `GET /articles/{id}/batches`, `DELETE /stock/{id}`; `InvoiceLineReq.stock_batch_id`.
+      UI: a **"Lager"** tab (per-article rows, expand to see batches + costs, manual
+      "+ Lägg till i lager", total lagervärde); the faktura line editor gained a
+      **Lagerbatch** picker (open batches per article) with a **live "Marginal (N %)"** in
+      the Summering, and the Ordrar→Fakturor list shows a **Marginal** column. OCR-scanned
+      buy-ins (auto-add articles/prices) are the deferred next step. Tests pass (336);
+      browser-smoke-tested (add batch → pick on faktura → margin 800 kr end-to-end).
+- [x] **Category prefixes + inköp line-items → articles/batches (schema v26, 2026-08).**
+      Each **category owns a unique 4-digit prefix** (`category.prefix`, 0000–9999 → up to
+      10 000 categories, 0000 included). `create_category(prefix=…)` takes an explicit
+      prefix (rejected with InvalidState→409 if taken) or auto-assigns the lowest unused;
+      `_next_unused_prefix`/`prefix_in_use` + API `GET /categories/next-prefix`. A new
+      **article's number = `<category-prefix>-XXXX`** (random suffix; provisional **`NY-`**
+      bucket while uncategorised). Assigning/changing an article's category **re-issues its
+      number** to the new prefix — but only while it has **never been invoiced**
+      (`article_in_use` → frozen once printed on a faktura). **Batch numbers are now per
+      article** (`stock_batch` rebuilt: `UNIQUE(article_id, batch_number)`), so the full
+      batch id reads **`<article_number>-<batch_number>`** (`full_batch_id`). The **Inköp**
+      form is now a **line-item editor**: each row = product (income) category + article
+      name + qty + à-cost (ex moms) + moms rate; on booking the cost books to the chosen
+      **expense** konto and every **named** row is find-or-created as an article (buying the
+      same one again adds a batch to the SAME article) and gets a **stock batch** linked to
+      the purchase transaktion (a blank-name row is a pure cost line, no stock).
+      `find_or_create_article`; `record_expense` via facade `items[]`
+      (`RecordExpenseReq.items` / `ExpenseItemReq`). UI: category modal suggests the next
+      unused prefix + inline "används redan"; article create drops the manual prefix
+      (derives from category); **Artiklar** tab gained a **category filter**; Lager +
+      faktura batch pickers show the full batch id. Migration 26 assigns prefixes to
+      existing categories (lowest unused) and renumbers existing batches per article.
+      Tests pass (349); browser-smoke-tested (inköp → article 0000-XXXX → batch
+      0000-XXXX-1 @ 600 kr → Lager/Artiklar; duplicate-prefix rejection).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

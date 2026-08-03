@@ -618,6 +618,15 @@ class TestInvoices:
         assert bal2["earned_active_minutes"] == 15 and bal2["used_minutes"] == 35
         assert bal2["remaining_minutes"] == 0
 
+    def test_makulerad_invoice_earns_no_support(self, ops):
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-15",
+            due_date="2026-04-15",
+            lines=[{"description": "A", "quantity_centi": 100, "unit_price_ore": round(124900/1.25), "rate_code": "25"}])
+        assert ops.support_balance(kid)["earned_active_minutes"] == 30
+        ops.cancel_invoice(inv["invoice_id"])          # makulera -> no support time
+        assert ops.support_balance(kid)["earned_active_minutes"] == 0
+
     def test_support_entry_validation(self, ops):
         cat, kid = self._setup(ops)
         with pytest.raises(ValueError):
@@ -1279,3 +1288,341 @@ class TestOresavrundning:
             lines=[{"description": "X", "quantity_centi": 100, "unit_price_ore": 100000, "rate_code": "25"}])
         ops.pay_invoice(inv["invoice_id"], date="2026-03-15")
         assert 3740 not in self._net(ops)                       # no öresavrundning needed
+
+
+# ---------------------------------------------------------------------------
+# Category prefixes + category-driven article numbering
+# ---------------------------------------------------------------------------
+
+class TestCategoryPrefix:
+    def test_auto_prefix_is_lowest_unused(self, ops):
+        c1 = ops.create_category("A", "income", 3001)
+        c2 = ops.create_category("B", "income", 3002)
+        p1 = ops.conn.execute("SELECT prefix FROM category WHERE id=?", (c1,)).fetchone()[0]
+        p2 = ops.conn.execute("SELECT prefix FROM category WHERE id=?", (c2,)).fetchone()[0]
+        assert p1 == "0000" and p2 == "0001"
+
+    def test_explicit_prefix_and_duplicate_rejected(self, ops):
+        ops.create_category("A", "income", 3001, prefix="0500")
+        assert ops.prefix_in_use("0500") is True
+        with pytest.raises(InvalidState):
+            ops.create_category("B", "income", 3002, prefix="0500")
+
+    def test_bad_prefix_rejected(self, ops):
+        with pytest.raises(ValueError):
+            ops.create_category("A", "income", 3001, prefix="12")
+
+    def test_article_number_uses_category_prefix(self, ops):
+        cid = ops.create_category("Nätverk", "income", 3001, prefix="0007")
+        art = ops.create_article("Router", category_id=cid)
+        assert art["article_number"].startswith("0007-")
+
+    def test_uncategorised_article_gets_NY_then_renumbers_on_categorise(self, ops):
+        art = ops.create_article("Lös pryl")               # no category
+        assert art["article_number"].startswith("NY-")
+        cid = ops.create_category("Prylar", "income", 3001, prefix="0042")
+        ops.update_article(art["id"], category_id=cid)
+        num = ops.conn.execute("SELECT article_number FROM article WHERE id=?",
+                               (art["id"],)).fetchone()[0]
+        assert num.startswith("0042-")
+
+    def test_invoiced_article_number_frozen_on_recategorise(self, ops):
+        c_sell = ops.create_category("Tjänst", "income", 3001, prefix="0001")
+        kid = ops.create_customer("business", company_name="X AB", org_nr="556000-0001")
+        art = ops.create_article("Vara", category_id=c_sell)
+        ops.create_invoice(customer_id=kid, category_id=c_sell, invoice_date="2026-03-01",
+            due_date="2026-03-31",
+            lines=[{"description": "Vara", "quantity_centi": 100, "unit_price_ore": 10000,
+                    "rate_code": "25", "category_id": c_sell, "article_id": art["id"]}])
+        before = ops.conn.execute("SELECT article_number FROM article WHERE id=?",
+                                  (art["id"],)).fetchone()[0]
+        c2 = ops.create_category("Annat", "income", 3002, prefix="0099")
+        ops.update_article(art["id"], category_id=c2)       # used -> number frozen
+        after = ops.conn.execute("SELECT article_number FROM article WHERE id=?",
+                                 (art["id"],)).fetchone()[0]
+        assert after == before
+
+    def test_find_or_create_reuses_same_article(self, ops):
+        cid = ops.create_category("Nät", "income", 3001, prefix="0003")
+        a = ops.find_or_create_article("Kabel", cid)
+        b = ops.find_or_create_article(" kabel ", cid)      # trimmed + case-insensitive
+        assert a == b
+
+
+class TestSubcategories:
+    def test_subcategory_inherits_parent(self, ops):
+        parent = ops.create_category("Hårdvara", "income", 3010, default_rate_code="25")
+        sub = ops.create_category("Nätverk", "income", parent_id=parent)   # no konto/kind
+        row = ops.conn.execute(
+            "SELECT kind, bas_konto, default_rate_code, parent_id FROM category WHERE id=?",
+            (sub,)).fetchone()
+        assert row["parent_id"] == parent
+        assert row["kind"] == "income"
+        assert row["bas_konto"] == 3010          # inherited
+        assert row["default_rate_code"] == "25"  # inherited
+
+    def test_subcategory_own_konto_allowed(self, ops):
+        parent = ops.create_category("Hårdvara", "income", 3010)
+        sub = ops.create_category("Nätverk", "income", 3011, parent_id=parent)
+        assert ops.conn.execute("SELECT bas_konto FROM category WHERE id=?",
+                                (sub,)).fetchone()[0] == 3011
+
+    def test_descendants_and_nesting(self, ops):
+        a = ops.create_category("A", "income", 3001)
+        b = ops.create_category("B", "income", parent_id=a)
+        c = ops.create_category("C", "income", parent_id=b)   # deep nesting
+        assert ops.category_descendants(a) == {b, c}
+        assert ops.category_descendants(b) == {c}
+
+    def test_reparent_cycle_refused(self, ops):
+        a = ops.create_category("A", "income", 3001)
+        b = ops.create_category("B", "income", parent_id=a)
+        with pytest.raises(InvalidState):
+            ops.update_category(a, parent_id=b)      # a under its own descendant -> cycle
+        with pytest.raises(InvalidState):
+            ops.update_category(a, parent_id=a)      # under itself
+
+    def test_reparent_to_top_level(self, ops):
+        a = ops.create_category("A", "income", 3001)
+        b = ops.create_category("B", "income", parent_id=a)
+        ops.update_category(b, parent_id=0)          # 0 -> make top-level
+        assert ops.conn.execute("SELECT parent_id FROM category WHERE id=?",
+                                (b,)).fetchone()[0] is None
+
+
+# ---------------------------------------------------------------------------
+# Stock / lager (inventory batches + real margin)
+# ---------------------------------------------------------------------------
+
+class TestStock:
+    def _art(self, ops):
+        return ops.create_article("Router", "1000", unit_price_ore=100000)["id"]
+
+    def _cust(self, ops):
+        ops.create_category("Försäljning", "income", 3001)  # ensure a category exists
+        return ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")
+
+    def test_add_batch_assigns_sequential_number(self, ops):
+        aid = self._art(ops)
+        b1 = ops.add_stock_batch(aid, 500, 60000, received_date="2026-03-01")
+        b2 = ops.add_stock_batch(aid, 300, 65000, received_date="2026-04-01")
+        assert b1["batch_number"] == 1 and b2["batch_number"] == 2
+        batches = ops.list_article_batches(aid)
+        assert [b["batch_number"] for b in batches] == [2, 1]      # newest first
+        assert batches[1]["qty_remaining_centi"] == 500
+
+    def test_batch_number_is_per_article(self, ops):
+        a1 = ops.create_article("Router", "1000")["id"]
+        a2 = ops.create_article("Switch", "1000")["id"]
+        ops.add_stock_batch(a1, 100, 500)
+        ops.add_stock_batch(a2, 100, 700)              # separate article -> also starts at 1
+        b1 = ops.add_stock_batch(a1, 100, 550)
+        assert ops.list_article_batches(a2)[0]["batch_number"] == 1
+        assert b1["batch_number"] == 2                 # a1's second batch
+        # full batch id = article_number + batch_number
+        full = ops.list_article_batches(a2)[0]["full_batch_id"]
+        assert full.endswith("-1")
+
+    def test_list_stock_summary(self, ops):
+        aid = self._art(ops)
+        ops.add_stock_batch(aid, 500, 60000)   # 5 * 600 = 3000 kr
+        ops.add_stock_batch(aid, 300, 65000)   # 3 * 650 = 1950 kr
+        stock = ops.list_stock()
+        assert len(stock) == 1
+        row = stock[0]
+        assert row["qty_remaining_centi"] == 800
+        assert row["batch_count"] == 2
+        assert row["value_ore"] == 60000 * 5 + 65000 * 3   # 495000
+
+    def test_invoice_line_consumes_batch_and_freezes_margin(self, ops):
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")
+        aid = ops.create_article("Router", "1000")["id"]
+        batch = ops.add_stock_batch(aid, 500, 60000)   # 5 st @ 600 kr cost
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Router", "quantity_centi": 200, "unit_price_ore": 100000,
+                    "rate_code": "25", "article_id": aid, "stock_batch_id": batch["id"]}])
+        # 2 st sold: cost 2*600 = 1200 kr; revenue ex 2000 kr -> margin 800 kr
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["cost_ore"] == 120000
+        assert got["margin_ore"] == 200000 - 120000
+        assert got["has_cost"] is True
+        assert got["lines"][0]["batch_number"] == 1
+        # batch consumed: 5 - 2 = 3 remaining
+        assert ops.list_article_batches(aid)[0]["qty_remaining_centi"] == 300
+        # list_invoices carries the same margin
+        summ = [i for i in ops.list_invoices() if i["id"] == inv["invoice_id"]][0]
+        assert summ["cost_ore"] == 120000 and summ["margin_ore"] == 80000
+
+    def test_invoice_without_batch_has_unknown_cost(self, ops):
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Konsult", "quantity_centi": 100, "unit_price_ore": 100000,
+                    "rate_code": "25"}])
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["cost_ore"] == 0 and got["has_cost"] is False
+
+    def test_overconsumption_refused(self, ops):
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")
+        aid = ops.create_article("Router", "1000")["id"]
+        batch = ops.add_stock_batch(aid, 100, 60000)   # only 1 in stock
+        with pytest.raises(InvalidState):
+            ops.create_invoice(
+                customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+                lines=[{"description": "Router", "quantity_centi": 200, "unit_price_ore": 100000,
+                        "rate_code": "25", "stock_batch_id": batch["id"]}])
+
+    def test_makulera_restocks_batch(self, ops):
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")
+        aid = ops.create_article("Router", "1000")["id"]
+        batch = ops.add_stock_batch(aid, 500, 60000)
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Router", "quantity_centi": 200, "unit_price_ore": 100000,
+                    "rate_code": "25", "stock_batch_id": batch["id"]}])
+        assert ops.list_article_batches(aid)[0]["qty_remaining_centi"] == 300
+        ops.cancel_invoice(inv["invoice_id"])       # makulera -> goods return
+        assert ops.list_article_batches(aid)[0]["qty_remaining_centi"] == 500
+
+    def test_delete_batch_only_when_untouched(self, ops):
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")
+        aid = ops.create_article("Router", "1000")["id"]
+        b1 = ops.add_stock_batch(aid, 500, 60000)
+        b2 = ops.add_stock_batch(aid, 500, 60000)
+        ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Router", "quantity_centi": 100, "unit_price_ore": 100000,
+                    "rate_code": "25", "stock_batch_id": b2["id"]}])
+        with pytest.raises(InvalidState):
+            ops.delete_stock_batch(b2["id"])         # partially consumed
+        ops.delete_stock_batch(b1["id"])             # untouched -> ok
+        assert all(b["id"] != b1["id"] for b in ops.list_article_batches(aid))
+
+
+# ---------------------------------------------------------------------------
+# Delete customer from the register (keep invoices)
+# ---------------------------------------------------------------------------
+
+class TestCustomerDelete:
+    def test_delete_keeps_invoice_detaches_link(self, ops):
+        cat = ops.create_category("Tjänst", "income", 3001)
+        kid = ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-01",
+            due_date="2026-03-31",
+            lines=[{"description": "X", "quantity_centi": 100, "unit_price_ore": 10000, "rate_code": "25"}])
+        ops.delete_customer(kid)
+        # customer gone
+        with pytest.raises(KeyError):
+            ops.get_customer(kid)
+        # invoice kept, link detached, frozen buyer snapshot intact
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["customer_id"] is None
+        assert got["buyer"]["company_name"] == "Acme AB"
+
+    def test_delete_customer_with_rut_detaches_claim(self, ops):
+        cat = ops.create_category("Städ", "income", 3001)
+        kid = ops.create_customer("private", first_name="Anna", last_name="A",
+                                  personnummer="811218-9876")
+        res = ops.record_income(kid, cat, [{"rate_code": "25", "amount_ore": 100000}],
+                                "2026-03-01", rut_amount_ore=25000)
+        claim_id = res["rut_claim_id"]
+        ops.delete_customer(kid)
+        # the RUT claim record survives (amount/state kept), only customer_id detached
+        row = ops.conn.execute(
+            "SELECT customer_id, rut_amount_ore FROM rut_claim WHERE id=?", (claim_id,)).fetchone()
+        assert row is not None and row["customer_id"] is None
+        assert row["rut_amount_ore"] == 25000
+
+    def test_delete_removes_relations_and_support(self, ops):
+        a = ops.create_customer("private", first_name="A", last_name="A", personnummer="811218-9876")
+        b = ops.create_customer("private", first_name="B", last_name="B", personnummer="670919-9530")
+        ops.link_customers(a, b)
+        ops.record_support_entry(a, 15, "addition", "bonus")
+        ops.delete_customer(a)
+        assert ops.conn.execute("SELECT COUNT(*) FROM customer_relation").fetchone()[0] == 0
+        assert ops.conn.execute("SELECT COUNT(*) FROM support_ledger WHERE customer_id=?",
+                                (a,)).fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# Inköp extras: öresavrundning + edit non-ledger fields
+# ---------------------------------------------------------------------------
+
+class TestExpenseExtras:
+    def test_ores_rounding_books_diff_to_3740(self, ops):
+        cat = ops.create_category("Inköp varor", "expense", 4010)
+        res = ops.record_expense(None, cat,
+            [{"rate_code": "25", "amount_ore": 12499, "inclusive": True}],
+            "2026-05-01", ores_rounding=True, paid_date="2026-05-01")
+        vid = res["verifikation_id"]
+        postings = {p["bas_konto"]: p["amount_ore"] for p in _postings(ops, vid)}
+        assert postings[1930] == -12500      # bank pays whole kronor
+        assert postings[3740] == 1           # öre diff to öres-/kronutjämning
+        assert postings[4010] == 9999        # ex-moms exact
+        assert postings[2640] == 2500        # ingående moms exact
+        assert _balance(ops, vid) == 0
+
+    def test_no_rounding_by_default(self, ops):
+        cat = ops.create_category("Inköp varor", "expense", 4010)
+        res = ops.record_expense(None, cat,
+            [{"rate_code": "25", "amount_ore": 12499, "inclusive": True}],
+            "2026-05-01", paid_date="2026-05-01")
+        postings = {p["bas_konto"]: p["amount_ore"] for p in _postings(ops, res["verifikation_id"])}
+        assert postings[1930] == -12499 and 3740 not in postings
+
+    def test_update_expense_meta_keeps_ledger(self, ops):
+        cat = ops.create_category("Inköp varor", "expense", 4010)
+        sup = ops.create_supplier("Inet")
+        res = ops.record_expense(None, cat,
+            [{"rate_code": "25", "amount_ore": 10000, "inclusive": False}],
+            "2026-05-01", ext_ref="K1", paid_date="2026-05-01")
+        tid = res["transaktion_id"]
+        ops.update_expense_meta(tid, supplier_id=sup, ext_ref="K2", note="rättat",
+                                receipt_original_format="digital")
+        row = ops.conn.execute("SELECT supplier_id, ext_ref, note, category_id, "
+            "receipt_original_format FROM transaktion WHERE id=?", (tid,)).fetchone()
+        assert row["supplier_id"] == sup and row["ext_ref"] == "K2"
+        assert row["note"] == "rättat" and row["receipt_original_format"] == "digital"
+        assert row["category_id"] == cat        # BAS-konto untouched
+        # moms/belopp untouched
+        assert ops._sum_moms(tid)[0] == 10000
+
+    def test_update_expense_meta_refuses_sale(self, ops):
+        icat = ops.create_category("Sälj", "income", 3001)
+        kid = ops.create_customer("business", company_name="X AB")
+        inc = ops.record_income(kid, icat, [{"rate_code": "25", "amount_ore": 10000}], "2026-05-01")
+        with pytest.raises(InvalidState):
+            ops.update_expense_meta(inc["transaktion_id"], ext_ref="Z")
+
+
+class TestExpenseDrafts:
+    def test_save_list_get_delete_roundtrip(self, ops):
+        sup = ops.create_supplier("Inet")
+        payload = {"supplier_id": sup, "category_id": None, "trans_date": "2026-05-01",
+                   "items": [{"description": "Router", "quantity_centi": 200,
+                              "unit_cost_ore": 60000, "rate_code": "25"}]}
+        d = ops.save_expense_draft(payload)
+        lst = ops.list_expense_drafts()
+        assert len(lst) == 1 and lst[0]["supplier_id"] == sup and lst[0]["line_count"] == 1
+        assert lst[0]["total_ore"] == 150000            # 2 × 600 × 1.25
+        got = ops.get_expense_draft(d["id"])
+        assert got["payload"]["items"][0]["description"] == "Router"
+        # update in place
+        payload["items"].append({"description": "Kabel", "quantity_centi": 100,
+                                 "unit_cost_ore": 5000, "rate_code": "25"})
+        ops.save_expense_draft(payload, draft_id=d["id"])
+        assert ops.list_expense_drafts()[0]["line_count"] == 2
+        ops.delete_expense_draft(d["id"])
+        assert ops.list_expense_drafts() == []
+
+    def test_payload_is_encrypted_at_rest(self, ops):
+        d = ops.save_expense_draft({"items": [{"description": "HemligPryl"}]})
+        raw = ops.conn.execute("SELECT payload_enc FROM expense_draft WHERE id=?",
+                               (d["id"],)).fetchone()[0]
+        assert "HemligPryl" not in raw

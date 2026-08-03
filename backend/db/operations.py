@@ -202,42 +202,120 @@ class BookOps:
             )
         return bas_konto
 
-    def create_category(self, name: str, kind: str, bas_konto: int,
+    def _next_unused_prefix(self) -> str:
+        """Lowest unused 4-digit article-number prefix ('0000'..'9999'). Each category
+        owns one; there is room for 10 000 categories (0000 included)."""
+        used = {r[0] for r in self.conn.execute(
+            "SELECT prefix FROM category WHERE prefix IS NOT NULL")}
+        for n in range(10000):
+            p = f"{n:04d}"
+            if p not in used:
+                return p
+        raise OperationError("Inga lediga prefix kvar (max 10000 kategorier)")
+
+    def prefix_in_use(self, prefix: str, exclude_id: Optional[int] = None) -> bool:
+        """Whether a 4-digit category prefix is already taken (optionally ignoring one
+        category, for edit-in-place)."""
+        row = self.conn.execute(
+            "SELECT id FROM category WHERE prefix=?", (str(prefix),)).fetchone()
+        return row is not None and row["id"] != exclude_id
+
+    def _validate_prefix(self, prefix: str, exclude_id: Optional[int] = None) -> str:
+        prefix = str(prefix).strip()
+        if not (prefix.isdigit() and len(prefix) == 4):
+            raise ValueError("Prefixet måste vara exakt 4 siffror (0000–9999)")
+        if self.prefix_in_use(prefix, exclude_id):
+            raise InvalidState(f"Prefixet {prefix} används redan")
+        return prefix
+
+    def _category_prefix(self, category_id: int) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT prefix FROM category WHERE id=?", (category_id,)).fetchone()
+        return row["prefix"] if row else None
+
+    def category_descendants(self, category_id: int) -> set:
+        """All categories under `category_id` (any depth), excluding itself."""
+        out, stack = set(), [category_id]
+        while stack:
+            for r in self.conn.execute(
+                    "SELECT id FROM category WHERE parent_id=?", (stack.pop(),)).fetchall():
+                if r["id"] not in out:
+                    out.add(r["id"])
+                    stack.append(r["id"])
+        return out
+
+    def create_category(self, name: str, kind: str, bas_konto: Optional[int] = None,
                         account_name: Optional[str] = None,
-                        default_rate_code: Optional[str] = None) -> int:
+                        default_rate_code: Optional[str] = None,
+                        prefix: Optional[str] = None,
+                        parent_id: Optional[int] = None) -> int:
         """Create a category linked to a BAS-konto (auto-creating the account).
 
         `default_rate_code` is the moms rate the UI pre-fills for lines booked to this
-        category (e.g. "Försäljning av IT-tjänster, 25 %"). Optional; validated."""
+        category. `prefix` is the unique 4-digit article-number prefix; if omitted the
+        lowest unused one is assigned. `parent_id` makes this a **subcategory**: it takes
+        its parent's `kind` and, when not given, inherits the parent's BAS-konto +
+        default moms (purely organizational — it still books to whatever konto it holds).
+        """
+        if parent_id is not None:
+            parent = self.conn.execute(
+                "SELECT id, kind, bas_konto, default_rate_code FROM category WHERE id=?",
+                (parent_id,)).fetchone()
+            if parent is None:
+                raise KeyError(f"No parent category {parent_id}")
+            kind = parent["kind"]                       # a subcategory shares its parent's kind
+            if bas_konto is None:
+                bas_konto = parent["bas_konto"]          # inherit the konto by default
+            if default_rate_code is None:
+                default_rate_code = parent["default_rate_code"]
         if kind not in ("income", "expense"):
             raise ValueError("kind must be 'income' or 'expense'")
+        if bas_konto is None:
+            raise ValueError("En kategori behöver ett BAS-konto")
         if default_rate_code is not None and default_rate_code not in S.MOMS_RATES:
             raise ValueError(f"Unknown moms rate {default_rate_code!r}")
+        prefix = self._validate_prefix(prefix) if prefix is not None else self._next_unused_prefix()
         self.ensure_account(bas_konto, account_name or name)
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO category(name, kind, bas_konto, default_rate_code, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (name, kind, bas_konto, default_rate_code, _now()),
+                "INSERT INTO category(name, kind, bas_konto, default_rate_code, prefix, "
+                "parent_id, created_at) VALUES (?,?,?,?,?,?,?)",
+                (name, kind, bas_konto, default_rate_code, prefix, parent_id, _now()),
             )
         return cur.lastrowid
 
     def update_category(self, category_id: int, *, name: Optional[str] = None,
                         bas_konto: Optional[int] = None, active: Optional[bool] = None,
                         account_name: Optional[str] = None,
-                        default_rate_code: Optional[str] = None) -> None:
-        """Edit reference data freely. Does not touch already-booked verifikationer."""
+                        default_rate_code: Optional[str] = None,
+                        prefix: Optional[str] = None,
+                        parent_id: Optional[int] = None) -> None:
+        """Edit reference data freely. Does not touch already-booked verifikationer.
+        Changing the prefix only affects future article numbers (issued ones are frozen).
+        `parent_id` reparents (0/negative → make top-level); a cycle is refused."""
         if bas_konto is not None:
             self.ensure_account(bas_konto, account_name or name or f"Konto {bas_konto}")
         if default_rate_code is not None and default_rate_code not in S.MOMS_RATES:
             raise ValueError(f"Unknown moms rate {default_rate_code!r}")
+        if prefix is not None:
+            prefix = self._validate_prefix(prefix, exclude_id=category_id)
         sets, params = _build_update(
             {"name": name, "bas_konto": bas_konto, "default_rate_code": default_rate_code,
-             "active": None if active is None else int(active)}
+             "prefix": prefix, "active": None if active is None else int(active)}
         )
-        if sets:
-            with self.conn:
+        with self.conn:
+            if sets:
                 self.conn.execute(f"UPDATE category SET {sets} WHERE id=?", (*params, category_id))
+            if parent_id is not None:
+                new_parent = int(parent_id) if int(parent_id) > 0 else None
+                if new_parent is not None:
+                    if new_parent == category_id or new_parent in self.category_descendants(category_id):
+                        raise InvalidState("En kategori kan inte bli underkategori till sig själv")
+                    if self.conn.execute("SELECT 1 FROM category WHERE id=?",
+                                         (new_parent,)).fetchone() is None:
+                        raise KeyError(f"No parent category {new_parent}")
+                self.conn.execute("UPDATE category SET parent_id=? WHERE id=?",
+                                  (new_parent, category_id))
 
     def category_in_use(self, category_id: int) -> bool:
         """Whether a category is referenced by any transaktion, moms-line or invoice
@@ -284,11 +362,11 @@ class BookOps:
     # Article catalog (reusable invoice line items)
     # ==================================================================
 
-    def _next_article_number(self, prefix: str) -> str:
-        """Build a unique article number `<prefix>-XXXX` (prefix = 4 digits the user
-        picks; XXXX random). Retries on the rare collision."""
-        if not (isinstance(prefix, str) and prefix.isdigit() and len(prefix) == 4):
-            raise ValueError("Prefixet måste vara exakt 4 siffror")
+    def _gen_article_number(self, prefix: str) -> str:
+        """Build a unique article number `<prefix>-XXXX` (XXXX random). `prefix` is a
+        category's 4-digit prefix, or the provisional 'NY' bucket for an uncategorised
+        article. Retries on the rare collision."""
+        prefix = str(prefix or "NY")
         for _ in range(50):
             number = f"{prefix}-{secrets.randbelow(10000):04d}"
             if self.conn.execute("SELECT 1 FROM article WHERE article_number=?",
@@ -296,12 +374,21 @@ class BookOps:
                 return number
         raise OperationError("Kunde inte skapa ett unikt artikelnummer")
 
-    def create_article(self, description: str, prefix: str, *,
+    def article_in_use(self, article_id: int) -> bool:
+        """Whether the article appears on any invoice line (issued) — once it does its
+        number is frozen (it may be printed on a legal faktura)."""
+        return self.conn.execute(
+            "SELECT 1 FROM invoice_line WHERE article_id=? LIMIT 1",
+            (article_id,)).fetchone() is not None
+
+    def create_article(self, description: str, prefix: Optional[str] = None, *,
                        unit_price_ore: int = 0, rate_code: str = "25",
                        reduction_type: Optional[str] = None,
                        category_id: Optional[int] = None,
                        unit: Optional[str] = None) -> dict:
-        """Create a catalog article. `prefix` is the user-chosen 4-digit number prefix."""
+        """Create a catalog article. The article number's prefix comes from the chosen
+        category's prefix (or the provisional 'NY' bucket when uncategorised); an explicit
+        `prefix` overrides that. The suffix is random and unique."""
         if not description:
             raise ValueError("Artikeln behöver en beskrivning")
         if rate_code not in S.MOMS_RATES:
@@ -310,7 +397,13 @@ class BookOps:
             raise ValueError(f"Unknown reduction_type {reduction_type!r}")
         if category_id is not None:
             self._check_category(category_id, "income")
-        number = self._next_article_number(prefix)
+        if prefix is not None:
+            # An explicit override must still be a valid 4-digit prefix.
+            if not (str(prefix).isdigit() and len(str(prefix)) == 4):
+                raise ValueError("Prefixet måste vara exakt 4 siffror")
+        else:
+            prefix = self._category_prefix(category_id) if category_id is not None else "NY"
+        number = self._gen_article_number(prefix)
         now = _now()
         with self.conn:
             cur = self.conn.execute(
@@ -324,7 +417,8 @@ class BookOps:
     def list_articles(self, active_only: bool = False) -> list[dict]:
         sql = ("SELECT a.id, a.article_number, a.description, a.unit, a.unit_price_ore, "
                "a.rate_code, a.reduction_type, a.category_id, c.name AS category_name, "
-               "a.active FROM article a LEFT JOIN category c ON c.id = a.category_id ")
+               "c.prefix AS category_prefix, a.active "
+               "FROM article a LEFT JOIN category c ON c.id = a.category_id ")
         if active_only:
             sql += "WHERE a.active = 1 "
         sql += "ORDER BY a.article_number"
@@ -332,13 +426,26 @@ class BookOps:
 
     def update_article(self, article_id: int, **fields) -> None:
         """Edit an article (e.g. categorise it, change price/moms, rename). Does not
-        touch already-issued invoice lines (they carry their own frozen values)."""
-        if self.conn.execute("SELECT 1 FROM article WHERE id=?", (article_id,)).fetchone() is None:
+        touch already-issued invoice lines (they carry their own frozen values).
+
+        Assigning/changing the category re-issues the article number to the new
+        category's prefix — but only while the article has never appeared on an issued
+        invoice (once it has, the number is frozen)."""
+        row = self.conn.execute(
+            "SELECT category_id, article_number FROM article WHERE id=?",
+            (article_id,)).fetchone()
+        if row is None:
             raise KeyError(f"No article {article_id}")
         if fields.get("rate_code") is not None and fields["rate_code"] not in S.MOMS_RATES:
             raise ValueError("Unknown moms rate")
         if fields.get("category_id") is not None:
             self._check_category(fields["category_id"], "income")
+        # Re-issue the number to the new category's prefix (unless frozen / explicit).
+        if ("category_id" in fields and fields["category_id"] != row["category_id"]
+                and "article_number" not in fields and not self.article_in_use(article_id)):
+            new_prefix = (self._category_prefix(fields["category_id"])
+                          if fields["category_id"] is not None else "NY")
+            fields["article_number"] = self._gen_article_number(new_prefix)
         if "article_number" in fields and fields["article_number"]:
             num = fields["article_number"]
             clash = self.conn.execute(
@@ -366,6 +473,125 @@ class BookOps:
             self.conn.execute("UPDATE invoice_line SET article_id=NULL WHERE article_id=?",
                               (article_id,))
             self.conn.execute("DELETE FROM article WHERE id=?", (article_id,))
+
+    # ==================================================================
+    # Stock / lager (inventory batches — pure tracking, no ledger impact)
+    # ==================================================================
+
+    def _next_batch_number(self, article_id: int) -> int:
+        """The next batch number WITHIN an article (max + 1, starting at 1). The full
+        batch id is article_number + batch_number."""
+        row = self.conn.execute(
+            "SELECT MAX(batch_number) FROM stock_batch WHERE article_id=?",
+            (article_id,)).fetchone()
+        return (row[0] or 0) + 1
+
+    def find_or_create_article(self, description: str, category_id: Optional[int] = None,
+                               *, rate_code: str = "25",
+                               reduction_type: Optional[str] = None,
+                               unit: Optional[str] = None,
+                               unit_price_ore: int = 0) -> int:
+        """Return an existing active article matching (description, category) or create a
+        new one. Used by the Inköp flow so buying the same article again adds a batch to
+        the SAME article. Match is on trimmed, case-insensitive description + category.
+        A newly-created article's default à-pris is `unit_price_ore` (the inköp price);
+        an existing article keeps its own price."""
+        desc = (description or "").strip()
+        if not desc:
+            raise ValueError("Artikeln behöver en beskrivning")
+        if category_id is None:
+            row = self.conn.execute(
+                "SELECT id FROM article WHERE active=1 AND category_id IS NULL "
+                "AND lower(trim(description))=lower(?) ORDER BY id LIMIT 1", (desc,)).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT id FROM article WHERE active=1 AND category_id=? "
+                "AND lower(trim(description))=lower(?) ORDER BY id LIMIT 1",
+                (category_id, desc)).fetchone()
+        if row:
+            return row["id"]
+        return self.create_article(desc, category_id=category_id, rate_code=rate_code,
+                                   reduction_type=reduction_type, unit=unit,
+                                   unit_price_ore=int(unit_price_ore))["id"]
+
+    def add_stock_batch(self, article_id: int, qty_centi: int, unit_cost_ore: int, *,
+                        received_date: Optional[str] = None,
+                        supplier_id: Optional[int] = None,
+                        purchase_transaktion_id: Optional[int] = None,
+                        note: Optional[str] = None) -> dict:
+        """Add a buy-in of `article_id` to stock as a new batch. `qty_centi` is the
+        purchased quantity ×100; `unit_cost_ore` the ex-moms cost per unit. Returns the
+        new batch's id + its (visible-in-Lager) batch_number. Pure inventory tracking —
+        it books nothing (any ledger side lives in the linked purchase transaktion)."""
+        if self.conn.execute("SELECT 1 FROM article WHERE id=?", (article_id,)).fetchone() is None:
+            raise KeyError(f"No article {article_id}")
+        qty_centi = int(qty_centi)
+        if qty_centi <= 0:
+            raise ValueError("Antalet måste vara större än 0")
+        unit_cost_ore = int(unit_cost_ore)
+        if unit_cost_ore < 0:
+            raise ValueError("Inköpspriset kan inte vara negativt")
+        if supplier_id is not None and self.conn.execute(
+                "SELECT 1 FROM supplier WHERE id=?", (supplier_id,)).fetchone() is None:
+            raise KeyError(f"No supplier {supplier_id}")
+        number = self._next_batch_number(article_id)
+        date = received_date or _now()[:10]
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO stock_batch(batch_number, article_id, qty_in_centi, "
+                "qty_remaining_centi, unit_cost_ore, supplier_id, purchase_transaktion_id, "
+                "received_date, note, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (number, article_id, qty_centi, qty_centi, unit_cost_ore, supplier_id,
+                 purchase_transaktion_id, date, note, _now()))
+        return {"id": cur.lastrowid, "batch_number": number}
+
+    def list_stock(self, include_empty: bool = False) -> list[dict]:
+        """Per-article stock summary: quantity on hand, number of open batches and the
+        total value (Σ qty_remaining × unit_cost). Only articles that have ever been
+        stocked appear; set include_empty to also show fully-consumed articles."""
+        rows = self.conn.execute(
+            "SELECT a.id AS article_id, a.article_number, a.description, a.unit, "
+            "COUNT(sb.id) AS batch_count, "
+            "COALESCE(SUM(sb.qty_remaining_centi), 0) AS qty_remaining_centi, "
+            "COALESCE(SUM(sb.qty_remaining_centi * sb.unit_cost_ore) / 100, 0) AS value_ore "
+            "FROM stock_batch sb JOIN article a ON a.id = sb.article_id "
+            "GROUP BY a.id ORDER BY a.article_number").fetchall()
+        out = [dict(r) for r in rows]
+        if not include_empty:
+            out = [r for r in out if r["qty_remaining_centi"] > 0]
+        return out
+
+    def list_article_batches(self, article_id: int, open_only: bool = False) -> list[dict]:
+        """All stock batches for one article (newest first), each with batch_number,
+        quantities, unit cost and source. `open_only` hides fully-consumed batches."""
+        sql = ("SELECT sb.id, sb.batch_number, sb.article_id, a.article_number, "
+               "(a.article_number || '-' || sb.batch_number) AS full_batch_id, "
+               "sb.qty_in_centi, sb.qty_remaining_centi, sb.unit_cost_ore, sb.supplier_id, "
+               "s.name AS supplier_name, sb.purchase_transaktion_id, sb.received_date, sb.note "
+               "FROM stock_batch sb LEFT JOIN supplier s ON s.id = sb.supplier_id "
+               "LEFT JOIN article a ON a.id = sb.article_id "
+               "WHERE sb.article_id=? ")
+        if open_only:
+            sql += "AND sb.qty_remaining_centi > 0 "
+        sql += "ORDER BY sb.batch_number DESC"
+        return [dict(r) for r in self.conn.execute(sql, (article_id,)).fetchall()]
+
+    def delete_stock_batch(self, batch_id: int) -> None:
+        """Delete a stock batch. Refused once any of it has been consumed (sold on an
+        invoice line) — the cost is then part of a frozen margin; adjust with a new
+        counter-batch instead."""
+        row = self.conn.execute(
+            "SELECT qty_in_centi, qty_remaining_centi FROM stock_batch WHERE id=?",
+            (batch_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No stock batch {batch_id}")
+        if row["qty_remaining_centi"] != row["qty_in_centi"]:
+            raise InvalidState("Batchen är delvis förbrukad och kan inte tas bort")
+        if self.conn.execute("SELECT 1 FROM invoice_line WHERE stock_batch_id=? LIMIT 1",
+                             (batch_id,)).fetchone():
+            raise InvalidState("Batchen används på en faktura och kan inte tas bort")
+        with self.conn:
+            self.conn.execute("DELETE FROM stock_batch WHERE id=?", (batch_id,))
 
     def create_customer(self, type: str, **fields) -> int:
         """
@@ -438,6 +664,28 @@ class BookOps:
                 self.conn.execute(f"UPDATE customer SET {sets} WHERE kundnummer=?",
                                   (*params, kundnummer))
 
+    def delete_customer(self, kundnummer: int) -> dict:
+        """Remove a customer card from the register. Invoices, transaktioner, offerter and
+        RUT/ROT-ärenden are KEPT (each carries a frozen buyer snapshot + immutable
+        bookings); only their live link to this customer is detached. The customer's
+        household relations and support-time ledger are removed with the card."""
+        if self.conn.execute("SELECT 1 FROM customer WHERE kundnummer=?",
+                             (kundnummer,)).fetchone() is None:
+            raise KeyError(f"No customer {kundnummer}")
+        with self.conn:
+            # Detach the (nullable) live links — the frozen snapshots keep each record whole.
+            for tbl in ("invoice", "transaktion", "rut_recipient", "rut_claim",
+                        "offert", "invoice_draft"):
+                self.conn.execute(f"UPDATE {tbl} SET customer_id=NULL WHERE customer_id=?",
+                                  (kundnummer,))
+            # Household links + this customer's support ledger go with the card.
+            self.conn.execute(
+                "DELETE FROM customer_relation WHERE customer_a=? OR customer_b=?",
+                (kundnummer, kundnummer))
+            self.conn.execute("DELETE FROM support_ledger WHERE customer_id=?", (kundnummer,))
+            self.conn.execute("DELETE FROM customer WHERE kundnummer=?", (kundnummer,))
+        return {"deleted": True, "kundnummer": kundnummer}
+
     def get_customer(self, kundnummer: int) -> dict:
         """Return a customer as a dict with the personnummer decrypted."""
         row = self.conn.execute(
@@ -464,6 +712,7 @@ class BookOps:
         earned_rows = self.conn.execute(
             "SELECT invoice_number, invoice_date, inc_moms_ore, support_minutes_earned, "
             "support_expiry_date FROM invoice WHERE customer_id=? AND husavdrag_shortfall_ore=0 "
+            "AND cancelled_at IS NULL "     # makulerade fakturor ger ingen supporttid
             "AND support_minutes_earned>0 ORDER BY invoice_number", (customer_id,)).fetchall()
         active = [dict(r) for r in earned_rows if (r["support_expiry_date"] or "") >= today]
         earned_active = sum(r["support_minutes_earned"] for r in active)
@@ -630,13 +879,15 @@ class BookOps:
                        note: Optional[str] = None,
                        receipt_original_format: Optional[str] = None,
                        ext_ref: Optional[str] = None,
+                       ores_rounding: bool = False,
                        paid_date: Optional[str] = None) -> dict:
         """
         Record a purchase (ingående moms, deductible). `lines` is a list of
         {rate_code, amount_ore, inclusive} dicts. `ext_ref` is the supplier's
-        kvitto-/fakturanummer. If `paid_date` is given the transaktion is booked
-        immediately (cash); otherwise it stays pending (an incoming supplier invoice
-        awaiting payment — book it now, mark it paid later via register_payment).
+        kvitto-/fakturanummer. `ores_rounding` books the paid total to whole kronor
+        (supplier öresavrundning) with the öre diff to 3740 (moms/underlag stay exact).
+        If `paid_date` is given the transaktion is booked immediately (cash); otherwise
+        it stays pending (an incoming supplier invoice — mark it paid later).
         """
         self._check_category(category_id, "expense")
         tid = self._insert_transaktion(
@@ -646,10 +897,51 @@ class BookOps:
             ext_ref=(ext_ref.strip() if ext_ref and ext_ref.strip() else None),
         )
         self._insert_moms_lines(tid, lines)
+        if ores_rounding:
+            with self.conn:
+                self.conn.execute("UPDATE transaktion SET ores_rounding=1 WHERE id=?", (tid,))
         result = {"transaktion_id": tid}
         if paid_date:
             result.update(self.register_payment(tid, paid_date))
         return result
+
+    def update_expense_meta(self, transaktion_id: int, *,
+                            supplier_id: Optional[int] = None,
+                            ext_ref: Optional[str] = None,
+                            note: Optional[str] = None,
+                            receipt_original_format: Optional[str] = None) -> dict:
+        """Edit an inköp's NON-ledger fields only: leverantör, kvitto-/fakturanummer,
+        note and kvittots originalformat. The BAS-konto, belopp, moms and any articles/
+        batches are part of the bookkeeping and stay immutable (even after the inköp is
+        booked — only this metadata is editable). A field left None is untouched; pass an
+        empty string to clear ext_ref/note."""
+        t = self.conn.execute("SELECT direction FROM transaktion WHERE id=?",
+                              (transaktion_id,)).fetchone()
+        if t is None:
+            raise KeyError(f"No transaktion {transaktion_id}")
+        if t["direction"] != "in":
+            raise InvalidState("Endast inköp kan redigeras här")
+        updates: dict[str, object] = {}
+        if supplier_id is not None:
+            if supplier_id and self.conn.execute(
+                    "SELECT 1 FROM supplier WHERE id=?", (supplier_id,)).fetchone() is None:
+                raise KeyError(f"No supplier {supplier_id}")
+            updates["supplier_id"] = supplier_id or None
+        if ext_ref is not None:
+            updates["ext_ref"] = ext_ref.strip() or None
+        if note is not None:
+            updates["note"] = note.strip() or None
+        if receipt_original_format is not None:
+            if receipt_original_format and receipt_original_format not in S.RECEIPT_FORMATS:
+                raise ValueError(f"Invalid receipt format: {receipt_original_format}")
+            updates["receipt_original_format"] = receipt_original_format or None
+        if updates:
+            cols = list(updates.keys())
+            sets = ", ".join(f"{c}=?" for c in cols)
+            with self.conn:
+                self.conn.execute(f"UPDATE transaktion SET {sets} WHERE id=?",
+                                  (*[updates[c] for c in cols], transaktion_id))
+        return {"transaktion_id": transaktion_id, "updated": list(updates.keys())}
 
     def record_income(self, customer_id: int, category_id: int,
                       lines: list[dict], trans_date: str, *,
@@ -749,7 +1041,13 @@ class BookOps:
             postings = [(k, ex_k, "utgift") for k, ex_k in income_splits]
             if sum_moms:
                 postings.append((self._sys_account("account_ingaende_moms"), sum_moms, "ingående moms"))
-            postings.append((self._sys_account("account_bank"), -inc, "betalning"))
+            # Öresavrundning (supplier rounded to whole kronor): the bank pays the rounded
+            # total; ex-moms + ingående moms stay exact and the öre diff goes to 3740.
+            round_inc = _round_to_krona(inc) if t["ores_rounding"] else inc
+            postings.append((self._sys_account("account_bank"), -round_inc, "betalning"))
+            if round_inc != inc:
+                postings.append((self._sys_account("account_ores_kronutjamning"),
+                                 round_inc - inc, "öresavrundning"))
             text = "Utgift"
         elif rut:  # 'out' — RUT/ROT faktura: öresavrundning on the customer's summa att betala
             # Per avrundningslagen the customer pays whole kronor, but per Skatteverket's
@@ -1433,13 +1731,29 @@ class BookOps:
                 reduction_type = "rut"
             if reduction_type not in (None, "rut", "rot"):
                 raise ValueError(f"Unknown reduction_type {reduction_type!r}")
+            # Optional stock batch: freeze this line's inköpskostnad (qty × unit cost) so
+            # the real margin (revenue − cost) is known, and consume the batch on issue.
+            stock_batch_id = ln.get("stock_batch_id")
+            cost_ore = 0
+            if stock_batch_id is not None:
+                batch = self.conn.execute(
+                    "SELECT article_id, qty_remaining_centi, unit_cost_ore FROM stock_batch "
+                    "WHERE id=?", (int(stock_batch_id),)).fetchone()
+                if batch is None:
+                    raise KeyError(f"No stock batch {stock_batch_id}")
+                if qty_centi > batch["qty_remaining_centi"]:
+                    raise InvalidState(
+                        f"Batchen har inte tillräckligt i lager "
+                        f"(kvar {batch['qty_remaining_centi'] / 100:g}, begärt {qty_centi / 100:g})")
+                cost_ore = round(qty_centi * batch["unit_cost_ore"] / 100)
             computed.append({
                 "line_no": i, "description": ln["description"], "category_id": line_cat,
                 "quantity_centi": qty_centi, "unit": ln.get("unit"),
                 "unit_price_ore": unit_price_ore, "rate_code": rate_code,
                 "reduction_type": reduction_type, "rut_eligible": 1 if reduction_type else 0,
                 "article_id": ln.get("article_id"), "discount_pct_centi": discount_pct_centi,
-                "ex_moms_ore": ex, "moms_ore": moms,
+                "stock_batch_id": int(stock_batch_id) if stock_batch_id is not None else None,
+                "cost_ore": cost_ore, "ex_moms_ore": ex, "moms_ore": moms,
             })
             agg[(line_cat, rate_code)] = agg.get((line_cat, rate_code), 0) + ex
         moms_lines = [{"rate_code": rc, "amount_ore": ex, "inclusive": False, "category_id": cat}
@@ -1542,12 +1856,18 @@ class BookOps:
                 self.conn.execute(
                     "INSERT INTO invoice_line(invoice_id, line_no, description, category_id, "
                     "quantity_centi, unit, unit_price_ore, rate_code, rut_eligible, reduction_type, "
-                    "article_id, discount_pct_centi, ex_moms_ore, moms_ore) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "article_id, discount_pct_centi, stock_batch_id, cost_ore, ex_moms_ore, moms_ore) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (invoice_id, cl["line_no"], cl["description"], cl["category_id"],
                      cl["quantity_centi"], cl["unit"], cl["unit_price_ore"], cl["rate_code"],
                      cl["rut_eligible"], cl["reduction_type"], cl["article_id"],
-                     cl["discount_pct_centi"], cl["ex_moms_ore"], cl["moms_ore"]))
+                     cl["discount_pct_centi"], cl["stock_batch_id"], cl["cost_ore"],
+                     cl["ex_moms_ore"], cl["moms_ore"]))
+                # Consume the picked stock batch (decrement on-hand quantity).
+                if cl["stock_batch_id"] is not None:
+                    self.conn.execute(
+                        "UPDATE stock_batch SET qty_remaining_centi = qty_remaining_centi - ? "
+                        "WHERE id=?", (cl["quantity_centi"], cl["stock_batch_id"]))
             for r in clean_recipients:
                 self.conn.execute(
                     "INSERT INTO rut_recipient(invoice_id, customer_id, first_name, last_name, "
@@ -1645,6 +1965,68 @@ class BookOps:
     def delete_draft(self, draft_id: int) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM invoice_draft WHERE id=?", (draft_id,))
+
+    # ---- inköp (purchase) drafts — save an unbooked inköp and continue later ----
+
+    def save_expense_draft(self, payload: dict, draft_id: Optional[int] = None) -> dict:
+        """Create or update an inköp draft. The whole form payload is stored encrypted;
+        nothing is booked. Returns the draft id + timestamp."""
+        enc = self.session.encrypt_text(json.dumps(payload, default=str))
+        sid = payload.get("supplier_id")
+        now = _now()
+        with self.conn:
+            if draft_id is not None:
+                if self.conn.execute("SELECT 1 FROM expense_draft WHERE id=?",
+                                     (draft_id,)).fetchone() is None:
+                    raise KeyError(f"No expense draft {draft_id}")
+                self.conn.execute(
+                    "UPDATE expense_draft SET supplier_id=?, payload_enc=?, updated_at=? WHERE id=?",
+                    (sid, enc, now, draft_id))
+            else:
+                cur = self.conn.execute(
+                    "INSERT INTO expense_draft(supplier_id, payload_enc, created_at, updated_at) "
+                    "VALUES (?,?,?,?)", (sid, enc, now, now))
+                draft_id = cur.lastrowid
+        return {"id": draft_id, "updated_at": now}
+
+    def list_expense_drafts(self) -> list[dict]:
+        """List inköp drafts with a best-effort summary (row count + estimated inc total)."""
+        out = []
+        for r in self.conn.execute(
+                "SELECT id, supplier_id, payload_enc, updated_at FROM expense_draft "
+                "ORDER BY updated_at DESC").fetchall():
+            try:
+                payload = json.loads(self.session.decrypt_text(r["payload_enc"]))
+            except Exception:
+                payload = {}
+            items = payload.get("items") or []
+            total = 0
+            for it in items:
+                try:
+                    ex = round(int(it.get("quantity_centi", 0)) * int(it.get("unit_cost_ore", 0)) / 100)
+                    rc = it.get("rate_code")
+                    _, _, inc = (compute_moms_figures(ex, rc, inclusive=False)
+                                 if rc in S.MOMS_RATES else (ex, 0, ex))
+                    total += inc
+                except Exception:
+                    pass
+            out.append({"id": r["id"], "supplier_id": r["supplier_id"],
+                        "updated_at": r["updated_at"], "line_count": len(items),
+                        "total_ore": total})
+        return out
+
+    def get_expense_draft(self, draft_id: int) -> dict:
+        row = self.conn.execute(
+            "SELECT id, payload_enc, updated_at FROM expense_draft WHERE id=?",
+            (draft_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No expense draft {draft_id}")
+        return {"id": row["id"], "updated_at": row["updated_at"],
+                "payload": json.loads(self.session.decrypt_text(row["payload_enc"]))}
+
+    def delete_expense_draft(self, draft_id: int) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM expense_draft WHERE id=?", (draft_id,))
 
     # ---- offerter (quotes: numbered proposal documents, book nothing) ----------
     def _next_offert_number(self) -> int:
@@ -1892,13 +2274,21 @@ class BookOps:
     def list_invoices(self) -> list[dict]:
         rows = self.conn.execute(
             "SELECT id, invoice_number, invoice_date, due_date, customer_id, transaktion_id, "
-            "inc_moms_ore, rut_total_ore, rot_total_ore, parent_invoice_id, "
+            "ex_moms_ore, inc_moms_ore, rut_total_ore, rot_total_ore, parent_invoice_id, "
             "husavdrag_shortfall_ore, relation_note FROM invoice ORDER BY invoice_number"
             ).fetchall()
         out = []
         for r in rows:
             d = dict(r)
             d.update(self._invoice_balances(r["id"]))
+            # Real margin from picked stock batches (revenue ex moms − frozen cost).
+            crow = self.conn.execute(
+                "SELECT COALESCE(SUM(cost_ore), 0) AS cost_ore, "
+                "COUNT(stock_batch_id) AS with_cost FROM invoice_line WHERE invoice_id=?",
+                (r["id"],)).fetchone()
+            d["cost_ore"] = crow["cost_ore"]
+            d["has_cost"] = bool(crow["with_cost"])
+            d["margin_ore"] = r["ex_moms_ore"] - crow["cost_ore"]
             d["credit_notes"] = [dict(c) for c in self.conn.execute(
                 "SELECT id, credit_note_number, date, amount_ore FROM invoice_event "
                 "WHERE invoice_id=? AND kind='credit' AND credit_note_number IS NOT NULL "
@@ -1939,9 +2329,15 @@ class BookOps:
             "SELECT il.line_no, il.description, il.category_id, c.name AS category_name, "
             "c.bas_konto AS category_bas_konto, il.quantity_centi, il.unit, il.unit_price_ore, "
             "il.rate_code, il.rut_eligible, il.reduction_type, il.discount_pct_centi, "
-            "il.ex_moms_ore, il.moms_ore "
+            "il.stock_batch_id, sb.batch_number, il.cost_ore, il.ex_moms_ore, il.moms_ore "
             "FROM invoice_line il LEFT JOIN category c ON c.id = il.category_id "
+            "LEFT JOIN stock_batch sb ON sb.id = il.stock_batch_id "
             "WHERE il.invoice_id=? ORDER BY il.line_no", (invoice_id,)).fetchall()]
+        # Real margin from any picked stock batches (revenue ex moms − frozen cost).
+        # `has_cost` says whether any line carried a cost (else margin is unknown).
+        inv["cost_ore"] = sum(ln["cost_ore"] for ln in inv["lines"])
+        inv["has_cost"] = any(ln["stock_batch_id"] for ln in inv["lines"])
+        inv["margin_ore"] = inv["ex_moms_ore"] - inv["cost_ore"]
         inv["recipients"] = [{
             "customer_id": r["customer_id"],
             "first_name": r["first_name"], "last_name": r["last_name"],
@@ -1981,6 +2377,16 @@ class BookOps:
                              (invoice_id,)).fetchone():
             raise InvalidState("Invoice has payments/credits; kreditera/återbetala it instead")
         with self.conn:
+            # Return any consumed stock to its batch (the goods were never sold).
+            for ln in self.conn.execute(
+                    "SELECT stock_batch_id, quantity_centi FROM invoice_line "
+                    "WHERE invoice_id=? AND stock_batch_id IS NOT NULL", (invoice_id,)).fetchall():
+                self.conn.execute(
+                    "UPDATE stock_batch SET qty_remaining_centi = qty_remaining_centi + ? "
+                    "WHERE id=?", (ln["quantity_centi"], ln["stock_batch_id"]))
+            self.conn.execute(
+                "UPDATE invoice_line SET stock_batch_id=NULL, cost_ore=0 WHERE invoice_id=?",
+                (invoice_id,))
             # Detach the invoice first so deleting the transaktion can't trip the FK.
             self.conn.execute(
                 "UPDATE invoice SET cancelled_at=?, transaktion_id=NULL WHERE id=?",

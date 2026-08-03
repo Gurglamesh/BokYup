@@ -58,10 +58,12 @@ class ImportReq(BaseModel):
 
 class CategoryReq(BaseModel):
     name: str
-    kind: str                     # 'income' | 'expense'
-    bas_konto: int
+    kind: Optional[str] = None    # 'income' | 'expense' (inherited from parent for a subcategory)
+    bas_konto: Optional[int] = None   # inherited from parent when a parent_id is given
     default_rate_code: Optional[str] = None   # default moms for lines on this category
     account_name: Optional[str] = None
+    prefix: Optional[str] = None  # unique 4-digit article-number prefix (auto if omitted)
+    parent_id: Optional[int] = None   # makes this a subcategory of parent_id
 
 
 class CategoryUpdateReq(BaseModel):
@@ -70,6 +72,8 @@ class CategoryUpdateReq(BaseModel):
     default_rate_code: Optional[str] = None
     active: Optional[bool] = None
     account_name: Optional[str] = None
+    prefix: Optional[str] = None
+    parent_id: Optional[int] = None   # reparent (0 = make top-level)
 
 
 class CustomerReq(BaseModel):
@@ -133,15 +137,39 @@ class MomsLineReq(BaseModel):
     inclusive: bool = True
 
 
+class ExpenseItemReq(BaseModel):
+    # One inköp line: qty × à-cost (ex moms) at a rate. A non-empty `description` makes it
+    # a stocked article (find-or-created under its product category) → a batch on booking.
+    quantity_centi: int
+    unit_cost_ore: int                 # à-pris ex moms per unit
+    rate_code: str
+    description: Optional[str] = None   # article name (blank = pure cost line, no stock)
+    category_id: Optional[int] = None  # the article's product (income) category
+    reduction_type: Optional[str] = None
+    unit: Optional[str] = None
+    to_stock: bool = True
+    note: Optional[str] = None
+
+
 class RecordExpenseReq(BaseModel):
     category_id: int
-    lines: list[MomsLineReq]
     trans_date: str
+    lines: Optional[list[MomsLineReq]] = None     # legacy: raw moms lines
+    items: Optional[list[ExpenseItemReq]] = None  # new: article line-items (create batches)
     supplier_id: Optional[int] = None
     note: Optional[str] = None
     receipt_original_format: Optional[str] = None   # 'paper' | 'digital'
     ext_ref: Optional[str] = None                   # supplier's kvitto-/fakturanummer
+    ores_rounding: bool = False                     # supplier rounded the total to whole krona
     paid_date: Optional[str] = None
+
+
+class ExpenseMetaReq(BaseModel):
+    # Editable NON-ledger fields of an inköp (BAS-konto/belopp/moms/artiklar are immutable).
+    supplier_id: Optional[int] = None
+    ext_ref: Optional[str] = None
+    note: Optional[str] = None
+    receipt_original_format: Optional[str] = None
 
 
 class RecordIncomeReq(BaseModel):
@@ -241,7 +269,7 @@ class PaymentMethodUpdateReq(BaseModel):
 
 class ArticleReq(BaseModel):
     description: str
-    prefix: str                   # the user-chosen 4-digit article-number prefix
+    prefix: Optional[str] = None  # override; normally the number's prefix comes from the category
     unit_price_ore: int = 0
     rate_code: str = "25"
     reduction_type: Optional[str] = None
@@ -271,6 +299,17 @@ class InvoiceLineReq(BaseModel):
     rut_eligible: bool = False             # back-compat: True == reduction_type 'rut'
     article_id: Optional[int] = None       # catalog article this line came from
     discount_pct_centi: int = 0            # per-line % rabatt * 100 (15 % -> 1500)
+    stock_batch_id: Optional[int] = None   # picked lager batch (real margin + consumes stock)
+
+
+class StockBatchReq(BaseModel):
+    article_id: int
+    qty_centi: int                # quantity bought in * 100
+    unit_cost_ore: int            # ex-moms cost per unit
+    received_date: Optional[str] = None
+    supplier_id: Optional[int] = None
+    purchase_transaktion_id: Optional[int] = None
+    note: Optional[str] = None
 
 
 class RutRecipientReq(BaseModel):
