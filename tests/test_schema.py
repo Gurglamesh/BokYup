@@ -378,6 +378,17 @@ class TestMigration:
         info = {r["name"]: r for r in db.execute("PRAGMA table_info(rut_claim)")}
         assert info["customer_id"]["notnull"] == 0
 
+    def test_migrate_v29_adds_expense_draft(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        S.initialize_schema(db)
+        db.execute("DROP TABLE expense_draft")
+        db.execute("PRAGMA user_version = 29")
+        db.commit()
+        assert S.migrate(db) == S.SCHEMA_VERSION
+        names = {r["name"] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "expense_draft" in names
+
     def test_migrate_is_idempotent(self, conn):
         before = S.get_schema_version(conn)
         assert S.migrate(conn) == before     # already current -> no-op

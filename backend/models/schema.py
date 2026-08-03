@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -334,6 +334,15 @@ CREATE TABLE invoice_event (
 CREATE TABLE invoice_draft (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     customer_id INTEGER,                          -- for the list view (nullable while editing)
+    payload_enc TEXT NOT NULL,                    -- AES-256-GCM(DEK) JSON of the form inputs
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+-- ----- inköp (purchase) drafts: save an unbooked inköp and continue later ----
+CREATE TABLE expense_draft (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    supplier_id INTEGER,                          -- for the list view (nullable while editing)
     payload_enc TEXT NOT NULL,                    -- AES-256-GCM(DEK) JSON of the form inputs
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
@@ -924,6 +933,15 @@ _MIGRATIONS: dict[int, str] = {
     """,
     29: """
         ALTER TABLE transaktion ADD COLUMN ores_rounding INTEGER NOT NULL DEFAULT 0;
+    """,
+    30: """
+        CREATE TABLE IF NOT EXISTS expense_draft (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            supplier_id INTEGER,
+            payload_enc TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
     """,
 }
 

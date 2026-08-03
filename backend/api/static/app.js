@@ -435,10 +435,11 @@ const SECTION_RENDERERS = {
 
   // ----- inköp (purchases: expenses + supplier invoices + receipts) -----
   async purchases(panel) {
-    const [txs, cats, suppliers] = await Promise.all([
+    const [txs, cats, suppliers, drafts] = await Promise.all([
       api("GET", `/books/${bid()}/transaktioner`),
       api("GET", `/books/${bid()}/categories`),
       api("GET", `/books/${bid()}/suppliers`),
+      api("GET", `/books/${bid()}/expense-drafts`),
     ]);
     const catName = Object.fromEntries(cats.map((c) => [c.id, c.name]));
     const supName = Object.fromEntries(suppliers.map((s) => [s.id, s.name]));
@@ -447,6 +448,25 @@ const SECTION_RENDERERS = {
     panel.appendChild(el("p", { class: "muted", style: "margin-top:6px" },
       "Inköp och utgifter till firman. Ange kvitto- eller fakturanummer och bifoga kvittot. "
       + "En leverantörsfaktura kan bokföras direkt och markeras som betald när den betalas."));
+
+    // Sparade utkast (opåbörjade inköp) — fortsätt eller ta bort.
+    if (drafts.length) {
+      panel.appendChild(el("h3", { style: "margin-top:14px" }, `Utkast (${drafts.length})`));
+      panel.appendChild(simpleTable(
+        ["Sparat", "Leverantör", "Rader", "Summa (ca)", ""],
+        drafts.map((d) => [d.updated_at ? d.updated_at.slice(0, 16).replace("T", " ") : "—",
+          supName[d.supplier_id] || "—", d.line_count,
+          toKr(d.total_ore || 0) + " kr",
+          el("span", { style: "display:inline-flex;gap:4px" },
+            el("button", { class: "btn small", onclick: () => guard(async () => {
+              const full = await api("GET", `/books/${bid()}/expense-drafts/${d.id}`);
+              await purchaseForm(panel, full);
+            }) }, "Fortsätt"),
+            el("button", { class: "btn small ghost danger", onclick: () => guard(async () => {
+              await api("DELETE", `/books/${bid()}/expense-drafts/${d.id}`);
+              toast("Utkast borttaget"); renderWorkspace();
+            }) }, "Ta bort"))])));
+    }
     if (list.length === 0) { panel.appendChild(el("p", { class: "muted" }, "Inga inköp ännu.")); return; }
     const actions = (t) => el("span", { style: "display:inline-flex;gap:4px" },
       el("button", { class: "btn small ghost", onclick: () => guard(() => receiptsFlow(t.id, t.status === "pending")) }, "📎 Kvitto"),
@@ -2818,7 +2838,7 @@ async function offertToInvoiceFlow(o) {
 // qty × à-cost (ex moms) + moms rate. A named row becomes a stock batch on booking; a
 // blank-name row is a pure cost line (still booked, no stock). Picking an existing
 // article prefills the row (so buying it again just adds a batch to the same article).
-function purchaseItemsEditor(incomeCats, articles, onChange) {
+function purchaseItemsEditor(incomeCats, articles, onChange, initialItems) {
   const rowsBox = el("div", {});
   const cats = incomeCats || [];
   const arts = articles || [];
@@ -2838,8 +2858,10 @@ function purchaseItemsEditor(incomeCats, articles, onChange) {
       const o = cat.querySelector(`option[value="${nc.id}"]`);
       if (o) o.textContent = categoryPath(cats, nc.id);
     });
-    const qty = el("input", { type: "text", value: v.qty || "1", style: "width:60px", oninput: fire });
-    const cost = el("input", { type: "text", value: v.cost || "0,00", style: "width:96px", oninput: fire });
+    const qtyVal = v.quantity_centi != null ? String(v.quantity_centi / 100).replace(".", ",") : (v.qty || "1");
+    const costVal = v.unit_cost_ore != null ? toKr(v.unit_cost_ore) : (v.cost || "0,00");
+    const qty = el("input", { type: "text", value: qtyVal, style: "width:60px", oninput: fire });
+    const cost = el("input", { type: "text", value: costVal, style: "width:96px", oninput: fire });
     const rate = el("select", { onchange: fire }, ...RATE_OPTIONS.map((r) => el("option", { value: r }, rateLabel(r))));
     if (v.rate_code) rate.value = v.rate_code;
     pick.onchange = () => {
@@ -2863,7 +2885,7 @@ function purchaseItemsEditor(incomeCats, articles, onChange) {
     });
     rowsBox.appendChild(row);
   }
-  addRow();
+  if (initialItems && initialItems.length) initialItems.forEach(addRow); else addRow();
   const element = el("div", {}, rowsBox,
     el("button", { class: "btn small ghost", onclick: () => addRow() }, "+ Rad"));
   return { element, get: () => [...rowsBox.children].map((r) => r._get()).filter((l) => l.quantity_centi > 0) };
@@ -2892,7 +2914,9 @@ async function editPurchaseFlow(t, suppliers) {
   renderWorkspace();
 }
 
-async function purchaseForm(panel) {
+async function purchaseForm(panel, draft) {
+  const dp = (draft && draft.payload) || {};      // prefill from a saved inköp-utkast
+  let draftId = draft ? draft.id : null;
   const [cats, suppliers, articles] = await Promise.all([
     api("GET", `/books/${bid()}/categories`),
     api("GET", `/books/${bid()}/suppliers`),
@@ -2909,22 +2933,27 @@ async function purchaseForm(panel) {
     return;
   }
   panel.innerHTML = "";
-  panel.appendChild(el("h2", {}, "Nytt inköp"));
+  panel.appendChild(el("h2", {}, draftId ? "Inköp (utkast forts.)" : "Nytt inköp"));
   // Leverantör is required — start on a placeholder so nothing is booked without one.
   const supplier = el("select", {}, el("option", { value: "" }, "— Välj leverantör —"),
     ...suppliers.map((s) => el("option", { value: s.id }, s.name)));
+  if (dp.supplier_id) supplier.value = String(dp.supplier_id);
   const cat = el("select", {}, ...expenseCats.map((c) => el("option", { value: c.id }, categoryPath(expenseCats, c.id))));
+  if (dp.category_id) cat.value = String(dp.category_id);
   const today = new Date().toISOString().slice(0, 10);
-  const date = el("input", { type: "date", value: today });
-  const extRef = el("input", { type: "text", placeholder: "t.ex. kvitto 1234 / faktura FAKT-99" });
+  const date = el("input", { type: "date", value: dp.trans_date || today });
+  const extRef = el("input", { type: "text", placeholder: "t.ex. kvitto 1234 / faktura FAKT-99", value: dp.ext_ref || "" });
   const paidNow = el("select", {},
     el("option", { value: "yes" }, "Ja, betald nu"),
     el("option", { value: "no" }, "Nej, leverantörsfaktura (betalas senare)"));
+  if (dp.paid === "no") paidNow.value = "no";
   const payDate = el("input", { type: "date", value: today });
   const payDateWrap = wrap("Betaldatum", payDate);
   paidNow.onchange = () => { payDateWrap.style.display = paidNow.value === "yes" ? "" : "none"; };
+  payDateWrap.style.display = paidNow.value === "yes" ? "" : "none";
   // Öresavrundning: only when the supplier rounds the total to whole kronor. Off by default.
   const ores = el("input", { type: "checkbox" });
+  if (dp.ores_rounding) ores.checked = true;
   const oresWrap = el("label", { style: "display:inline-flex;gap:6px;align-items:center" },
     ores, el("span", {}, "Leverantören öresavrundar totalen (diff bokförs på 3740)"));
   const totalsBox = el("p", { class: "muted", style: "margin-top:6px" });
@@ -2936,8 +2965,23 @@ async function purchaseForm(panel) {
     }
     totalsBox.textContent = `Summa: ${toKr(ex)} kr ex moms + ${toKr(moms)} kr moms = ${toKr(ex + moms)} kr`;
   };
-  const items = purchaseItemsEditor(incomeCats, articles, updateTotals);
+  const items = purchaseItemsEditor(incomeCats, articles, updateTotals, dp.items);
   const receipt = receiptPicker({ requireFormat: true });
+  const draftPayload = () => ({
+    supplier_id: supplier.value ? parseInt(supplier.value, 10) : null,
+    category_id: cat.value ? parseInt(cat.value, 10) : null,
+    trans_date: date.value, ext_ref: extRef.value || null, paid: paidNow.value,
+    ores_rounding: ores.checked, items: items.get(),
+  });
+  async function saveDraft() {
+    const payload = draftPayload();
+    if (draftId) {
+      await api("PUT", `/books/${bid()}/expense-drafts/${draftId}`, { payload });
+    } else {
+      draftId = (await api("POST", `/books/${bid()}/expense-drafts`, { payload })).id;
+    }
+    toast("Utkast sparat");
+  }
 
   panel.appendChild(el("div", { class: "row" },
     wrap("Leverantör", supplier), wrap("Bokförs på (kostnadskonto)", cat),
@@ -2952,6 +2996,7 @@ async function purchaseForm(panel) {
     el("label", {}, "Kvitto/faktura (bild eller PDF) — välj papper eller digitalt"), receipt.element));
   panel.appendChild(el("div", { style: "margin-top:14px" },
     el("button", { class: "btn brand", onclick: () => guard(submit) }, "Bokför inköp"),
+    el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(saveDraft) }, "Spara utkast"),
     el("button", { class: "btn ghost", style: "margin-left:8px",
       onclick: () => { state.section = "purchases"; renderWorkspace(); } }, "Avbryt")));
   updateTotals();
@@ -2977,6 +3022,7 @@ async function purchaseForm(panel) {
         image_base64: staged.image_base64, mime: staged.mime, original_format: staged.original_format,
       });
     }
+    if (draftId) { try { await api("DELETE", `/books/${bid()}/expense-drafts/${draftId}`); } catch (e) { /* ignore */ } }
     state.section = "purchases";
     renderWorkspace();
     const n = (res.batches || []).length;

@@ -535,6 +535,28 @@ def _build_router():
     def delete_draft(book_id: str, draft_id: int, request: Request):
         return fac(request).h_delete_draft({"book_id": book_id, "draft_id": draft_id}, {}, {})
 
+    # ---- inköp (expense) drafts ----
+    @r.get("/books/{book_id}/expense-drafts")
+    def list_expense_drafts(book_id: str, request: Request):
+        return fac(request).h_list_expense_drafts({"book_id": book_id}, {}, {})
+
+    @r.post("/books/{book_id}/expense-drafts", status_code=201)
+    def create_expense_draft(book_id: str, body: sc.InvoiceDraftReq, request: Request):
+        return fac(request).h_create_expense_draft({"book_id": book_id}, body.model_dump(), {})
+
+    @r.get("/books/{book_id}/expense-drafts/{draft_id}")
+    def get_expense_draft(book_id: str, draft_id: int, request: Request):
+        return fac(request).h_get_expense_draft({"book_id": book_id, "draft_id": draft_id}, {}, {})
+
+    @r.put("/books/{book_id}/expense-drafts/{draft_id}")
+    def update_expense_draft(book_id: str, draft_id: int, body: sc.InvoiceDraftReq, request: Request):
+        return fac(request).h_update_expense_draft(
+            {"book_id": book_id, "draft_id": draft_id}, body.model_dump(), {})
+
+    @r.delete("/books/{book_id}/expense-drafts/{draft_id}")
+    def delete_expense_draft(book_id: str, draft_id: int, request: Request):
+        return fac(request).h_delete_expense_draft({"book_id": book_id, "draft_id": draft_id}, {}, {})
+
     @r.get("/books/{book_id}/offerter")
     def list_offerter(book_id: str, request: Request):
         return fac(request).h_list_offerter({"book_id": book_id}, {}, {})

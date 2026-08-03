@@ -1599,3 +1599,30 @@ class TestExpenseExtras:
         inc = ops.record_income(kid, icat, [{"rate_code": "25", "amount_ore": 10000}], "2026-05-01")
         with pytest.raises(InvalidState):
             ops.update_expense_meta(inc["transaktion_id"], ext_ref="Z")
+
+
+class TestExpenseDrafts:
+    def test_save_list_get_delete_roundtrip(self, ops):
+        sup = ops.create_supplier("Inet")
+        payload = {"supplier_id": sup, "category_id": None, "trans_date": "2026-05-01",
+                   "items": [{"description": "Router", "quantity_centi": 200,
+                              "unit_cost_ore": 60000, "rate_code": "25"}]}
+        d = ops.save_expense_draft(payload)
+        lst = ops.list_expense_drafts()
+        assert len(lst) == 1 and lst[0]["supplier_id"] == sup and lst[0]["line_count"] == 1
+        assert lst[0]["total_ore"] == 150000            # 2 × 600 × 1.25
+        got = ops.get_expense_draft(d["id"])
+        assert got["payload"]["items"][0]["description"] == "Router"
+        # update in place
+        payload["items"].append({"description": "Kabel", "quantity_centi": 100,
+                                 "unit_cost_ore": 5000, "rate_code": "25"})
+        ops.save_expense_draft(payload, draft_id=d["id"])
+        assert ops.list_expense_drafts()[0]["line_count"] == 2
+        ops.delete_expense_draft(d["id"])
+        assert ops.list_expense_drafts() == []
+
+    def test_payload_is_encrypted_at_rest(self, ops):
+        d = ops.save_expense_draft({"items": [{"description": "HemligPryl"}]})
+        raw = ops.conn.execute("SELECT payload_enc FROM expense_draft WHERE id=?",
+                               (d["id"],)).fetchone()[0]
+        assert "HemligPryl" not in raw

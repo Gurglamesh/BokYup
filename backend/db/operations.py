@@ -1966,6 +1966,68 @@ class BookOps:
         with self.conn:
             self.conn.execute("DELETE FROM invoice_draft WHERE id=?", (draft_id,))
 
+    # ---- inköp (purchase) drafts — save an unbooked inköp and continue later ----
+
+    def save_expense_draft(self, payload: dict, draft_id: Optional[int] = None) -> dict:
+        """Create or update an inköp draft. The whole form payload is stored encrypted;
+        nothing is booked. Returns the draft id + timestamp."""
+        enc = self.session.encrypt_text(json.dumps(payload, default=str))
+        sid = payload.get("supplier_id")
+        now = _now()
+        with self.conn:
+            if draft_id is not None:
+                if self.conn.execute("SELECT 1 FROM expense_draft WHERE id=?",
+                                     (draft_id,)).fetchone() is None:
+                    raise KeyError(f"No expense draft {draft_id}")
+                self.conn.execute(
+                    "UPDATE expense_draft SET supplier_id=?, payload_enc=?, updated_at=? WHERE id=?",
+                    (sid, enc, now, draft_id))
+            else:
+                cur = self.conn.execute(
+                    "INSERT INTO expense_draft(supplier_id, payload_enc, created_at, updated_at) "
+                    "VALUES (?,?,?,?)", (sid, enc, now, now))
+                draft_id = cur.lastrowid
+        return {"id": draft_id, "updated_at": now}
+
+    def list_expense_drafts(self) -> list[dict]:
+        """List inköp drafts with a best-effort summary (row count + estimated inc total)."""
+        out = []
+        for r in self.conn.execute(
+                "SELECT id, supplier_id, payload_enc, updated_at FROM expense_draft "
+                "ORDER BY updated_at DESC").fetchall():
+            try:
+                payload = json.loads(self.session.decrypt_text(r["payload_enc"]))
+            except Exception:
+                payload = {}
+            items = payload.get("items") or []
+            total = 0
+            for it in items:
+                try:
+                    ex = round(int(it.get("quantity_centi", 0)) * int(it.get("unit_cost_ore", 0)) / 100)
+                    rc = it.get("rate_code")
+                    _, _, inc = (compute_moms_figures(ex, rc, inclusive=False)
+                                 if rc in S.MOMS_RATES else (ex, 0, ex))
+                    total += inc
+                except Exception:
+                    pass
+            out.append({"id": r["id"], "supplier_id": r["supplier_id"],
+                        "updated_at": r["updated_at"], "line_count": len(items),
+                        "total_ore": total})
+        return out
+
+    def get_expense_draft(self, draft_id: int) -> dict:
+        row = self.conn.execute(
+            "SELECT id, payload_enc, updated_at FROM expense_draft WHERE id=?",
+            (draft_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No expense draft {draft_id}")
+        return {"id": row["id"], "updated_at": row["updated_at"],
+                "payload": json.loads(self.session.decrypt_text(row["payload_enc"]))}
+
+    def delete_expense_draft(self, draft_id: int) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM expense_draft WHERE id=?", (draft_id,))
+
     # ---- offerter (quotes: numbered proposal documents, book nothing) ----------
     def _next_offert_number(self) -> int:
         return self.conn.execute(

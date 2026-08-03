@@ -655,6 +655,23 @@ class AppFacade:
         self._ops(p["book_id"]).delete_draft(int(p["draft_id"]))
         return {"deleted": True}
 
+    # ---- inköp (expense) drafts ----
+    def h_list_expense_drafts(self, p, b, q):
+        return self._ops(p["book_id"]).list_expense_drafts()
+
+    def h_create_expense_draft(self, p, b, q):
+        return self._ops(p["book_id"]).save_expense_draft(b["payload"])
+
+    def h_get_expense_draft(self, p, b, q):
+        return self._ops(p["book_id"]).get_expense_draft(int(p["draft_id"]))
+
+    def h_update_expense_draft(self, p, b, q):
+        return self._ops(p["book_id"]).save_expense_draft(b["payload"], draft_id=int(p["draft_id"]))
+
+    def h_delete_expense_draft(self, p, b, q):
+        self._ops(p["book_id"]).delete_expense_draft(int(p["draft_id"]))
+        return {"deleted": True}
+
     # ---- offerter (quotes) ----
     def h_list_offerter(self, p, b, q):
         return self._ops(p["book_id"]).list_offerter()
@@ -828,6 +845,11 @@ _route("POST", "/books/{book_id}/invoice-drafts", "h_create_draft", 201)
 _route("GET", "/books/{book_id}/invoice-drafts/{draft_id}", "h_get_draft")
 _route("PUT", "/books/{book_id}/invoice-drafts/{draft_id}", "h_update_draft")
 _route("DELETE", "/books/{book_id}/invoice-drafts/{draft_id}", "h_delete_draft")
+_route("GET", "/books/{book_id}/expense-drafts", "h_list_expense_drafts")
+_route("POST", "/books/{book_id}/expense-drafts", "h_create_expense_draft", 201)
+_route("GET", "/books/{book_id}/expense-drafts/{draft_id}", "h_get_expense_draft")
+_route("PUT", "/books/{book_id}/expense-drafts/{draft_id}", "h_update_expense_draft")
+_route("DELETE", "/books/{book_id}/expense-drafts/{draft_id}", "h_delete_expense_draft")
 _route("GET", "/books/{book_id}/offerter", "h_list_offerter")
 _route("POST", "/books/{book_id}/offerter", "h_create_offert", 201)
 _route("GET", "/books/{book_id}/offerter/{offert_id}/pdf", "h_offert_pdf")

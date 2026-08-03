@@ -1117,6 +1117,23 @@ class TestArticles:
         assert client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()["ex_moms_ore"] == 90000
 
 
+class TestExpenseDrafts:
+    def test_expense_draft_crud(self, client, book):
+        sup = client.post(f"/books/{book}/suppliers", json={"name": "Inet"}).json()["id"]
+        payload = {"supplier_id": sup, "trans_date": "2026-05-01",
+                   "items": [{"description": "Router", "quantity_centi": 100,
+                              "unit_cost_ore": 60000, "rate_code": "25"}]}
+        d = client.post(f"/books/{book}/expense-drafts", json={"payload": payload})
+        assert d.status_code == 201
+        did = d.json()["id"]
+        lst = client.get(f"/books/{book}/expense-drafts").json()
+        assert len(lst) == 1 and lst[0]["supplier_id"] == sup
+        got = client.get(f"/books/{book}/expense-drafts/{did}").json()
+        assert got["payload"]["items"][0]["description"] == "Router"
+        assert client.delete(f"/books/{book}/expense-drafts/{did}").status_code == 200
+        assert client.get(f"/books/{book}/expense-drafts").json() == []
+
+
 class TestCustomerDelete:
     def test_delete_customer_keeps_invoice(self, client, book):
         cat = client.post(f"/books/{book}/categories",
