@@ -3279,7 +3279,11 @@ async function invoiceForm(panel, draft) {
       totalsBox.appendChild(kvRow(`Marginal (${pct} %)`, m.margin, { bold: true }));
     }
   }
-  const lines = lineItemsEditor(incomeCats, () => { recips.recompute(); updateTotals(); }, dp.lines || [], articles, loadBatches);
+  // Forward hook so the line editor's onChange (fires on add/remove-row + batch/rate picks,
+  // which are button clicks, not DOM input events) also triggers the debounced autosave.
+  let formAutosave = () => {};
+  const lines = lineItemsEditor(incomeCats,
+    () => { recips.recompute(); updateTotals(); formAutosave(); }, dp.lines || [], articles, loadBatches);
   customer.onchange = () => recips.reloadPeople();
   invDate.onchange = () => recips.refreshCaps();
 
@@ -3345,6 +3349,7 @@ async function invoiceForm(panel, draft) {
     clearTimeout(autosaveTimer);
     autosaveTimer = setTimeout(() => guard(autosave), 1200);
   };
+  formAutosave = scheduleAutosave;                  // wire the line-editor onChange hook
   panel.addEventListener("input", scheduleAutosave);
   panel.addEventListener("change", scheduleAutosave);
 
