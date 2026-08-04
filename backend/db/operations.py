@@ -2220,6 +2220,40 @@ class BookOps:
         draft = self.get_draft(draft_id)
         return self.create_offert(draft["payload"], source_draft_id=draft_id)
 
+    def preview_invoice_render(self, payload: dict) -> dict:
+        """Build a FAKTURA render dict from a form payload WITHOUT persisting or booking —
+        for a pre-issue PDF preview. No invoice_number is assigned; support minutes/cap and
+        licence keys are shown as they would be if issued now. Reuses _offert_figures so the
+        booking path is untouched."""
+        customer_id = payload.get("customer_id")
+        if not customer_id:
+            raise ValueError("Välj en kund först")
+        customer = self.get_customer(int(customer_id))
+        fig = self._offert_figures(int(customer_id), customer, payload.get("lines") or [],
+                                   payload.get("recipients") or [], payload.get("category_id"))
+        invoice_date = payload.get("invoice_date") or _now()[:10]
+        inc_total = fig["inc_moms_ore"]
+        support_cap = int(self._config("support_cap_minutes"))
+        available_before = self.support_balance(int(customer_id))["remaining_minutes"]
+        support_cap_reached = available_before >= support_cap
+        support_minutes = 0 if support_cap_reached else min(
+            support_minutes_earned(inc_total), support_cap - available_before)
+        return {
+            "doc_type": "faktura_preview", "invoice_number": None,
+            "invoice_date": invoice_date, "due_date": payload.get("due_date"),
+            "delivery_date": payload.get("delivery_date"),
+            "buyer": customer, "seller": self.get_company(),
+            "payment_methods": self.list_payment_methods(active_only=True),
+            "payment_terms": payload.get("payment_terms"),
+            "your_reference": payload.get("your_reference"),
+            "our_reference": payload.get("our_reference"), "note": payload.get("note"),
+            "support_minutes_earned": support_minutes,
+            "support_expiry_date": _add_months(invoice_date, 36),
+            "support_cap_reached": 1 if support_cap_reached else 0,
+            "license_keys": [str(k).strip() for k in (payload.get("license_keys") or []) if str(k).strip()],
+            **fig,
+        }
+
     def list_offerter(self) -> list[dict]:
         return [dict(r) for r in self.conn.execute(
             "SELECT o.id, o.offert_number, o.customer_id, o.offert_date, o.valid_until, "

@@ -3314,6 +3314,7 @@ async function invoiceForm(panel, draft) {
   const draftStatus = el("span", { class: "muted", style: "margin-left:12px;font-size:12px" });
   panel.appendChild(el("div", { style: "margin-top:16px" },
     el("button", { class: "btn brand", onclick: () => guard(submit) }, "Skapa faktura"),
+    el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(previewInvoice) }, "Förhandsgranska"),
     el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(saveDraft) }, "Spara utkast"),
     el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(createOffert) }, "Skapa offert"),
     el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => { state.section = "invoices"; renderWorkspace(); } }, "Avbryt"),
@@ -3364,6 +3365,16 @@ async function invoiceForm(panel, draft) {
       lines: lines.get(), recipients: recips.get(),
       license_keys: licenseKeys.value.split("\n").map((s) => s.trim()).filter(Boolean),
     };
+  }
+
+  async function previewInvoice() {
+    const body = collectBody();
+    if (!body.customer_id) { toast("Välj en kund först", true); return; }
+    if (!(body.lines || []).some((l) => (l.description || "").trim())) {
+      toast("Lägg till minst en artikelrad", true); return;
+    }
+    const m = await postMediaUrl(`/books/${bid()}/invoices/preview`, body);
+    await showPdfSrc(m.src, "Förhandsvisning-faktura.pdf", m.revoke);
   }
 
   async function createOffert() {
@@ -3792,10 +3803,27 @@ function recipientsEditor(opts) {
 // default): the PDF renders inline in an <iframe>. Desktop points the iframe at the
 // same-origin endpoint (WebView2/browsers render PDFs inline); the phone build (no
 // HTTP) builds a blob from the base64 the native bridge returns.
+// POST a JSON body and get a viewable src for the returned PDF (mirrors mediaUrl but for
+// endpoints that need a payload, e.g. the pre-issue invoice preview).
+async function postMediaUrl(path, body) {
+  if (!isServer() && window.__BOKYUP_NATIVE__) {
+    const r = await api("POST", path, body);          // phone shim → {media_type, base64}
+    return { src: `data:${r.media_type};base64,${r.base64}`, revoke: null };
+  }
+  const resp = await fetch(apiBase() + path, {
+    method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(body) });
+  if (!resp.ok) throw new ApiError("HTTP " + resp.status, resp.status);
+  const url = URL.createObjectURL(await resp.blob());
+  return { src: url, revoke: url };
+}
+
 async function showPdf(path, fname) {
-  let src, revoke = null;
   const m = await mediaUrl(path);
-  src = m.src; revoke = m.revoke;
+  return showPdfSrc(m.src, fname, m.revoke);
+}
+
+async function showPdfSrc(src, fname, revoke) {
   $("#modal-title").textContent = fname;
   const body = $("#modal-body");
   body.innerHTML = "";

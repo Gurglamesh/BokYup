@@ -753,6 +753,15 @@ class AppFacade:
         return RawResult(content=pdf, media_type="application/pdf",
                          filename=f"Faktura-{inv.get('invoice_number') or p['invoice_id']}.pdf")
 
+    def h_preview_invoice(self, p, b, q):
+        """Render a pre-issue faktura preview PDF from the form payload (no booking)."""
+        from backend.invoices.pdf import render_invoice_pdf
+        ops = self._ops(p["book_id"])
+        logo = ops.get_logo()
+        pdf = render_invoice_pdf(ops.preview_invoice_render(b), logo_png=logo[0] if logo else None)
+        return RawResult(content=pdf, media_type="application/pdf",
+                         filename="Forhandsvisning-faktura.pdf")
+
     def h_credit_note_pdf(self, p, b, q):
         from backend.invoices.pdf import render_invoice_pdf
         ops = self._ops(p["book_id"])
@@ -888,6 +897,7 @@ _route("POST", "/books/{book_id}/offerter", "h_create_offert", 201)
 _route("GET", "/books/{book_id}/offerter/{offert_id}/pdf", "h_offert_pdf")
 _route("POST", "/books/{book_id}/offerter/{offert_id}/create-invoice", "h_offert_to_invoice", 201)
 _route("POST", "/books/{book_id}/invoices", "h_create_invoice", 201)
+_route("POST", "/books/{book_id}/invoices/preview", "h_preview_invoice")
 _route("GET", "/books/{book_id}/invoices", "h_list_invoices")
 _route("GET", "/books/{book_id}/invoices/{invoice_id}/pdf", "h_invoice_pdf")
 _route("GET", "/books/{book_id}/invoices/{invoice_id}/credit-notes/{event_id}/pdf", "h_credit_note_pdf")

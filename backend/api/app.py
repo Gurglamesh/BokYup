@@ -556,6 +556,12 @@ def _build_router():
     def create_invoice(book_id: str, body: sc.CreateInvoiceReq, request: Request):
         return fac(request).h_create_invoice({"book_id": book_id}, body.model_dump(), {})
 
+    @r.post("/books/{book_id}/invoices/preview")
+    def preview_invoice(book_id: str, body: dict, request: Request):
+        # Pre-issue PDF preview from the current form payload — books nothing.
+        res = fac(request).h_preview_invoice({"book_id": book_id}, body, {})
+        return _raw_response(res)
+
     @r.get("/books/{book_id}/invoices")
     def list_invoices(book_id: str, request: Request):
         return fac(request).h_list_invoices({"book_id": book_id}, {}, {})

@@ -56,6 +56,7 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     credit_of = invoice.get("credit_of")
     is_credit = credit_of is not None
     is_offert = invoice.get("doc_type") == "offert"
+    is_preview = invoice.get("doc_type") == "faktura_preview"
 
     pdf = FPDF(format="A4", unit="mm")
     # We lay the whole document out with absolute Y positions, so we drive page breaks
@@ -87,6 +88,10 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     # ---- header: title (left) + invoice meta (right). Seller goes in the footer.
     text(pdf.l_margin, 16, "OFFERT" if is_offert else ("KREDITFAKTURA" if is_credit else "FAKTURA"),
          size=22, bold=True)
+    if is_preview:
+        pdf.set_text_color(200, 0, 0)
+        text(pdf.l_margin, 24, "FÖRHANDSVISNING - ej bokförd, inget fakturanummer", size=10, bold=True)
+        pdf.set_text_color(0, 0, 0)
 
     mx = pdf.l_margin + W * 0.62
     if is_offert:

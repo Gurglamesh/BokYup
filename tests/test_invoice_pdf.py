@@ -191,3 +191,18 @@ def test_support_cap_notice_renders():
               "moms_ore": 12500, "discount_pct_centi": 0, "reduction_type": None}]
     pdf = render_invoice_pdf(_synthetic(lines, support_cap_reached=True))
     assert pdf[:4] == b"%PDF" and len(pdf) > 800
+
+
+def test_preview_invoice_render_persists_nothing(ops):
+    ops.set_company(name="Förhands AB", org_nr="556677-8899")
+    cat = ops.create_category("Tjänster", "income", 3001)
+    kid = ops.create_customer("private", first_name="Pre", last_name="View")
+    render = ops.preview_invoice_render({
+        "customer_id": kid, "category_id": cat, "invoice_date": "2026-08-04",
+        "due_date": "2026-09-03", "license_keys": ["KEY-1"],
+        "lines": [{"description": "Konsult", "quantity_centi": 100, "unit_price_ore": 50000, "rate_code": "25"}]})
+    assert render["doc_type"] == "faktura_preview" and render["invoice_number"] is None
+    assert render["inc_moms_ore"] == 62500
+    pdf = render_invoice_pdf(render)
+    assert pdf[:4] == b"%PDF" and len(pdf) > 800
+    assert ops.list_invoices() == []            # a preview books/persists nothing
