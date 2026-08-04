@@ -134,9 +134,10 @@ def test_render_rot_reduction(ops):
 
 
 def _pages(pdf_bytes: bytes) -> int:
-    from pypdf import PdfReader
-    import io
-    return len(PdfReader(io.BytesIO(pdf_bytes)).pages)
+    # Count page objects without a PDF library (pypdf isn't a project dependency): each
+    # page is "/Type /Page" while the page tree is "/Type /Pages" — exclude the latter.
+    import re
+    return len(re.findall(rb"/Type\s*/Page(?![s])", pdf_bytes))
 
 
 def _synthetic(lines, **extra):
