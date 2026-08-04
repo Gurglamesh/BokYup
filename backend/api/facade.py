@@ -315,7 +315,8 @@ class AppFacade:
         # non-makulerade invoices) — "hur mycket kunden har spenderat".
         return _rows(ops,
                      "SELECT c.kundnummer, c.type, c.first_name, c.last_name, c.company_name, "
-                     "c.org_nr, c.email, c.phone, c.active, "
+                     "c.org_nr, c.vat_nr, c.email, c.phone, c.street, c.zip_code, c.city, "
+                     "c.country, c.active, "
                      "(SELECT COALESCE(SUM(i.inc_moms_ore), 0) FROM invoice i "
                      " WHERE i.customer_id = c.kundnummer AND i.cancelled_at IS NULL) AS invoiced_ore "
                      "FROM customer c ORDER BY c.kundnummer")

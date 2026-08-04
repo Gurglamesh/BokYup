@@ -841,9 +841,12 @@ const SECTION_RENDERERS = {
 
   // ----- customers -----
   async customers(panel) {
-    const list = await api("GET", `/books/${bid()}/customers`);
-    panel.appendChild(headerWithAdd("Kunder", "+ Ny kund", () => guard(addCustomerFlow)));
-    const cname = (c) => c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim();
+    const all = await api("GET", `/books/${bid()}/customers`);
+    panel.appendChild(headerWithAdd("Kundregister", "+ Ny kund", () => guard(addCustomerFlow)));
+    const cname = (c) => c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim()
+      || ("Kund " + c.kundnummer);
+    // Alphabetical by name (Swedish locale) as the default order.
+    all.sort((a, b) => cname(a).localeCompare(cname(b), "sv"));
     const actions = (c) => el("span", { style: "display:inline-flex;gap:4px" },
       el("button", { class: "btn small ghost", title: "Skapa faktura till denna kund",
         onclick: () => newInvoiceForCustomer(c.kundnummer) }, "Ny faktura"),
@@ -855,16 +858,37 @@ const SECTION_RENDERERS = {
         : null,
       el("button", { class: "btn small ghost danger", title: "Ta bort kundkortet (fakturor behålls)",
         onclick: () => guard(() => deleteCustomerFlow(c)) }, "Ta bort"));
-    panel.appendChild(searchTable(
-      "Sök kund (namn, nr, org/pers.nr, e-post)…",
-      ["Nr", "Typ", "Namn", "Org/Pers", "E-post", "Spenderat", ""],
-      list,
-      (c, q) => [String(c.kundnummer), cname(c), c.org_nr || "",
-        c.email || "", c.phone || ""].join(" ").toLowerCase().includes(q),
-      (c) => [c.kundnummer, c.type, cname(c), c.org_nr || "", c.email || "",
-        el("span", { class: "num", title: "Totalt fakturerat (ej makulerat)" },
-          toKr(c.invoiced_ore || 0) + " kr"), actions(c)],
-    ));
+    // Search across every available field.
+    const match = (c, q) => [String(c.kundnummer), cname(c), c.org_nr, c.vat_nr, c.personnummer,
+      c.email, c.phone, c.street, c.zip_code, c.city, c.country, c.address]
+      .filter(Boolean).join(" ").toLowerCase().includes(q);
+    const rowFn = (c) => [c.kundnummer, c.type === "private" ? "Privat" : "Företag", cname(c),
+      c.org_nr || c.personnummer || "", c.email || "",
+      el("span", { class: "num", title: "Totalt fakturerat (ej makulerat)" },
+        toKr(c.invoiced_ore || 0) + " kr"), actions(c)];
+    const headers = ["Nr", "Typ", "Namn", "Org/Pers", "E-post", "Spenderat", ""];
+    // Type filter chips (default: all), remembered on state.
+    let filter = state.customersFilter || "all";
+    const box = el("div", {});
+    const draw = () => {
+      const shown = all.filter((c) => filter === "all" || c.type === filter);
+      box.innerHTML = "";
+      box.appendChild(searchTable(
+        "Sök kund (namn, nr, org/pers.nr, e-post, telefon, adress)…",
+        headers, shown, match, rowFn));
+    };
+    const chips = el("div", { class: "row", style: "gap:6px;margin-top:8px" });
+    const renderChips = () => {
+      chips.innerHTML = "";
+      for (const [val, label] of [["all", "Alla"], ["private", "Privat"], ["business", "Företag"]]) {
+        chips.appendChild(el("button", { class: "btn small " + (filter === val ? "" : "ghost"),
+          onclick: () => { filter = val; state.customersFilter = val; renderChips(); draw(); } },
+          `${label} (${val === "all" ? all.length : all.filter((c) => c.type === val).length})`));
+      }
+    };
+    renderChips(); draw();
+    panel.appendChild(chips);
+    panel.appendChild(box);
   },
 
   // ----- suppliers -----
