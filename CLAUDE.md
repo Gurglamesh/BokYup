@@ -730,6 +730,26 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       any change (debounced) so leaving the tab never loses the order (formClosed guard stops a
       late autosave after issue). (5) **Order article picker is searchable** by nr/name/category.
       Tests pass (388).
+- [x] **PDF preview before issue + Content-Disposition filename (2026-08).** A
+      "Förhandsgranska"-knapp on the faktura form renders the current payload as a faktura
+      PDF **without booking anything** (`preview_invoice_render` reuses `_offert_figures`;
+      red "FÖRHANDSVISNING - ej bokförd" banner, no number). API `POST /invoices/preview`;
+      frontend `postMediaUrl` (binary POST → viewable src across server/local/phone) +
+      `showPdfSrc` (factored out of `showPdf`). Test: valid PDF, `list_invoices` stays empty.
+- [x] **UI reorganisation — grouped nav + collapsible order rows + kundregister (2026-08).**
+      (1) **7 grouped areas** replace the 18 flat tabs: a top row (💼 Ordrar · 🛒 Inköp ·
+      📦 Lager · 👥 Kunder · 📒 Bokföring · 📊 Rapporter & skatt · ⚙️ Inställningar) + a
+      second `.subnav` row of the active group's sub-tabs. Section keys + SECTION_RENDERERS
+      unchanged (`groupOf` resolves the group when `state.section` is set anywhere; per-group
+      last-section memory). RUT→Ordrar, Leverantörer→Inköp, BAS-konton→Inställningar. (2)
+      **Collapsible order rows**: each faktura line folds to a one-line summary (namn · antal
+      × à-pris · ex-moms · moms% · rabatt/RUT) with ▾/▸; adding a row auto-collapses the
+      other filled rows; a "Fäll ihop alla / Visa alla" toggle. (3) **Kundregister**:
+      alphabetical by name (sv) by default, Alla/Privat/Företag filter chips (with counts),
+      and search across **every** field (namn/nr/org/VAT/e-post/telefon/adress — `list_customers`
+      now returns vat_nr + the address parts; personnummer stays out, encrypted). All three
+      browser-smoke-tested (Playwright); tests pass. NEXT (offered): finputs — mobilmeny
+      (hamburger på smal skärm), färg per område.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
