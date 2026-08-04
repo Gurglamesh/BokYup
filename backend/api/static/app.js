@@ -3581,11 +3581,18 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatch
     // Save this row's current values to the catalog as a new article.
     const saveBtn = el("button", { class: "btn small ghost", type: "button", title: "Spara som artikel",
       onclick: () => guard(() => saveRowAsArticle(row)) }, "★");
-    const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end;flex-wrap:wrap" },
+    // All the fields live in an editor box that we hide when the row is collapsed.
+    const editorBox = el("div", { class: "line-editor",
+      style: "display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;flex:1" },
       wrap("Produktkategori", catFilter), wrap("Artikel", pick), wrap("Beskrivning", desc), wrap("Kategori (BAS)", cat),
       wrap("Antal", qty), wrap("Enhet", unit), wrap("À-pris ex moms", price),
       wrap("% rabatt", disc), wrap("Moms", rate), wrap("Husavdrag", red),
-      wrap("Lagerbatch", batchSel), saveBtn,
+      wrap("Lagerbatch", batchSel), saveBtn);
+    const summary = el("div", { class: "line-summary",
+      style: "display:none;flex:1;cursor:pointer;padding:6px 2px" });
+    const collapseBtn = el("button", { class: "btn small ghost", title: "Fäll ihop raden" }, "▾");
+    const row = el("div", { class: "row line-row", style: "gap:6px;align-items:center;flex-wrap:wrap" },
+      summary, editorBox, collapseBtn,
       el("button", { class: "btn small ghost", onclick: (e) => { e.target.closest(".row").remove(); fire(); } }, "✕"));
     row._desc = desc; row._cat = cat; row._unit = unit; row._price = price; row._disc = disc; row._rate = rate; row._red = red;
     const qtyCenti = () => Math.round(parseFloat((qty.value || "0").replace(",", ".")) * 100);
@@ -3601,6 +3608,36 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatch
     // Margin preview (ören): the frozen inköpskostnad of this line if a batch is picked,
     // else null (unknown cost). Revenue side comes from _get() ex moms.
     row._costPreview = () => (batchSel.value && batchCost != null ? Math.round(qtyCenti() * batchCost / 100) : null);
+    // ---- collapse / expand: a filled row folds to a one-line summary to save space ----
+    let collapsed = false;
+    const summaryText = () => {
+      const g = row._get();
+      const name = g.description || "(ny rad)";
+      const q = (g.quantity_centi / 100).toLocaleString("sv-SE");
+      const gross = Math.round(g.quantity_centi * g.unit_price_ore / 100);
+      const ex = gross - Math.round(gross * (g.discount_pct_centi || 0) / 10000);
+      const parts = [`${q} ${g.unit || "st"} × ${toKr(g.unit_price_ore)} kr`,
+        `${toKr(ex)} kr ex moms`, rateLabel(g.rate_code)];
+      if (g.discount_pct_centi) parts.push(`−${(g.discount_pct_centi / 100)} % rabatt`);
+      if (g.reduction_type) parts.push(g.reduction_type.toUpperCase());
+      return [el("strong", {}, name), el("span", { class: "muted", style: "margin-left:8px" }, parts.join(" · "))];
+    };
+    row._isCollapsed = () => collapsed;
+    row._hasContent = () => !!(desc.value.trim() || articleId);
+    row._setCollapsed = (c) => {
+      collapsed = c;
+      if (c) { summary.innerHTML = ""; summaryText().forEach((n) => summary.appendChild(n)); }
+      editorBox.style.display = c ? "none" : "flex";
+      summary.style.display = c ? "block" : "none";
+      collapseBtn.textContent = c ? "▸" : "▾";
+      collapseBtn.title = c ? "Öppna raden" : "Fäll ihop raden";
+    };
+    collapseBtn.onclick = () => row._setCollapsed(!collapsed);
+    summary.onclick = () => row._setCollapsed(false);
+    // Auto-collapse the other filled rows when a new row is added, so the form stays tidy.
+    for (const r of rowsBox.children) {
+      if (r._setCollapsed && r._hasContent && r._hasContent() && !r._isCollapsed()) r._setCollapsed(true);
+    }
     rowsBox.appendChild(row);
     if (v.article_id) guard(() => refreshBatches(v.stock_batch_id));
   }
@@ -3623,8 +3660,16 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatch
     toast(`Artikel ${a.article_number} sparad`);
   }
   if (initialLines && initialLines.length) initialLines.forEach(addRow); else addRow();
+  const foldBtn = el("button", { class: "btn small ghost" }, "Fäll ihop alla");
+  foldBtn.onclick = () => {
+    const rows = [...rowsBox.children].filter((r) => r._setCollapsed);
+    const anyOpen = rows.some((r) => !r._isCollapsed());
+    rows.forEach((r) => r._setCollapsed(anyOpen));
+    foldBtn.textContent = anyOpen ? "Visa alla" : "Fäll ihop alla";
+  };
   const element = el("div", {}, rowsBox,
-    el("button", { class: "btn small ghost", onclick: () => addRow() }, "+ Rad"));
+    el("div", { class: "row", style: "gap:8px;margin-top:6px" },
+      el("button", { class: "btn small ghost", onclick: () => addRow() }, "+ Rad"), foldBtn));
   // Aggregate real margin from rows that picked a stock batch: revenue ex moms (after
   // rabatt) of those rows − their frozen cost. `hasCost` says whether any row is costed.
   const getMargin = () => {

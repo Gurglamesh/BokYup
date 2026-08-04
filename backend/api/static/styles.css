@@ -85,6 +85,11 @@ h3 { margin: 0 0 12px; }
   border-color: var(--brand);
 }
 
+/* collapsed order line: one-line summary that expands on click / ▸ */
+.line-row { border-bottom: 1px solid var(--line); padding: 4px 0; }
+.line-summary { border-radius: 8px; }
+.line-summary:hover { background: color-mix(in srgb, var(--brand) 8%, transparent); }
+
 /* ---- forms ---- */
 label { display: block; font-size: .82rem; color: var(--muted); margin: 10px 0 4px; }
 input, select {
