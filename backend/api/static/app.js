@@ -3307,14 +3307,46 @@ async function invoiceForm(panel, draft) {
   panel.appendChild(el("div", { style: "margin-top:14px" },
     el("label", { style: "font-weight:600;display:block;margin-bottom:4px" }, "Licensnycklar (valfritt)"),
     licenseKeys));
+  const draftStatus = el("span", { class: "muted", style: "margin-left:12px;font-size:12px" });
   panel.appendChild(el("div", { style: "margin-top:16px" },
     el("button", { class: "btn brand", onclick: () => guard(submit) }, "Skapa faktura"),
     el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(saveDraft) }, "Spara utkast"),
     el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(createOffert) }, "Skapa offert"),
-    el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => { state.section = "invoices"; renderWorkspace(); } }, "Avbryt")));
+    el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => { state.section = "invoices"; renderWorkspace(); } }, "Avbryt"),
+    draftStatus));
 
   await recips.reloadPeople();
   updateTotals();
+
+  // Auto-save the order as a draft on any change (debounced) so leaving the tab never
+  // loses it. The draft is created on the first meaningful change and updated thereafter;
+  // it is dropped when the invoice is actually issued (submit) or the draft is deleted.
+  let autosaveTimer = null, autosaving = false, formClosed = false;
+  async function autosave() {
+    if (autosaving || formClosed) return;
+    const payload = collectBody();
+    const hasContent = payload.customer_id
+      || (payload.lines || []).some((l) => (l.description || "").trim())
+      || (payload.license_keys || []).length;
+    if (!hasContent) return;                        // don't persist an empty form
+    autosaving = true;
+    try {
+      if (draftId) {
+        await api("PUT", `/books/${bid()}/invoice-drafts/${draftId}`, { payload });
+      } else {
+        draftId = (await api("POST", `/books/${bid()}/invoice-drafts`, { payload })).id;
+      }
+      draftStatus.textContent = "Utkast sparat " + new Date().toLocaleTimeString("sv-SE").slice(0, 5);
+    } catch (e) { draftStatus.textContent = "Kunde inte spara utkast"; }
+    finally { autosaving = false; }
+  }
+  const scheduleAutosave = () => {
+    draftStatus.textContent = "Sparar utkast…";
+    clearTimeout(autosaveTimer);
+    autosaveTimer = setTimeout(() => guard(autosave), 1200);
+  };
+  panel.addEventListener("input", scheduleAutosave);
+  panel.addEventListener("change", scheduleAutosave);
 
   // Collect the current form state (may be incomplete — that's fine for a draft).
   function collectBody() {
@@ -3352,6 +3384,7 @@ async function invoiceForm(panel, draft) {
   async function submit() {
     const body = collectBody();
     if ((body.lines || []).length === 0) { toast("Lägg till minst en artikelrad", true); return; }
+    formClosed = true; clearTimeout(autosaveTimer);   // stop autosave re-creating the draft
     const res = await api("POST", `/books/${bid()}/invoices`, body);
     if (draftId) { try { await api("DELETE", `/books/${bid()}/invoice-drafts/${draftId}`); } catch (e) { /* ignore */ } }
     toast(`Faktura ${res.invoice_number} skapad`);
@@ -3378,10 +3411,16 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatch
   const fire = () => { if (onChange) onChange(); };
   function addRow(v) {                                  // v = optional prefill (draft)
     v = v || {};
-    // Article picker: choose an existing article (fills the row; price stays editable).
-    const pick = el("select", {},
-      el("option", { value: "" }, "— välj artikel —"),
-      ...arts.map((a) => el("option", { value: a.id }, `${a.article_number} ${a.description}`)));
+    // Article picker: searchable by number / name / category so products are easy to find
+    // (same categories as everywhere else). Choosing one fills the row; price stays editable.
+    const artLabel = (a) => {
+      const c = cats.find((x) => String(x.id) === String(a.category_id));
+      return `${a.article_number} ${a.description}` + (c ? " · " + categoryPath(cats, a.category_id) : "");
+    };
+    const pickWrap = searchableSelect(
+      [{ value: "", label: "— välj artikel —" }, ...arts.map((a) => ({ value: a.id, label: artLabel(a) }))],
+      v.article_id || "", "Sök artikel (nr/namn/kategori)…");
+    const pick = pickWrap.select;
     let articleId = v.article_id || null;
     // Stock-batch picker: choose which lager-batch this line is sold from → real margin
     // (revenue − batch cost). Only populated once an article with stock is picked.
@@ -3473,7 +3512,7 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatch
     const saveBtn = el("button", { class: "btn small ghost", type: "button", title: "Spara som artikel",
       onclick: () => guard(() => saveRowAsArticle(row)) }, "★");
     const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end;flex-wrap:wrap" },
-      wrap("Artikel", pick), wrap("Beskrivning", desc), wrap("Kategori (BAS)", cat),
+      wrap("Artikel", pickWrap.element), wrap("Beskrivning", desc), wrap("Kategori (BAS)", cat),
       wrap("Antal", qty), wrap("Enhet", unit), wrap("À-pris ex moms", price),
       wrap("% rabatt", disc), wrap("Moms", rate), wrap("Husavdrag", red),
       wrap("Lagerbatch", batchSel), saveBtn,
