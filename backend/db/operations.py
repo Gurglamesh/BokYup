@@ -723,15 +723,19 @@ class BookOps:
             "SELECT COALESCE(SUM(minutes),0) FROM support_ledger WHERE customer_id=? "
             "AND kind='addition'", (customer_id,)).fetchone()[0]
         used = ded - add
+        cap = int(self._config("support_cap_minutes"))
+        raw_remaining = max(0, earned_active - used)
         return {
             "customer_id": customer_id,
             "earned_active_minutes": earned_active,
             "used_minutes": used,                      # net (deductions − additions)
             "deductions_minutes": ded,
             "additions_minutes": add,
-            # Floored at 0: over-using a customer's time is allowed (the ledger records
-            # it in full) but the balance never shows negative.
-            "remaining_minutes": max(0, earned_active - used),
+            # Floored at 0 (over-use is recorded in full but never shows negative) and
+            # capped at the per-customer maximum (12 h) — that IS the balance ceiling.
+            "remaining_minutes": min(cap, raw_remaining),
+            "cap_minutes": cap,
+            "at_cap": raw_remaining >= cap,
             "active_invoices": active,
         }
 
@@ -1687,7 +1691,8 @@ class BookOps:
                        payment_terms: Optional[str] = None,
                        our_reference: Optional[str] = None,
                        your_reference: Optional[str] = None,
-                       note: Optional[str] = None) -> dict:
+                       note: Optional[str] = None,
+                       license_keys: Optional[list] = None) -> dict:
         """
         Issue a faktura: compute the article lines, snapshot the buyer/seller/payment
         methods, split RUT across household recipients, and create the underlying
@@ -1835,9 +1840,17 @@ class BookOps:
         number = self._next_invoice_number()
 
         # "Gratis distanssupport": 15 min per full 500 kr of the invoice total (round
-        # down), valid 36 months from the invoice date.
-        support_minutes = support_minutes_earned(inc_total)
+        # down), valid 36 months — but capped so a customer's balance never exceeds the
+        # config maximum (12 h). If they are already at the cap this invoice earns nothing
+        # and prints the "cap reached" notice instead of the earned-time block.
+        support_cap = int(self._config("support_cap_minutes"))
+        available_before = self.support_balance(customer_id)["remaining_minutes"]
+        support_cap_reached = 1 if available_before >= support_cap else 0
+        support_minutes = 0 if support_cap_reached else min(
+            support_minutes_earned(inc_total), support_cap - available_before)
         support_expiry = _add_months(invoice_date, 36)
+        license_keys_enc = self.session.encrypt_text(
+            json.dumps([str(k).strip() for k in (license_keys or []) if str(k).strip()]))
 
         with self.conn:
             cur = self.conn.execute(
@@ -1845,12 +1858,13 @@ class BookOps:
                 "due_date, delivery_date, payment_terms, buyer_snapshot_enc, seller_snapshot, "
                 "payment_methods_snapshot, our_reference, your_reference, note, ex_moms_ore, "
                 "moms_ore, inc_moms_ore, rut_total_ore, rot_total_ore, "
-                "support_minutes_earned, support_expiry_date, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "support_minutes_earned, support_expiry_date, support_cap_reached, "
+                "license_keys_enc, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (number, customer_id, tid, invoice_date, due_date, delivery_date, payment_terms,
                  buyer_snapshot_enc, seller_snapshot, pm_snapshot, our_reference, your_reference,
                  note, ex_total, moms_total, inc_total, rut_total, rot_total,
-                 support_minutes, support_expiry, _now()))
+                 support_minutes, support_expiry, support_cap_reached, license_keys_enc, _now()))
             invoice_id = cur.lastrowid
             for cl in computed:
                 self.conn.execute(
@@ -2325,6 +2339,8 @@ class BookOps:
         inv["buyer"] = json.loads(self.session.decrypt_text(inv.pop("buyer_snapshot_enc")))
         inv["seller"] = json.loads(inv.pop("seller_snapshot") or "{}")
         inv["payment_methods"] = json.loads(inv.pop("payment_methods_snapshot") or "[]")
+        lk_enc = inv.pop("license_keys_enc", None)
+        inv["license_keys"] = json.loads(self.session.decrypt_text(lk_enc)) if lk_enc else []
         inv["lines"] = [dict(r) for r in self.conn.execute(
             "SELECT il.line_no, il.description, il.category_id, c.name AS category_name, "
             "c.bas_konto AS category_bas_konto, il.quantity_centi, il.unit, il.unit_price_ore, "

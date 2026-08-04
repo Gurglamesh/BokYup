@@ -39,6 +39,16 @@ DEFAULT_SWEEP_INTERVAL = 60
 # Application factory
 # ===========================================================================
 
+def _raw_response(res) -> Response:
+    """A FastAPI Response for a RawResult, adding an inline Content-Disposition filename
+    when the handler supplied one (so a saved PDF is named e.g. Faktura-1001.pdf)."""
+    headers = {}
+    name = getattr(res, "filename", None)
+    if name:
+        headers["Content-Disposition"] = f'inline; filename="{name}"'
+    return Response(content=res.content, media_type=res.media_type, headers=headers)
+
+
 def create_app(app_dir: str | Path | None = None,
                autolock_seconds: int = DEFAULT_AUTOLOCK_SECONDS,
                sweep_interval: int = DEFAULT_SWEEP_INTERVAL,
@@ -599,7 +609,7 @@ def _build_router():
     @r.get("/books/{book_id}/offerter/{offert_id}/pdf")
     def offert_pdf(book_id: str, offert_id: int, request: Request):
         res = fac(request).h_offert_pdf({"book_id": book_id, "offert_id": offert_id}, {}, {})
-        return Response(content=res.content, media_type=res.media_type)
+        return _raw_response(res)
 
     @r.post("/books/{book_id}/offerter/{offert_id}/create-invoice", status_code=201)
     def offert_to_invoice(book_id: str, offert_id: int, body: dict, request: Request):
@@ -631,13 +641,13 @@ def _build_router():
     @r.get("/books/{book_id}/invoices/{invoice_id}/pdf")
     def invoice_pdf(book_id: str, invoice_id: int, request: Request):
         res = fac(request).h_invoice_pdf({"book_id": book_id, "invoice_id": invoice_id}, {}, {})
-        return Response(content=res.content, media_type=res.media_type)
+        return _raw_response(res)
 
     @r.get("/books/{book_id}/invoices/{invoice_id}/credit-notes/{event_id}/pdf")
     def credit_note_pdf(book_id: str, invoice_id: int, event_id: int, request: Request):
         res = fac(request).h_credit_note_pdf(
             {"book_id": book_id, "invoice_id": invoice_id, "event_id": event_id}, {}, {})
-        return Response(content=res.content, media_type=res.media_type)
+        return _raw_response(res)
 
     return r
 

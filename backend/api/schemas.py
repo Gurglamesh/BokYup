@@ -363,6 +363,7 @@ class CreateInvoiceReq(BaseModel):
     our_reference: Optional[str] = None
     your_reference: Optional[str] = None
     note: Optional[str] = None
+    license_keys: Optional[list[str]] = None   # printed on their own page at the PDF end
 
 
 class ReceiptUploadReq(BaseModel):

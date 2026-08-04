@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -310,6 +310,8 @@ CREATE TABLE invoice (
     -- "gratis distanssupport": earned support time per invoice (magIT support offer).
     support_minutes_earned   INTEGER NOT NULL DEFAULT 0,  -- 15 min per full 500 kr of the total
     support_expiry_date      TEXT,                  -- invoice_date + 36 months
+    support_cap_reached      INTEGER NOT NULL DEFAULT 0,  -- customer already at the 12 h cap at issue
+    license_keys_enc         TEXT,                  -- DEK-encrypted JSON array of licence keys
     created_at               TEXT NOT NULL
 );
 
@@ -535,6 +537,10 @@ _DEFAULT_CONFIG = {
     # config). RUT 50 %, ROT 30 % (verified 2026-06 against Skatteverket).
     "rut_reduction_pct": "50",
     "rot_reduction_pct": "30",
+    # Gratis distanssupport: the maximum support-time balance a single customer can hold
+    # (magIT offer). Once reached, further invoices earn no more and print the cap notice.
+    "support_cap_minutes": "720",                    # 12 hours
+
     # Bookkeeping method for invoices (per book): 'kontantmetod' (book at payment +
     # year-end accruals) or 'fakturametod' (book kundfordran/income/moms at issue,
     # then bank/kundfordran at payment). Default kontantmetod.
@@ -942,6 +948,11 @@ _MIGRATIONS: dict[int, str] = {
             created_at  TEXT NOT NULL,
             updated_at  TEXT NOT NULL
         );
+    """,
+    31: """
+        ALTER TABLE invoice ADD COLUMN support_cap_reached INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE invoice ADD COLUMN license_keys_enc TEXT;
+        INSERT OR IGNORE INTO config(key, value) VALUES ('support_cap_minutes', '720');
     """,
 }
 

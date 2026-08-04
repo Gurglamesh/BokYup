@@ -2908,7 +2908,7 @@ async function offertToInvoiceFlow(o) {
   const res = await api("POST", `/books/${bid()}/offerter/${o.id}/create-invoice`,
     { invoice_date: f.invoice_date, due_date: f.due_date });
   toast(`Faktura ${res.invoice_number} skapad från offert ${o.offert_number}`);
-  showPdf(`/books/${bid()}/invoices/${res.invoice_id}/pdf`, `Faktura ${res.invoice_number}`);
+  invoicePdf(res.invoice_id, res.invoice_number);
   renderWorkspace();
 }
 
@@ -3136,13 +3136,34 @@ async function invoiceForm(panel, draft) {
     ...incomeCats.map((c) => el("option", { value: c.id }, c.name)));
   if (dp.category_id) cat.value = String(dp.category_id);
   const today = new Date().toISOString().slice(0, 10);
-  const due = new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10);
   const invDate = el("input", { type: "date", value: dp.invoice_date || today });
-  const dueDate = el("input", { type: "date", value: dp.due_date || due });
+  // Due date is a NUMBER OF DAYS from the invoice date (default 30), not a fixed date —
+  // so the förfallodatum always follows the fakturadatum. Restore the days from a draft.
+  const addDays = (iso, n) => {
+    const d = new Date((iso || today) + "T00:00:00");
+    d.setDate(d.getDate() + (parseInt(n, 10) || 0));
+    return d.toISOString().slice(0, 10);
+  };
+  let defaultDueDays = 30;
+  if (dp.due_date && dp.invoice_date) {
+    const diff = Math.round((new Date(dp.due_date) - new Date(dp.invoice_date)) / 864e5);
+    if (diff >= 0) defaultDueDays = diff;
+  }
+  const dueDays = el("input", { type: "number", min: "0", value: String(defaultDueDays), style: "width:70px" });
+  const dueHint = el("span", { class: "muted", style: "font-size:12px;margin-left:6px" });
+  const computedDue = () => addDays(invDate.value, dueDays.value);
+  const refreshDueHint = () => { dueHint.textContent = "→ " + computedDue(); };
+  invDate.addEventListener("input", refreshDueHint);
+  dueDays.addEventListener("input", refreshDueHint);
+  refreshDueHint();
   const delivery = el("input", { type: "date", value: dp.delivery_date || "" });
   const terms = el("input", { type: "text", value: dp.payment_terms || "30 dagar netto" });
   const yourRef = el("input", { type: "text", value: dp.your_reference || "" });
   const note = el("input", { type: "text", value: dp.note || "" });
+  // Licence keys: one per line; printed on their own page at the end of the faktura PDF.
+  const licenseKeys = el("textarea", { rows: "3", style: "width:100%;font-family:monospace",
+    placeholder: "En licensnyckel per rad (skrivs ut på en egen sida sist i fakturan)" },
+    (dp.license_keys || []).join("\n"));
   const recips = recipientsEditor({
     rutPct: redCfg.rut_pct, rotPct: redCfg.rot_pct,
     getLines: () => lines.get(), getInvoiceCustomerId: () => parseInt(customer.value, 10),
@@ -3193,7 +3214,8 @@ async function invoiceForm(panel, draft) {
   panel.appendChild(el("div", { class: "row" },
     wrap("Kund", custSel.element), wrap("Standardkategori (BAS, valfri)", cat)));
   panel.appendChild(el("div", { class: "row" },
-    wrap("Fakturadatum", invDate), wrap("Förfallodatum", dueDate),
+    wrap("Fakturadatum", invDate),
+    wrap("Förfaller om (dagar)", el("span", {}, dueDays, dueHint)),
     wrap("Leveransdatum (valfritt)", delivery)));
   panel.appendChild(el("h3", { style: "margin-top:18px" }, "Artikelrader"));
   panel.appendChild(el("p", { class: "muted" },
@@ -3210,6 +3232,9 @@ async function invoiceForm(panel, draft) {
   panel.appendChild(totalsBox);
   panel.appendChild(el("div", { class: "row", style: "margin-top:14px" },
     wrap("Betalningsvillkor", terms), wrap("Er referens", yourRef), wrap("Notering", note)));
+  panel.appendChild(el("div", { style: "margin-top:14px" },
+    el("label", { style: "font-weight:600;display:block;margin-bottom:4px" }, "Licensnycklar (valfritt)"),
+    licenseKeys));
   panel.appendChild(el("div", { style: "margin-top:16px" },
     el("button", { class: "btn brand", onclick: () => guard(submit) }, "Skapa faktura"),
     el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(saveDraft) }, "Spara utkast"),
@@ -3224,10 +3249,11 @@ async function invoiceForm(panel, draft) {
     return {
       customer_id: parseInt(customer.value, 10) || null,
       category_id: cat.value ? parseInt(cat.value, 10) : null,
-      invoice_date: invDate.value, due_date: dueDate.value,
+      invoice_date: invDate.value, due_date: computedDue(),
       delivery_date: delivery.value || null, payment_terms: terms.value || null,
       your_reference: yourRef.value || null, note: note.value || null,
       lines: lines.get(), recipients: recips.get(),
+      license_keys: licenseKeys.value.split("\n").map((s) => s.trim()).filter(Boolean),
     };
   }
 
@@ -3659,12 +3685,14 @@ async function showPdf(path, fname) {
 }
 
 async function invoicePdf(invoiceId, number) {
-  await showPdf(`/books/${bid()}/invoices/${invoiceId}/pdf`, `faktura-${number || invoiceId}.pdf`);
+  // Same name the server sends via Content-Disposition + the order-page download, so a
+  // save right after creation isn't the browser's generic "document.pdf".
+  await showPdf(`/books/${bid()}/invoices/${invoiceId}/pdf`, `Faktura-${number || invoiceId}.pdf`);
 }
 
 async function creditNotePdf(invoiceId, eventId, number) {
   await showPdf(`/books/${bid()}/invoices/${invoiceId}/credit-notes/${eventId}/pdf`,
-                `kreditfaktura-${number || eventId}.pdf`);
+                `Kreditfaktura-${number || eventId}.pdf`);
 }
 
 // Makulera (void) an unbooked invoice — keeps the number, nothing was booked.

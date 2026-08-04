@@ -634,6 +634,32 @@ class TestInvoices:
         with pytest.raises(ValueError):
             ops.record_support_entry(kid, 15, "bogus")
 
+    def test_support_cap_12h(self, ops):
+        cat, kid = self._setup(ops)
+        # A big invoice earns more than the 12 h (720 min) cap -> capped at issue + balance.
+        first = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-01-01",
+            due_date="2026-01-31",
+            lines=[{"description": "Big", "quantity_centi": 100, "unit_price_ore": 2000000, "rate_code": "25"}])
+        assert first["support_minutes_earned"] == 720           # capped, not the raw 750
+        bal = ops.support_balance(kid)
+        assert bal["cap_minutes"] == 720
+        assert bal["remaining_minutes"] == 720 and bal["at_cap"] is True
+        # The next invoice earns nothing and is flagged cap-reached (prints the notice).
+        nxt = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-02-01",
+            due_date="2026-02-28",
+            lines=[{"description": "More", "quantity_centi": 100, "unit_price_ore": 100000, "rate_code": "25"}])
+        assert nxt["support_minutes_earned"] == 0
+        assert ops.get_invoice(nxt["invoice_id"])["support_cap_reached"] == 1
+
+    def test_invoice_license_keys_roundtrip(self, ops):
+        cat, kid = self._setup(ops)
+        inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-01-01",
+            due_date="2026-01-31",
+            lines=[{"description": "SW", "quantity_centi": 100, "unit_price_ore": 50000, "rate_code": "25"}],
+            license_keys=["AAAA-1111", "   ", "BBBB-2222"])
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["license_keys"] == ["AAAA-1111", "BBBB-2222"]    # blanks filtered out
+
     def test_line_percentage_discount(self, ops):
         cat, kid = self._setup(ops)
         # qty 2 * 1000 kr = 2000 kr ex; 15 % rabatt -> 1700 kr ex; moms 25 % = 425 kr

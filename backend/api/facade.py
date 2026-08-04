@@ -48,6 +48,7 @@ class RawResult:
     render it natively: FastAPI as a Response, the phone shim as bytes/base64."""
     content: bytes | str
     media_type: str
+    filename: str | None = None    # suggested download name (Content-Disposition)
 
 
 # ---------------------------------------------------------------------------
@@ -657,7 +658,8 @@ class AppFacade:
             invoice_date=b["invoice_date"], due_date=b["due_date"], lines=b["lines"],
             recipients=b.get("recipients"), delivery_date=b.get("delivery_date"),
             payment_terms=b.get("payment_terms"), our_reference=b.get("our_reference"),
-            your_reference=b.get("your_reference"), note=b.get("note"))
+            your_reference=b.get("your_reference"), note=b.get("note"),
+            license_keys=b.get("license_keys"))
 
     def h_list_invoices(self, p, b, q):
         return self._ops(p["book_id"]).list_invoices()
@@ -710,9 +712,10 @@ class AppFacade:
         from backend.invoices.pdf import render_invoice_pdf
         ops = self._ops(p["book_id"])
         logo = ops.get_logo()
-        pdf = render_invoice_pdf(ops.get_offert(int(p["offert_id"])),
-                                 logo_png=logo[0] if logo else None)
-        return RawResult(content=pdf, media_type="application/pdf")
+        offert = ops.get_offert(int(p["offert_id"]))
+        pdf = render_invoice_pdf(offert, logo_png=logo[0] if logo else None)
+        return RawResult(content=pdf, media_type="application/pdf",
+                         filename=f"Offert-{offert.get('offert_number') or offert.get('invoice_number') or p['offert_id']}.pdf")
 
     def h_offert_to_invoice(self, p, b, q):
         return self._ops(p["book_id"]).create_invoice_from_offert(
@@ -741,18 +744,19 @@ class AppFacade:
         from backend.invoices.pdf import render_invoice_pdf
         ops = self._ops(p["book_id"])
         logo = ops.get_logo()
-        pdf = render_invoice_pdf(ops.get_invoice(int(p["invoice_id"])),
-                                 logo_png=logo[0] if logo else None)
-        return RawResult(content=pdf, media_type="application/pdf")
+        inv = ops.get_invoice(int(p["invoice_id"]))
+        pdf = render_invoice_pdf(inv, logo_png=logo[0] if logo else None)
+        return RawResult(content=pdf, media_type="application/pdf",
+                         filename=f"Faktura-{inv.get('invoice_number') or p['invoice_id']}.pdf")
 
     def h_credit_note_pdf(self, p, b, q):
         from backend.invoices.pdf import render_invoice_pdf
         ops = self._ops(p["book_id"])
         logo = ops.get_logo()
-        pdf = render_invoice_pdf(
-            ops.get_credit_note(int(p["invoice_id"]), int(p["event_id"])),
-            logo_png=logo[0] if logo else None)
-        return RawResult(content=pdf, media_type="application/pdf")
+        note = ops.get_credit_note(int(p["invoice_id"]), int(p["event_id"]))
+        pdf = render_invoice_pdf(note, logo_png=logo[0] if logo else None)
+        return RawResult(content=pdf, media_type="application/pdf",
+                         filename=f"Kreditfaktura-{note.get('invoice_number') or p['event_id']}.pdf")
 
 
 # ---------------------------------------------------------------------------

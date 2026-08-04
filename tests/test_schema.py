@@ -324,6 +324,8 @@ class TestMigration:
                 skatteverket_verifikation_id INTEGER, skatteverket_received_ore INTEGER,
                 shortfall_invoice_id INTEGER, skatteverket_reference TEXT,
                 claim_year INTEGER NOT NULL, created_at TEXT NOT NULL);
+            CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE invoice (id INTEGER PRIMARY KEY);   -- migration 31 ALTERs this
         """)
         db.execute("PRAGMA user_version = 25")
         db.execute("INSERT INTO account VALUES (3001,'x','t')")
