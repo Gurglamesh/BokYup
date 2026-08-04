@@ -3416,16 +3416,40 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatch
   const fire = () => { if (onChange) onChange(); };
   function addRow(v) {                                  // v = optional prefill (draft)
     v = v || {};
-    // Article picker: searchable by number / name / category so products are easy to find
-    // (same categories as everywhere else). Choosing one fills the row; price stays editable.
-    const artLabel = (a) => {
-      const c = cats.find((x) => String(x.id) === String(a.category_id));
-      return `${a.article_number} ${a.description}` + (c ? " · " + categoryPath(cats, a.category_id) : "");
+    // Cascading picker: pick a product CATEGORY first, then only that category's articles
+    // (incl. its subcategories) populate the Artikel dropdown — instead of listing them all.
+    const artInCat = (a, catId) => {
+      if (!catId) return true;                       // "Alla kategorier"
+      let id = a.category_id;
+      while (id) {                                   // match the category or any ancestor of it
+        if (String(id) === String(catId)) return true;
+        const c = cats.find((x) => String(x.id) === String(id));
+        id = c ? c.parent_id : null;
+      }
+      return false;
     };
-    const pickWrap = searchableSelect(
-      [{ value: "", label: "— välj artikel —" }, ...arts.map((a) => ({ value: a.id, label: artLabel(a) }))],
-      v.article_id || "", "Sök artikel (nr/namn/kategori)…");
-    const pick = pickWrap.select;
+    const catFilter = el("select", { style: "min-width:150px" },
+      el("option", { value: "" }, "Alla kategorier"),
+      ...cats.map((c) => el("option", { value: c.id }, categoryPath(cats, c.id))));
+    const pick = el("select", { style: "min-width:170px" });
+    const refreshArticleOptions = (keepValue) => {
+      const catId = catFilter.value;
+      pick.innerHTML = "";
+      pick.appendChild(el("option", { value: "" }, "— välj artikel —"));
+      for (const a of arts) {
+        if (artInCat(a, catId)) {
+          pick.appendChild(el("option", { value: a.id }, `${a.article_number} ${a.description}`));
+        }
+      }
+      if (keepValue != null) pick.value = String(keepValue);
+    };
+    // Default the category filter to the picked article's category (so a draft/edit shows it).
+    if (v.article_id) {
+      const a0 = arts.find((x) => String(x.id) === String(v.article_id));
+      if (a0 && a0.category_id) catFilter.value = String(a0.category_id);
+    }
+    catFilter.onchange = () => { refreshArticleOptions(); fire(); };
+    refreshArticleOptions(v.article_id || "");
     let articleId = v.article_id || null;
     // Stock-batch picker: choose which lager-batch this line is sold from → real margin
     // (revenue − batch cost). Only populated once an article with stock is picked.
@@ -3517,7 +3541,7 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatch
     const saveBtn = el("button", { class: "btn small ghost", type: "button", title: "Spara som artikel",
       onclick: () => guard(() => saveRowAsArticle(row)) }, "★");
     const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end;flex-wrap:wrap" },
-      wrap("Artikel", pickWrap.element), wrap("Beskrivning", desc), wrap("Kategori (BAS)", cat),
+      wrap("Produktkategori", catFilter), wrap("Artikel", pick), wrap("Beskrivning", desc), wrap("Kategori (BAS)", cat),
       wrap("Antal", qty), wrap("Enhet", unit), wrap("À-pris ex moms", price),
       wrap("% rabatt", disc), wrap("Moms", rate), wrap("Husavdrag", red),
       wrap("Lagerbatch", batchSel), saveBtn,
