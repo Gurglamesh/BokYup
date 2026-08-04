@@ -58,7 +58,9 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     is_offert = invoice.get("doc_type") == "offert"
 
     pdf = FPDF(format="A4", unit="mm")
-    pdf.set_auto_page_break(auto=True, margin=18)
+    # We lay the whole document out with absolute Y positions, so we drive page breaks
+    # ourselves (auto-break fights manual set_xy and spawns near-empty pages).
+    pdf.set_auto_page_break(auto=False, margin=18)
     pdf.add_page()
     W = pdf.w - pdf.l_margin - pdf.r_margin
 
@@ -145,15 +147,40 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     ys = addr_block(pdf.l_margin + W * 0.5, "Leveransadress", ship_lines) if ship_lines else top
     by = max(yb, ys)
 
-    # ---- line items table ----------------------------------------------------
+    # ---- line items table (page-break aware, wrapped descriptions) -----------
     ty = by + 12
     cols = [("Beskrivning", 0.40, "L"), ("Antal", 0.10, "R"), ("À-pris", 0.16, "R"),
             ("Moms", 0.12, "R"), ("Belopp", 0.22, "R")]
-    pdf.set_fill_color(235, 238, 242)
-    pdf.set_xy(pdf.l_margin, ty); pdf.set_font("Helvetica", "B", 9)
-    for title, frac, align in cols:
-        pdf.cell(W * frac, 7, _s(title), border="B", align=align, fill=True)
-    ty += 7
+    bottom = pdf.h - pdf.b_margin
+    line_h = 4.5
+
+    def header_row(y):
+        pdf.set_fill_color(235, 238, 242)
+        pdf.set_xy(pdf.l_margin, y); pdf.set_font("Helvetica", "B", 9)
+        for title, frac, align in cols:
+            pdf.cell(W * frac, 7, _s(title), border="B", align=align, fill=True)
+        return y + 7
+
+    def new_page(needed, header=False):
+        """Start a fresh page (resetting ty to the top margin) if `needed` mm won't fit
+        below the current ty; optionally redraw the line-items header on the new page."""
+        nonlocal ty
+        if ty + needed > bottom:
+            pdf.add_page(); ty = pdf.t_margin
+            if header:
+                ty = header_row(ty)
+
+    def flow_text(s, w, size, lh, style="", indent=0.0):
+        """Word-wrapped, page-break-aware paragraph flow (replaces multi_cell so it can
+        cross a page boundary cleanly)."""
+        nonlocal ty
+        for para in str(s).split("\n"):
+            for dl in _wrap(pdf, para, w - indent, size, style):
+                new_page(lh)
+                pdf.set_font("Helvetica", style, size)
+                pdf.set_xy(pdf.l_margin + indent, ty); pdf.cell(0, lh, _s(dl)); ty += lh
+
+    ty = header_row(ty)
     pdf.set_font("Helvetica", "", 9)
     total_rabatt = 0
     for ln in lines:
@@ -166,20 +193,28 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         gross_ex = round(ln["quantity_centi"] * ln["unit_price_ore"] / 100)
         rabatt = gross_ex - ln["ex_moms_ore"]
         total_rabatt += rabatt
-        cells = [(desc, 0.40, "L"), (qty, 0.10, "R"),
-                 (_kr(ln["unit_price_ore"]), 0.16, "R"),
-                 (_RATE_LABEL.get(ln["rate_code"], ln["rate_code"]), 0.12, "R"),
-                 (_kr(ln["ex_moms_ore"]), 0.22, "R")]
-        pdf.set_xy(pdf.l_margin, ty)
-        for val, frac, align in cells:
-            pdf.cell(W * frac, 6, _s(val), border="B", align=align)
-        ty += 6
+        desc_lines = _wrap(pdf, desc, W * 0.40 - 2, 9)        # wrap into the Beskrivning column
+        row_h = max(6.0, len(desc_lines) * line_h + 1.5)
+        new_page(row_h + (4 if disc else 0), header=True)
+        # Numeric columns: one cell each spanning the whole (possibly multi-line) row.
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_xy(pdf.l_margin + W * 0.40, ty)
+        pdf.cell(W * 0.10, row_h, _s(qty), border="B", align="R")
+        pdf.cell(W * 0.16, row_h, _s(_kr(ln["unit_price_ore"])), border="B", align="R")
+        pdf.cell(W * 0.12, row_h, _s(_RATE_LABEL.get(ln["rate_code"], ln["rate_code"])), border="B", align="R")
+        pdf.cell(W * 0.22, row_h, _s(_kr(ln["ex_moms_ore"])), border="B", align="R")
+        # Description column: an empty bottom-bordered cell with the wrapped lines on top.
+        pdf.set_xy(pdf.l_margin, ty); pdf.cell(W * 0.40, row_h, "", border="B")
+        for i, dl in enumerate(desc_lines):
+            pdf.set_xy(pdf.l_margin + W * 0.005, ty + 1 + i * line_h)
+            pdf.cell(W * 0.40, line_h, _s(dl))
+        ty += row_h
         # A rabatt sub-line, only for lines that actually carry a discount (in red).
         if disc:
             pct = (f"{disc / 100:.2f}".rstrip("0").rstrip(".")).replace(".", ",")
             pdf.set_font("Helvetica", "", 8); pdf.set_text_color(200, 0, 0)
             pdf.set_xy(pdf.l_margin + W * 0.02, ty)
-            pdf.cell(0, 4, _s(f"Rabatt {pct} %  (ord. {_kr(gross_ex)})  −{_kr(rabatt)} kr"))
+            pdf.cell(0, 4, _s(f"Rabatt {pct} %  (ord. {_kr(gross_ex)})  -{_kr(rabatt)} kr"))
             pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 9)
             ty += 4
 
@@ -193,12 +228,15 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     rw = W * 0.45
     # Total rabatt (summed over all lines), only shown when a discount exists — in red.
     if total_rabatt:
+        new_page(6)
         pdf.set_text_color(200, 0, 0)
         _kv(pdf, rx, ty, rw, "Total rabatt", "-" + _kr(total_rabatt) + " kr"); ty += 6
         pdf.set_text_color(0, 0, 0)
     for rate, (ex, mm) in sorted(by_rate.items()):
+        new_page(6)
         _kv(pdf, rx, ty, rw, f"Moms {_RATE_LABEL.get(rate, rate)} (underlag {_kr(ex)})", _kr(mm))
         ty += 6
+    new_page(20)
     _kv(pdf, rx, ty, rw, "Summa exkl. moms", _kr(invoice["ex_moms_ore"])); ty += 6
     _kv(pdf, rx, ty, rw, "Summa moms", _kr(invoice["moms_ore"])); ty += 6
     _kv(pdf, rx, ty, rw, "Summa inkl. moms", _kr(invoice["inc_moms_ore"]), bold=True); ty += 8
@@ -215,6 +253,7 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
             title += " (RUT)"
         else:
             title += " (ROT)"
+        new_page(13 + 7 * len(recipients))
         pdf.set_font("Helvetica", "B", 10)
         pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 6, _s(title))
         ty += 7
@@ -230,6 +269,7 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         ty += 6
         pdf.set_font("Helvetica", "", 9)
         for r in recipients:
+            new_page(7)
             box = f"{r['first_name']} {r['last_name']}  ({r['personnummer']})"
             share = r.get("share_pct")
             pdf.set_xy(pdf.l_margin, ty)
@@ -243,49 +283,71 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
             ty += 7
         ty += 2
         if rut_total:
-            _kv(pdf, rx, ty, rw, "Begärd skattereduktion RUT", _kr(rut_total)); ty += 6
+            new_page(6); _kv(pdf, rx, ty, rw, "Begärd skattereduktion RUT", _kr(rut_total)); ty += 6
         if rot_total:
-            _kv(pdf, rx, ty, rw, "Begärd skattereduktion ROT", _kr(rot_total)); ty += 6
+            new_page(6); _kv(pdf, rx, ty, rw, "Begärd skattereduktion ROT", _kr(rot_total)); ty += 6
+        new_page(16)
         ty = _pay_block(pdf, rx, ty, rw, "Uppskattat pris" if is_offert else "Att betala",
                         invoice["inc_moms_ore"] - husavdrag)
     else:
         pay_label = "Uppskattat pris" if is_offert else ("Att återfå" if is_credit else "Att betala")
         pay_amount = -invoice["inc_moms_ore"] if is_credit else invoice["inc_moms_ore"]
+        new_page(16)
         ty = _pay_block(pdf, rx, ty, rw, pay_label, pay_amount)
     if is_offert:
         ty += 4
-        pdf.set_font("Helvetica", "I", 8)
-        pdf.set_xy(pdf.l_margin, ty)
-        pdf.multi_cell(W, 4, _s("Detta är en offert och inte en faktura. Priserna är "
-                                + "preliminära och giltiga till angivet datum."))
-        ty = pdf.get_y()
+        flow_text("Detta är en offert och inte en faktura. Priserna är "
+                  "preliminära och giltiga till angivet datum.", W, 8, 4, style="I")
 
     # ---- payment methods + terms --------------------------------------------
     ty += 4
     if methods:
+        new_page(5 + 5 * len(methods))
         pdf.set_font("Helvetica", "B", 9); pdf.set_xy(pdf.l_margin, ty)
         pdf.cell(0, 5, _s("Ange fakturanummer vid betalning:")); ty += 5
         pdf.set_font("Helvetica", "", 9)
         for m in methods:
+            new_page(5)
             pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 5, _s(f"{m['label']}: {m['value']}")); ty += 5
-    pdf.set_font("Helvetica", "", 9)
     if invoice.get("payment_terms"):
+        new_page(5)
+        pdf.set_font("Helvetica", "", 9)
         pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 5, _s(f"Betalningsvillkor: {invoice['payment_terms']}")); ty += 5
     if invoice.get("note"):
-        pdf.set_xy(pdf.l_margin, ty + 2); pdf.multi_cell(W, 5, _s(invoice["note"])); ty = pdf.get_y()
+        ty += 2
+        flow_text(invoice["note"], W, 9, 5)
 
-    # ---- gratis distanssupport text block ------------------------------------
-    if invoice.get("support_expiry_date"):
+    # ---- support: cap-reached notice (12 h) OR the gratis distanssupport text --
+    if invoice.get("support_cap_reached"):
         ty += 6
+        new_page(6)
         pdf.set_font("Helvetica", "B", 8)
         pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 4, _s("Gratis distanssupport")); ty += 4
-        pdf.set_font("Helvetica", "", 7.5)
-        pdf.set_xy(pdf.l_margin, ty)
-        pdf.multi_cell(W, 3.5, _s(_support_text(
-            invoice.get("support_minutes_earned") or 0, invoice["support_expiry_date"])))
-        ty = pdf.get_y()
+        flow_text(_support_cap_text(), W, 7.5, 3.5)
+    elif invoice.get("support_expiry_date"):
+        ty += 6
+        new_page(6)
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 4, _s("Gratis distanssupport")); ty += 4
+        flow_text(_support_text(invoice.get("support_minutes_earned") or 0,
+                                invoice["support_expiry_date"]), W, 7.5, 3.5)
 
-    # ---- seller block: a footer under the payment methods --------------------
+    # ---- licence keys: their own page at the very end ------------------------
+    keys = [k for k in (invoice.get("license_keys") or []) if str(k).strip()]
+    if keys:
+        pdf.add_page(); ty = pdf.t_margin
+        pdf.set_font("Helvetica", "B", 14)
+        pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 8, _s("Licensnycklar")); ty += 10
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_xy(pdf.l_margin, ty)
+        pdf.cell(0, 5, _s(f"Tillhör faktura {invoice.get('invoice_number') or ''}.")); ty += 8
+        for k in keys:
+            new_page(7)
+            pdf.set_font("Helvetica", "", 11)
+            pdf.set_xy(pdf.l_margin, ty)
+            pdf.cell(0, 6, _s("• " + str(k).strip()), border="B"); ty += 7
+
+    # ---- seller block: a footer pinned to the bottom of the last page --------
     parts = []
     if seller.get("org_nr"):
         parts.append("Org.nr: " + str(seller["org_nr"]))
@@ -295,6 +357,7 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         parts.append("Godkänd för F-skatt")
     contact = " · ".join(x for x in (seller.get("address"), seller.get("email"),
                                      seller.get("phone")) if x)
+    new_page(18)                                       # keep the footer off any content above
     fy = max(ty + 8, pdf.h - pdf.b_margin - 16)        # near the page bottom
     pdf.set_draw_color(200, 205, 212)
     pdf.line(pdf.l_margin, fy, pdf.w - pdf.r_margin, fy)
@@ -323,6 +386,51 @@ def _support_text(minutes: int, expiry_date: str) -> str:
         f"Denna faktura ger: {minutes} minuter distanssupport, giltigt till {expiry_date}. "
         "Kontakta mig för att få uppgift om hur mycket supporttid du har kvar totalt."
     )
+
+
+def _support_cap_text() -> str:
+    """Shown instead of the earned-time block once a customer has reached the support cap."""
+    return (
+        "Du har uppnått den maximala gränsen för kostnadsfri distanssupport (12 timmar) "
+        "hos magIT. Du är fortfarande varmt välkommen att höra av dig om du har några "
+        "problem eller frågor, så hittar vi en lösning tillsammans."
+    )
+
+
+def _wrap(pdf, s, width, size, style=""):
+    """Word-wrap `s` to `width` mm at the given Helvetica font; returns a list of line
+    strings. Hard-splits any single token wider than the column so nothing overflows
+    into the next column. Sets the font as a side effect (callers re-set as needed)."""
+    pdf.set_font("Helvetica", style, size)
+    s = _s(s)
+    if not s.strip():
+        return [""]
+
+    def fit(tok):                                       # hard-split an over-wide token
+        if pdf.get_string_width(tok) <= width or not tok:
+            return [tok]
+        parts, cur = [], ""
+        for ch in tok:
+            if not cur or pdf.get_string_width(cur + ch) <= width:
+                cur += ch
+            else:
+                parts.append(cur); cur = ch
+        if cur:
+            parts.append(cur)
+        return parts
+
+    lines, cur = [], ""
+    for word in s.split():
+        for piece in fit(word):
+            if not cur:
+                cur = piece
+            elif pdf.get_string_width(cur + " " + piece) <= width:
+                cur += " " + piece
+            else:
+                lines.append(cur); cur = piece
+    if cur:
+        lines.append(cur)
+    return lines or [""]
 
 
 def _kv(pdf, x, y, w, label, value, bold=False):

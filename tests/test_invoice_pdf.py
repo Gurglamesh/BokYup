@@ -131,3 +131,63 @@ def test_render_rot_reduction(ops):
     assert inv["rot_total_ore"] == 375000
     pdf = render_invoice_pdf(ops.get_invoice(inv["invoice_id"]))
     assert pdf[:4] == b"%PDF" and len(pdf) > 800
+
+
+def _pages(pdf_bytes: bytes) -> int:
+    from pypdf import PdfReader
+    import io
+    return len(PdfReader(io.BytesIO(pdf_bytes)).pages)
+
+
+def _synthetic(lines, **extra):
+    inv = {
+        "invoice_number": 1001, "invoice_date": "2026-08-04", "due_date": "2026-09-03",
+        "seller": {"name": "magIT", "org_nr": "556000-0000", "email": "a@b.se"},
+        "buyer": {"first_name": "Test", "last_name": "Kund", "street": "Gata 1",
+                  "zip_code": "12345", "city": "Stad"},
+        "lines": lines, "recipients": [],
+        "payment_methods": [{"label": "Bankgiro", "value": "123-4567"}],
+        "ex_moms_ore": sum(l["ex_moms_ore"] for l in lines),
+        "moms_ore": sum(l["moms_ore"] for l in lines),
+        "inc_moms_ore": sum(l["ex_moms_ore"] + l["moms_ore"] for l in lines),
+    }
+    inv.update(extra)
+    return inv
+
+
+def test_many_lines_do_not_explode_into_empty_pages():
+    """Regression: a long invoice used to spawn ~1 near-empty page PER line because the
+    absolute-Y layout fought fpdf's auto page break. It must now paginate tightly."""
+    lines = []
+    for i in range(40):
+        desc = ("Mycket lang artikelbeskrivning med installation, konfiguration och "
+                f"dokumentation nummer {i}") if i % 5 == 0 else f"Artikel {i}"
+        lines.append({"description": desc, "quantity_centi": 100, "unit": "st",
+                      "unit_price_ore": 49900, "rate_code": "25", "ex_moms_ore": 49900,
+                      "moms_ore": 12475, "discount_pct_centi": 0, "reduction_type": None})
+    pages = _pages(render_invoice_pdf(_synthetic(lines)))
+    assert 2 <= pages <= 4, f"40 lines should be a handful of pages, got {pages}"
+
+
+def test_short_invoice_is_one_page():
+    lines = [{"description": "Kort rad", "quantity_centi": 100, "unit": "st",
+              "unit_price_ore": 10000, "rate_code": "25", "ex_moms_ore": 10000,
+              "moms_ore": 2500, "discount_pct_centi": 0, "reduction_type": None}]
+    assert _pages(render_invoice_pdf(_synthetic(lines))) == 1
+
+
+def test_license_keys_add_a_final_page():
+    lines = [{"description": "Programvara", "quantity_centi": 100, "unit": "st",
+              "unit_price_ore": 50000, "rate_code": "25", "ex_moms_ore": 50000,
+              "moms_ore": 12500, "discount_pct_centi": 0, "reduction_type": None}]
+    without = _pages(render_invoice_pdf(_synthetic(lines)))
+    withkeys = _pages(render_invoice_pdf(_synthetic(lines, license_keys=["AAAA-BBBB", "CCCC-DDDD"])))
+    assert withkeys == without + 1
+
+
+def test_support_cap_notice_renders():
+    lines = [{"description": "Tjänst", "quantity_centi": 100, "unit": "st",
+              "unit_price_ore": 50000, "rate_code": "25", "ex_moms_ore": 50000,
+              "moms_ore": 12500, "discount_pct_centi": 0, "reduction_type": None}]
+    pdf = render_invoice_pdf(_synthetic(lines, support_cap_reached=True))
+    assert pdf[:4] == b"%PDF" and len(pdf) > 800
