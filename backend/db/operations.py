@@ -551,10 +551,12 @@ class BookOps:
         stocked appear; set include_empty to also show fully-consumed articles."""
         rows = self.conn.execute(
             "SELECT a.id AS article_id, a.article_number, a.description, a.unit, "
+            "a.category_id, c.name AS category_name, "
             "COUNT(sb.id) AS batch_count, "
             "COALESCE(SUM(sb.qty_remaining_centi), 0) AS qty_remaining_centi, "
             "COALESCE(SUM(sb.qty_remaining_centi * sb.unit_cost_ore) / 100, 0) AS value_ore "
             "FROM stock_batch sb JOIN article a ON a.id = sb.article_id "
+            "LEFT JOIN category c ON c.id = a.category_id "
             "GROUP BY a.id ORDER BY a.article_number").fetchall()
         out = [dict(r) for r in rows]
         if not include_empty:

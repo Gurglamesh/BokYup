@@ -718,10 +718,11 @@ const SECTION_RENDERERS = {
 
   // ----- stock / lager -----
   async stock(panel) {
-    const [stock, articles, suppliers] = await Promise.all([
+    const [stock, articles, suppliers, cats] = await Promise.all([
       api("GET", `/books/${bid()}/stock`),
       api("GET", `/books/${bid()}/articles`),
       api("GET", `/books/${bid()}/suppliers`),
+      api("GET", `/books/${bid()}/categories`),
     ]);
     panel.appendChild(headerWithAdd("Lager", "+ Lägg till i lager",
       () => guard(() => addStockBatchFlow(articles, suppliers))));
@@ -733,8 +734,22 @@ const SECTION_RENDERERS = {
       panel.appendChild(el("p", { class: "muted" }, "Inget i lager ännu."));
       return;
     }
-    const totalValue = stock.reduce((s, r) => s + (r.value_ore || 0), 0);
-    for (const r of stock) {
+    const catPathOf = (r) => r.category_id ? categoryPath(cats, r.category_id) : "(okategoriserad)";
+    const sortSel = el("select", {},
+      el("option", { value: "kategori" }, "Kategori"),
+      el("option", { value: "artnr" }, "Artikelnummer"),
+      el("option", { value: "namn" }, "Namn"),
+      el("option", { value: "varde" }, "Lagervärde (högst först)"),
+      el("option", { value: "antal" }, "Antal kvar (högst först)"));
+    const search = el("input", { type: "search", placeholder: "Sök artikel…", style: "min-width:200px" });
+    panel.appendChild(el("div", { class: "row", style: "gap:12px;align-items:flex-end;margin:8px 0" },
+      wrap("Sortera efter", sortSel), wrap("Sök", search)));
+    const listBox = el("div", {});
+    panel.appendChild(listBox);
+    const totalLine = el("p", { style: "margin-top:12px;text-align:right;font-weight:600" });
+    panel.appendChild(totalLine);
+
+    const appendArticleRow = (parent, r) => {
       const details = el("div", { style: "display:none;padding:6px 0 12px 12px" });
       let loaded = false;
       const toggle = el("button", { class: "btn small ghost", onclick: () => guard(async () => {
@@ -745,7 +760,7 @@ const SECTION_RENDERERS = {
           details.appendChild(await stockBatchesTable(r.article_id, suppliers));
         }
       }) }, "Batchar ▾");
-      const head = el("div", {
+      parent.appendChild(el("div", {
         style: "display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--line)",
       },
         el("strong", { style: "min-width:90px" }, r.article_number),
@@ -754,12 +769,44 @@ const SECTION_RENDERERS = {
         el("span", { class: "muted", style: "min-width:70px;text-align:right" }, `${r.batch_count} batch`),
         el("span", { class: "num", style: "min-width:110px;text-align:right", title: "Lagervärde (inköp)" },
           toKr(r.value_ore) + " kr"),
-        toggle);
-      panel.appendChild(head);
-      panel.appendChild(details);
-    }
-    panel.appendChild(el("p", { style: "margin-top:12px;text-align:right;font-weight:600" },
-      "Totalt lagervärde: " + toKr(totalValue) + " kr"));
+        toggle));
+      parent.appendChild(details);
+    };
+
+    const draw = () => {
+      listBox.innerHTML = "";
+      const q = (search.value || "").trim().toLowerCase();
+      let rows = stock.filter((r) => !q
+        || (r.description || "").toLowerCase().includes(q)
+        || (r.article_number || "").toLowerCase().includes(q)
+        || catPathOf(r).toLowerCase().includes(q));
+      const mode = sortSel.value;
+      const byNr = (a, b) => (a.article_number || "").localeCompare(b.article_number || "");
+      if (mode === "namn") rows.sort((a, b) => (a.description || "").localeCompare(b.description || "") || byNr(a, b));
+      else if (mode === "varde") rows.sort((a, b) => (b.value_ore || 0) - (a.value_ore || 0));
+      else if (mode === "antal") rows.sort((a, b) => (b.qty_remaining_centi || 0) - (a.qty_remaining_centi || 0));
+      else rows.sort(byNr);
+      if (mode === "kategori") {
+        rows.sort((a, b) => catPathOf(a).localeCompare(catPathOf(b)) || byNr(a, b));
+        let cur = null;
+        for (const r of rows) {
+          const p = catPathOf(r);
+          if (p !== cur) {
+            cur = p;
+            listBox.appendChild(el("h4", { style: "margin:14px 0 2px;color:var(--brand,#3a6ea5)" }, p));
+          }
+          appendArticleRow(listBox, r);
+        }
+      } else {
+        for (const r of rows) appendArticleRow(listBox, r);
+      }
+      const tv = rows.reduce((s, r) => s + (r.value_ore || 0), 0);
+      totalLine.textContent = "Totalt lagervärde: " + toKr(tv) + " kr"
+        + (rows.length !== stock.length ? ` (${rows.length}/${stock.length} artiklar)` : "");
+    };
+    sortSel.onchange = draw;
+    search.addEventListener("input", draw);
+    draw();
   },
 
   // ----- customers -----
@@ -2490,17 +2537,42 @@ async function stockBatchesTable(articleId, suppliers) {
       b.received_date || "—",
       b.supplier_name || el("span", { class: "muted" }, "—"),
       b.note || "",
-      b.qty_remaining_centi === b.qty_in_centi
-        ? el("button", { class: "btn small ghost danger", title: "Ta bort (oanvänd batch)",
-            onclick: () => guard(async () => {
-              const c = await modal(`Ta bort batch #${b.batch_number}?`, [], "Ta bort");
-              if (!c) return;
-              await api("DELETE", `/books/${bid()}/stock/${b.id}`);
-              toast("Batch borttagen"); renderWorkspace();
-            }) }, "Ta bort")
-        : el("span", { class: "muted", title: "Delvis förbrukad – kan inte tas bort" }, "förbrukad"),
+      el("span", { style: "display:flex;gap:4px;justify-content:flex-end" },
+        el("button", { class: "btn small ghost", title: "Ändra batch",
+          onclick: () => guard(() => editStockBatchFlow(b, suppliers)) }, "Ändra"),
+        b.qty_remaining_centi === b.qty_in_centi
+          ? el("button", { class: "btn small ghost danger", title: "Ta bort (oanvänd batch)",
+              onclick: () => guard(async () => {
+                const c = await modal(`Ta bort batch #${b.batch_number}?`, [], "Ta bort");
+                if (!c) return;
+                await api("DELETE", `/books/${bid()}/stock/${b.id}`);
+                toast("Batch borttagen"); renderWorkspace();
+              }) }, "Ta bort")
+          : el("span", { class: "muted", title: "Delvis förbrukad – kan inte tas bort" }, "förbrukad")),
     ]),
   );
+}
+
+async function editStockBatchFlow(b, suppliers) {
+  const f = await modal(`Ändra batch ${b.full_batch_id || b.batch_number}`, [
+    { name: "unit_cost_kr", label: "À-kostnad ex moms (kr)", value: toKr(b.unit_cost_ore) },
+    { name: "qty_remaining", label: "Antal kvar (lagerkorrigering)",
+      value: String(b.qty_remaining_centi / 100).replace(".", ",") },
+    { name: "received_date", label: "Datum", type: "date", value: b.received_date || "" },
+    { name: "supplier_id", label: "Leverantör", type: "select",
+      value: b.supplier_id ? String(b.supplier_id) : "",
+      options: [{ value: "", label: "—" },
+        ...(suppliers || []).map((s) => ({ value: String(s.id), label: s.name }))] },
+    { name: "note", label: "Notering", value: b.note || "" },
+  ], "Spara");
+  if (!f) return;
+  const body = { note: f.note || null };
+  if (f.unit_cost_kr) body.unit_cost_ore = toOre(f.unit_cost_kr);
+  if (f.qty_remaining !== "") body.qty_remaining_centi = Math.round(parseFloat(f.qty_remaining.replace(",", ".")) * 100);
+  if (f.received_date) body.received_date = f.received_date;
+  body.supplier_id = f.supplier_id ? parseInt(f.supplier_id, 10) : null;
+  await api("PATCH", `/books/${bid()}/stock/${b.id}`, body);
+  toast("Batch uppdaterad"); renderWorkspace();
 }
 
 async function addCategoryFlow(presetParentId) {
