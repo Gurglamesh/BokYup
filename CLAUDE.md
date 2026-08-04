@@ -697,6 +697,39 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       result. Articles without stock keep their catalog sale price (no cost to baseline from);
       draft restore is unaffected (keeps the saved price/batch). Frontend-only
       (`lineItemsEditor` in `app.js`); JS `node --check`'d, web tests pass (15).
+- [x] **Faktura PDF robustness + licence keys + 12 h support cap + due-days + filename
+      (schema v31, 2026-08).** (1) **PDF pagination rewrite**: the renderer laid everything
+      out at absolute Y with fpdf auto-break ON, so a long invoice spawned ~1 near-empty page
+      PER line (40 lines → 25 pages) and long descriptions overran the Antal column. Now
+      page breaks are driven manually (`new_page`/`header_row`), descriptions **word-wrap**
+      into the Beskrivning column (`_wrap`, hard-splitting over-wide tokens), and text blocks
+      flow across pages (`flow_text`) → 40 lines = 3 pages, short = 1. (2) **Licence keys**:
+      `create_invoice(license_keys=[])` stored DEK-encrypted, `get_invoice` returns them, a
+      "Licensnycklar" box on the faktura form → their own page at the PDF end. (3) **Support
+      cap 12 h/customer** (config `support_cap_minutes`=720): `support_balance` caps remaining
+      + reports `cap_minutes`/`at_cap`; a customer at the cap earns 0 further minutes and the
+      invoice is flagged `support_cap_reached` → the PDF prints the "max reached — welcome to
+      contact us" notice instead of the earned-time block. (4) **Due date = "Förfaller om
+      (dagar)"** (default 30) computed from the invoice date, not a fixed date (drafts restore
+      the day count). (5) **PDF filename**: `RawResult.filename` + `Content-Disposition:
+      inline; filename="Faktura-<n>.pdf"` (also Kreditfaktura/Offert), all preview call sites
+      unified, so a save right after creation isn't the browser's generic "document.pdf"
+      (local/desktop; server-mode blob previews still default there — use the named "Ladda
+      ner"). Tests: cap + licence round-trip, PDF page/licence/cap regressions.
+- [x] **Inventory lifecycle + Lager management + order autosave/search (2026-08).** (1)
+      **Prune-on-payment**: an order reserves stock by consuming the batch at issue; once the
+      invoice is FULLY paid (`_sync_invoice_paid`) its now-empty batches are pruned (row
+      deleted, line link nulled) while the article + the line's **frozen `cost_ore`** stay —
+      `has_cost` is now derived from that frozen cost so the real margin still shows on a paid
+      order. Partly-consumed batches are kept. (2) **Edit batches**: `update_stock_batch`
+      (à-cost / qty-remaining correction / date / supplier / note; cost edits never rewrite
+      sold lines) + `PATCH /stock/{id}` + an "Ändra" action per batch. (3) **Lager tab** gained
+      a **Sortera efter** menu (Kategori — grouped under category-path headers — / Artikelnr /
+      Namn / Lagervärde / Antal kvar) + a live **Sök artikel** filter (`list_stock` now returns
+      the article's category). (4) **Order autosave**: the faktura form auto-saves a draft on
+      any change (debounced) so leaving the tab never loses the order (formClosed guard stops a
+      late autosave after issue). (5) **Order article picker is searchable** by nr/name/category.
+      Tests pass (388).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
