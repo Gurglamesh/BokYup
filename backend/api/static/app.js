@@ -441,41 +441,71 @@ function maybeAutoCheckUpdates() {
 // ---------------------------------------------------------------------------
 // Workspace (active book)
 // ---------------------------------------------------------------------------
-const SECTIONS = [
-  ["transactions", "Transaktioner"],
-  ["record", "Bokför"],
-  ["invoices", "Ordrar"],
-  ["purchases", "Inköp"],
-  ["articles", "Artiklar"],
-  ["stock", "Lager"],
-  ["customers", "Kunder"],
-  ["suppliers", "Leverantörer"],
-  ["categories", "BAS-konton"],
-  ["rut", "RUT"],
-  ["verifikat", "Verifikat"],
-  ["huvudbok", "Huvudbok"],
-  ["reports", "Rapporter"],
-  ["arsbokslut", "Årsbokslut"],
-  ["skatt", "Skatt"],
-  ["bokslut", "Bokslut"],
-  ["settings", "Inställningar"],
+// Top-level groups → their sub-tabs (section keys unchanged; SECTION_RENDERERS is keyed
+// by them). 7 groups instead of 18 flat tabs; two-row nav (group row + sub-tab row).
+const GROUPS = [
+  { id: "orders", icon: "💼", label: "Ordrar",
+    sections: [["invoices", "Fakturor & offerter"], ["rut", "RUT/ROT"]] },
+  { id: "purchase", icon: "🛒", label: "Inköp",
+    sections: [["purchases", "Inköp"], ["suppliers", "Leverantörer"]] },
+  { id: "inventory", icon: "📦", label: "Lager",
+    sections: [["articles", "Artiklar"], ["stock", "Lagersaldo"]] },
+  { id: "customers", icon: "👥", label: "Kunder",
+    sections: [["customers", "Kundregister"]] },
+  { id: "bookkeeping", icon: "📒", label: "Bokföring",
+    sections: [["record", "Bokför"], ["transactions", "Transaktioner"],
+               ["verifikat", "Verifikat"], ["huvudbok", "Huvudbok"]] },
+  { id: "finance", icon: "📊", label: "Rapporter & skatt",
+    sections: [["reports", "Rapporter"], ["arsbokslut", "Årsbokslut"],
+               ["skatt", "Skatt"], ["bokslut", "Bokslut"]] },
+  { id: "settings", icon: "⚙️", label: "Inställningar",
+    sections: [["settings", "Inställningar"], ["categories", "BAS-konton"]] },
 ];
+const groupOf = (sectionKey) =>
+  GROUPS.find((g) => g.sections.some(([k]) => k === sectionKey)) || GROUPS[0];
 
 function renderWorkspace() {
   if (!state.activeBook) return renderHome();
   const v = $("#view");
   v.innerHTML = "";
 
+  // Resolve the active group + section, keeping them consistent (setting state.section
+  // anywhere else auto-selects the right group via groupOf).
+  if (!state.section) state.section = "invoices";
+  let group = GROUPS.find((g) => g.id === state.group) || groupOf(state.section);
+  if (!group.sections.some(([k]) => k === state.section)) state.section = group.sections[0][0];
+  state.group = group.id;
+  state.lastSection = state.lastSection || {};
+  state.lastSection[group.id] = state.section;
+
+  // Row 1: top-level groups.
   const nav = el("div", { class: "nav" });
-  for (const [key, label] of SECTIONS) {
+  for (const g of GROUPS) {
     nav.appendChild(el("button", {
-      class: state.section === key ? "active" : "",
-      onclick: () => { state.section = key; renderWorkspace(); },
-    }, label));
+      class: state.group === g.id ? "active" : "",
+      onclick: () => {
+        state.group = g.id;
+        const last = state.lastSection[g.id];
+        state.section = (last && g.sections.some(([k]) => k === last)) ? last : g.sections[0][0];
+        renderWorkspace();
+      },
+    }, `${g.icon} ${g.label}`));
   }
   nav.appendChild(el("div", { class: "spacer", style: "flex:1" }));
   nav.appendChild(el("button", { class: "", onclick: () => guard(lockActive) }, "🔒 Lås"));
   v.appendChild(nav);
+
+  // Row 2: the active group's sub-tabs (only when there's more than one).
+  if (group.sections.length > 1) {
+    const sub = el("div", { class: "nav subnav" });
+    for (const [key, label] of group.sections) {
+      sub.appendChild(el("button", {
+        class: state.section === key ? "active" : "",
+        onclick: () => { state.section = key; state.lastSection[group.id] = key; renderWorkspace(); },
+      }, label));
+    }
+    v.appendChild(sub);
+  }
 
   const panel = el("div", { class: "panel", id: "section" });
   v.appendChild(panel);

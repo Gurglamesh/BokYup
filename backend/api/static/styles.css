@@ -69,6 +69,22 @@ h3 { margin: 0 0 12px; }
 }
 .nav button.active { background: var(--brand); color: #fff; border-color: var(--brand); }
 
+/* second-row sub-tabs of the active group: lighter, pill-shaped, tighter */
+.nav.subnav { margin: -6px 0 16px; gap: 6px; padding-left: 2px; }
+.nav.subnav button {
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: .9rem;
+  background: transparent;
+  border-color: var(--line);
+  color: var(--muted);
+}
+.nav.subnav button.active {
+  background: color-mix(in srgb, var(--brand) 16%, transparent);
+  color: var(--brand);
+  border-color: var(--brand);
+}
+
 /* ---- forms ---- */
 label { display: block; font-size: .82rem; color: var(--muted); margin: 10px 0 4px; }
 input, select {
