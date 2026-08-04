@@ -1481,6 +1481,47 @@ class TestStock:
         summ = [i for i in ops.list_invoices() if i["id"] == inv["invoice_id"]][0]
         assert summ["cost_ore"] == 120000 and summ["margin_ore"] == 80000
 
+    def test_paid_invoice_prunes_empty_batch_keeps_article(self, ops):
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")
+        aid = ops.create_article("Router", "1000")["id"]
+        batch = ops.add_stock_batch(aid, 200, 60000)   # exactly 2 st -> fully sold below
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Router", "quantity_centi": 200, "unit_price_ore": 100000,
+                    "rate_code": "25", "article_id": aid, "stock_batch_id": batch["id"]}])
+        # reserved (consumed to 0) but still listed until the order is paid
+        assert ops.list_article_batches(aid)[0]["qty_remaining_centi"] == 0
+        ops.pay_invoice(inv["invoice_id"], date="2026-03-10")
+        # batch pruned, article kept, frozen margin still known
+        assert ops.list_article_batches(aid) == []
+        assert ops.conn.execute("SELECT 1 FROM article WHERE id=?", (aid,)).fetchone() is not None
+        got = ops.get_invoice(inv["invoice_id"])
+        assert got["lines"][0]["stock_batch_id"] is None
+        assert got["cost_ore"] == 120000 and got["has_cost"] is True and got["margin_ore"] == 80000
+
+    def test_partial_batch_not_pruned_on_payment(self, ops):
+        cat = ops.create_category("Försäljning", "income", 3001)
+        kid = ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")
+        aid = ops.create_article("Router", "1000")["id"]
+        batch = ops.add_stock_batch(aid, 500, 60000)
+        inv = ops.create_invoice(
+            customer_id=kid, category_id=cat, invoice_date="2026-03-01", due_date="2026-03-31",
+            lines=[{"description": "Router", "quantity_centi": 200, "unit_price_ore": 100000,
+                    "rate_code": "25", "article_id": aid, "stock_batch_id": batch["id"]}])
+        ops.pay_invoice(inv["invoice_id"], date="2026-03-10")
+        assert ops.list_article_batches(aid)[0]["qty_remaining_centi"] == 300   # kept
+
+    def test_update_stock_batch(self, ops):
+        aid = self._art(ops)
+        b = ops.add_stock_batch(aid, 500, 60000, note="gammal")
+        ops.update_stock_batch(b["id"], unit_cost_ore=55000, note="ny", qty_remaining_centi=400)
+        row = ops.list_article_batches(aid)[0]
+        assert row["unit_cost_ore"] == 55000 and row["note"] == "ny"
+        assert row["qty_remaining_centi"] == 400
+        with pytest.raises(ValueError):
+            ops.update_stock_batch(b["id"], unit_cost_ore=-1)
+
     def test_invoice_without_batch_has_unknown_cost(self, ops):
         cat = ops.create_category("Försäljning", "income", 3001)
         kid = ops.create_customer("business", company_name="Acme AB", org_nr="556000-0001")

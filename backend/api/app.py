@@ -268,6 +268,12 @@ def _build_router():
     def delete_stock_batch(book_id: str, batch_id: int, request: Request):
         return fac(request).h_delete_stock_batch({"book_id": book_id, "batch_id": batch_id}, {}, {})
 
+    @r.patch("/books/{book_id}/stock/{batch_id}")
+    def update_stock_batch(book_id: str, batch_id: int, body: sc.StockBatchPatchReq, request: Request):
+        return fac(request).h_update_stock_batch(
+            {"book_id": book_id, "batch_id": batch_id},
+            body.model_dump(exclude_none=True), {})
+
     @r.post("/books/{book_id}/categories", status_code=201)
     def create_category(book_id: str, body: sc.CategoryReq, request: Request):
         return fac(request).h_create_category({"book_id": book_id}, body.model_dump(), {})

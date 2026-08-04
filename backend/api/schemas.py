@@ -312,6 +312,15 @@ class StockBatchReq(BaseModel):
     note: Optional[str] = None
 
 
+class StockBatchPatchReq(BaseModel):
+    # Edit a batch's non-audit fields; a cost edit does not rewrite already-sold lines.
+    unit_cost_ore: Optional[int] = None
+    qty_remaining_centi: Optional[int] = None    # stock correction
+    received_date: Optional[str] = None
+    supplier_id: Optional[int] = None
+    note: Optional[str] = None
+
+
 class RutRecipientReq(BaseModel):
     # A recipient is a household member; identify by an existing customer_id and/or
     # name + personnummer. share_pct is the fallback slice of both pots; rut_share_pct

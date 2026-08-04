@@ -304,6 +304,10 @@ class AppFacade:
         self._ops(p["book_id"]).delete_stock_batch(int(p["batch_id"]))
         return {"deleted": True}
 
+    def h_update_stock_batch(self, p, b, q):
+        self._ops(p["book_id"]).update_stock_batch(int(p["batch_id"]), **b)
+        return {"updated": True}
+
     # ---- reference: customers ----
     def h_list_customers(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -803,6 +807,7 @@ _route("GET", "/books/{book_id}/stock", "h_list_stock")
 _route("POST", "/books/{book_id}/stock", "h_add_stock_batch", 201)
 _route("GET", "/books/{book_id}/articles/{article_id}/batches", "h_list_article_batches")
 _route("DELETE", "/books/{book_id}/stock/{batch_id}", "h_delete_stock_batch")
+_route("PATCH", "/books/{book_id}/stock/{batch_id}", "h_update_stock_batch")
 _route("POST", "/books/{book_id}/categories", "h_create_category", 201)
 _route("PATCH", "/books/{book_id}/categories/{category_id}", "h_update_category")
 _route("DELETE", "/books/{book_id}/categories/{category_id}", "h_delete_category")

@@ -593,6 +593,56 @@ class BookOps:
         with self.conn:
             self.conn.execute("DELETE FROM stock_batch WHERE id=?", (batch_id,))
 
+    def update_stock_batch(self, batch_id: int, **fields) -> None:
+        """Edit a stock batch's non-audit fields: unit_cost_ore, received_date, note,
+        supplier_id, and a stock correction of qty_remaining_centi. Cost edits do NOT
+        rewrite already-sold lines (invoice_line.cost_ore is frozen at issue) — they only
+        affect this batch's remaining stock value + future consumption."""
+        row = self.conn.execute("SELECT qty_in_centi, qty_remaining_centi FROM stock_batch "
+                                "WHERE id=?", (batch_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No stock batch {batch_id}")
+        allowed = {"unit_cost_ore", "received_date", "note", "supplier_id", "qty_remaining_centi"}
+        sets, params = [], []
+        for k, v in fields.items():
+            if k not in allowed or v is None:
+                continue
+            if k == "unit_cost_ore":
+                v = int(v)
+                if v < 0:
+                    raise ValueError("Inköpspriset kan inte vara negativt")
+            if k == "qty_remaining_centi":
+                v = int(v)
+                if v < 0:
+                    raise ValueError("Antalet kan inte vara negativt")
+            if k == "supplier_id" and self.conn.execute(
+                    "SELECT 1 FROM supplier WHERE id=?", (v,)).fetchone() is None:
+                raise KeyError(f"No supplier {v}")
+            sets.append(f"{k}=?"); params.append(v)
+        if not sets:
+            return
+        params.append(batch_id)
+        with self.conn:
+            self.conn.execute(f"UPDATE stock_batch SET {', '.join(sets)} WHERE id=?", params)
+
+    def _prune_invoice_empty_batches(self, invoice_id: int) -> None:
+        """After an invoice is fully paid the reserved stock is permanently gone: drop any
+        of its batches that now have 0 remaining (keeping the article and the lines' frozen
+        cost_ore). Runs inside the caller's transaction. Batches shared by other lines are
+        detached from all of them before deletion so no reference dangles."""
+        batch_ids = [r["stock_batch_id"] for r in self.conn.execute(
+            "SELECT DISTINCT stock_batch_id FROM invoice_line "
+            "WHERE invoice_id=? AND stock_batch_id IS NOT NULL", (invoice_id,)).fetchall()]
+        for bid in batch_ids:
+            row = self.conn.execute("SELECT qty_remaining_centi FROM stock_batch WHERE id=?",
+                                    (bid,)).fetchone()
+            if row is None or row["qty_remaining_centi"] > 0:
+                continue
+            # Keep the frozen cost on every line; just drop the (now empty) batch link.
+            self.conn.execute("UPDATE invoice_line SET stock_batch_id=NULL WHERE stock_batch_id=?",
+                              (bid,))
+            self.conn.execute("DELETE FROM stock_batch WHERE id=?", (bid,))
+
     def create_customer(self, type: str, **fields) -> int:
         """
         Create a customer. type='private'|'business'. Returns the stable kundnummer.
@@ -2295,10 +2345,11 @@ class BookOps:
         for r in rows:
             d = dict(r)
             d.update(self._invoice_balances(r["id"]))
-            # Real margin from picked stock batches (revenue ex moms − frozen cost).
+            # Real margin from picked stock batches (revenue ex moms − frozen cost). Keyed
+            # on the frozen cost so it survives the batch being pruned after payment.
             crow = self.conn.execute(
                 "SELECT COALESCE(SUM(cost_ore), 0) AS cost_ore, "
-                "COUNT(stock_batch_id) AS with_cost FROM invoice_line WHERE invoice_id=?",
+                "COUNT(NULLIF(cost_ore, 0)) AS with_cost FROM invoice_line WHERE invoice_id=?",
                 (r["id"],)).fetchone()
             d["cost_ore"] = crow["cost_ore"]
             d["has_cost"] = bool(crow["with_cost"])
@@ -2352,7 +2403,9 @@ class BookOps:
         # Real margin from any picked stock batches (revenue ex moms − frozen cost).
         # `has_cost` says whether any line carried a cost (else margin is unknown).
         inv["cost_ore"] = sum(ln["cost_ore"] for ln in inv["lines"])
-        inv["has_cost"] = any(ln["stock_batch_id"] for ln in inv["lines"])
+        # Margin is known once any line carries a frozen cost — this survives the batch
+        # being pruned after payment (the link is nulled but cost_ore stays frozen).
+        inv["has_cost"] = any(ln["cost_ore"] for ln in inv["lines"])
         inv["margin_ore"] = inv["ex_moms_ore"] - inv["cost_ore"]
         inv["recipients"] = [{
             "customer_id": r["customer_id"],
@@ -2634,11 +2687,15 @@ class BookOps:
         return cur.lastrowid
 
     def _sync_invoice_paid(self, invoice_id, transaktion_id, date) -> None:
-        """Mark the underlying transaktion paid once the invoice is fully settled."""
+        """Mark the underlying transaktion paid once the invoice is fully settled. When the
+        invoice is fully paid, prune its now-empty stock batches (the reserved stock is
+        permanently gone)."""
         bal = self._invoice_balances(invoice_id)
-        if transaktion_id and bal["outstanding_ore"] <= 0:
-            self.conn.execute("UPDATE transaktion SET status='paid', payment_date=? WHERE id=?",
-                              (date, transaktion_id))
+        if bal["outstanding_ore"] <= 0:
+            if transaktion_id:
+                self.conn.execute("UPDATE transaktion SET status='paid', payment_date=? WHERE id=?",
+                                  (date, transaktion_id))
+            self._prune_invoice_empty_batches(invoice_id)
         elif transaktion_id:
             self.conn.execute("UPDATE transaktion SET status='pending' WHERE id=?", (transaktion_id,))
 
