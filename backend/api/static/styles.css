@@ -69,7 +69,7 @@ h3 { margin: 0 0 12px; }
 }
 .nav button.active { background: var(--brand); color: #fff; border-color: var(--brand); }
 
-/* second-row sub-tabs of the active group: lighter, pill-shaped, tighter */
+/* second-row sub-tabs of the active group: lighter, pill-shaped, tighter, group-coloured */
 .nav.subnav { margin: -6px 0 16px; gap: 6px; padding-left: 2px; }
 .nav.subnav button {
   padding: 5px 12px;
@@ -80,9 +80,21 @@ h3 { margin: 0 0 12px; }
   color: var(--muted);
 }
 .nav.subnav button.active {
-  background: color-mix(in srgb, var(--brand) 16%, transparent);
-  color: var(--brand);
-  border-color: var(--brand);
+  background: color-mix(in srgb, var(--group-color, var(--brand)) 16%, transparent);
+  color: var(--group-color, var(--brand));
+  border-color: var(--group-color, var(--brand));
+}
+/* the active area's colour tints the content panel's top edge */
+.panel#section { border-top: 3px solid var(--group-color, var(--brand)); }
+
+/* hamburger: hidden on desktop, shown on narrow screens where the nav collapses */
+.navburger { display: none; }
+@media (max-width: 760px) {
+  .navburger { display: inline-flex; margin-bottom: 10px; }
+  .navwrap { display: none; }
+  .navwrap.open { display: block; }
+  .navwrap .nav { flex-direction: column; align-items: stretch; }
+  .navwrap .nav .spacer { display: none; }
 }
 
 /* collapsed order line: one-line summary that expands on click / ▸ */

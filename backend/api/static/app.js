@@ -443,26 +443,31 @@ function maybeAutoCheckUpdates() {
 // ---------------------------------------------------------------------------
 // Top-level groups → their sub-tabs (section keys unchanged; SECTION_RENDERERS is keyed
 // by them). 7 groups instead of 18 flat tabs; two-row nav (group row + sub-tab row).
+// Each group has a colour (drives the active button + sub-tab accent). A sub-tab is
+// [sectionKey, label] or [sectionKey, label, ordersTab] — the 3rd form (Ordrar group)
+// drives the invoices section's inner tab so Fakturor/Offerter/Utkast live directly in
+// the group nav instead of a nested third row.
 const GROUPS = [
-  { id: "orders", icon: "💼", label: "Ordrar",
-    sections: [["invoices", "Fakturor & offerter"], ["rut", "RUT/ROT"]] },
-  { id: "purchase", icon: "🛒", label: "Inköp",
+  { id: "orders", icon: "💼", label: "Ordrar", color: "#3a6ea5",
+    sections: [["invoices", "Fakturor", "fakturor"], ["invoices", "Offerter", "offerter"],
+               ["invoices", "Utkast", "utkast"], ["rut", "RUT/ROT"]] },
+  { id: "purchase", icon: "🛒", label: "Inköp", color: "#2f8f6b",
     sections: [["purchases", "Inköp"], ["suppliers", "Leverantörer"]] },
-  { id: "inventory", icon: "📦", label: "Lager",
+  { id: "inventory", icon: "📦", label: "Lager", color: "#b7791f",
     sections: [["articles", "Artiklar"], ["stock", "Lagersaldo"]] },
-  { id: "customers", icon: "👥", label: "Kunder",
+  { id: "customers", icon: "👥", label: "Kunder", color: "#7a5bb0",
     sections: [["customers", "Kundregister"]] },
-  { id: "bookkeeping", icon: "📒", label: "Bokföring",
+  { id: "bookkeeping", icon: "📒", label: "Bokföring", color: "#4a5b8f",
     sections: [["record", "Bokför"], ["transactions", "Transaktioner"],
                ["verifikat", "Verifikat"], ["huvudbok", "Huvudbok"]] },
-  { id: "finance", icon: "📊", label: "Rapporter & skatt",
+  { id: "finance", icon: "📊", label: "Rapporter & skatt", color: "#a4443b",
     sections: [["reports", "Rapporter"], ["arsbokslut", "Årsbokslut"],
                ["skatt", "Skatt"], ["bokslut", "Bokslut"]] },
-  { id: "settings", icon: "⚙️", label: "Inställningar",
+  { id: "settings", icon: "⚙️", label: "Inställningar", color: "#5b6470",
     sections: [["settings", "Inställningar"], ["categories", "BAS-konton"]] },
 ];
 const groupOf = (sectionKey) =>
-  GROUPS.find((g) => g.sections.some(([k]) => k === sectionKey)) || GROUPS[0];
+  GROUPS.find((g) => g.sections.some((s) => s[0] === sectionKey)) || GROUPS[0];
 
 function renderWorkspace() {
   if (!state.activeBook) return renderHome();
@@ -472,40 +477,57 @@ function renderWorkspace() {
   // Resolve the active group + section, keeping them consistent (setting state.section
   // anywhere else auto-selects the right group via groupOf).
   if (!state.section) state.section = "invoices";
+  if (state.section === "invoices" && !state.ordersTab) state.ordersTab = "fakturor";
   let group = GROUPS.find((g) => g.id === state.group) || groupOf(state.section);
-  if (!group.sections.some(([k]) => k === state.section)) state.section = group.sections[0][0];
+  if (!group.sections.some((s) => s[0] === state.section)) state.section = group.sections[0][0];
   state.group = group.id;
   state.lastSection = state.lastSection || {};
   state.lastSection[group.id] = state.section;
+  document.documentElement.style.setProperty("--group-color", group.color);
 
-  // Row 1: top-level groups.
+  // Hamburger toggles the nav on narrow screens (hidden on desktop via CSS).
+  const navwrap = el("div", { class: "navwrap" });
+  v.appendChild(el("button", { class: "navburger btn",
+    onclick: () => navwrap.classList.toggle("open") }, "☰ Meny"));
+
+  // Row 1: top-level groups (active one wears its colour).
   const nav = el("div", { class: "nav" });
   for (const g of GROUPS) {
+    const active = state.group === g.id;
     nav.appendChild(el("button", {
-      class: state.group === g.id ? "active" : "",
+      class: active ? "active" : "",
+      style: active ? `background:${g.color};border-color:${g.color};color:#fff` : "",
       onclick: () => {
         state.group = g.id;
         const last = state.lastSection[g.id];
-        state.section = (last && g.sections.some(([k]) => k === last)) ? last : g.sections[0][0];
+        state.section = (last && g.sections.some((s) => s[0] === last)) ? last : g.sections[0][0];
         renderWorkspace();
       },
     }, `${g.icon} ${g.label}`));
   }
   nav.appendChild(el("div", { class: "spacer", style: "flex:1" }));
   nav.appendChild(el("button", { class: "", onclick: () => guard(lockActive) }, "🔒 Lås"));
-  v.appendChild(nav);
+  navwrap.appendChild(nav);
 
-  // Row 2: the active group's sub-tabs (only when there's more than one).
+  // Row 2: the active group's sub-tabs (only when there's more than one). A 3rd element
+  // in a sub-tab is the invoices section's inner tab (Fakturor/Offerter/Utkast).
   if (group.sections.length > 1) {
     const sub = el("div", { class: "nav subnav" });
-    for (const [key, label] of group.sections) {
+    for (const [key, label, ordersTab] of group.sections) {
+      const active = state.section === key && (!ordersTab || state.ordersTab === ordersTab);
       sub.appendChild(el("button", {
-        class: state.section === key ? "active" : "",
-        onclick: () => { state.section = key; state.lastSection[group.id] = key; renderWorkspace(); },
+        class: active ? "active" : "",
+        onclick: () => {
+          state.section = key;
+          if (ordersTab) state.ordersTab = ordersTab;
+          state.lastSection[group.id] = key;
+          renderWorkspace();
+        },
       }, label));
     }
-    v.appendChild(sub);
+    navwrap.appendChild(sub);
   }
+  v.appendChild(navwrap);
 
   const panel = el("div", { class: "panel", id: "section" });
   v.appendChild(panel);
@@ -1673,21 +1695,17 @@ const SECTION_RENDERERS = {
       const cid = state.ordersCustomer ? parseInt(state.ordersCustomer, 10) : null;
       return cid ? arr.filter((x) => x.customer_id === cid) : arr;
     };
-    const subTabs = [["fakturor", "Fakturor", list.length],
-                     ["offerter", "Offerter", offerter.length],
-                     ["utkast", "Utkast", drafts.length]];
-    const subnav = el("div", { class: "nav", style: "margin-top:12px" });
-    for (const [key, label, count] of subTabs) {
-      subnav.appendChild(el("button", { class: state.ordersTab === key ? "active" : "",
-        onclick: () => { state.ordersTab = key; renderContent(); } }, `${label} (${count})`));
-    }
+    // The Fakturor/Offerter/Utkast tabs now live in the group nav (state.ordersTab);
+    // here we only show the counts + the per-customer filter.
+    const counts = el("p", { class: "muted", style: "margin-top:6px" },
+      `Fakturor ${list.length} · Offerter ${offerter.length} · Utkast ${drafts.length}`);
     const custFilter = el("select", { style: "max-width:280px" },
       el("option", { value: "" }, "— Alla kunder —"),
       ...customers.map((c) => el("option", { value: c.kundnummer },
         c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer))));
     custFilter.value = state.ordersCustomer;
     custFilter.onchange = () => { state.ordersCustomer = custFilter.value; renderContent(); };
-    panel.appendChild(subnav);
+    panel.appendChild(counts);
     panel.appendChild(el("div", { class: "row", style: "margin-top:8px" }, wrap("Filtrera på kund", custFilter)));
     const content = el("div", {});
     panel.appendChild(content);
