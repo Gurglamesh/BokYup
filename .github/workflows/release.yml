@@ -24,8 +24,8 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with: { python-version: "3.12", cache: pip }
 
       - name: Resolve version
@@ -84,8 +84,8 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true      # don't block the Windows release if the phone build needs tuning
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with: { python-version: "3.12", cache: pip }
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
