@@ -106,7 +106,9 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         meta = [("Fakturanr", str(invoice.get("invoice_number") or "")),
                 ("Fakturadatum", invoice.get("invoice_date") or ""),
                 ("Förfallodatum", invoice.get("due_date") or ""),
-                ("Leveransdatum", invoice.get("delivery_date") or "")]
+                ("Leveransdatum", invoice.get("delivery_date") or ""),
+                ("Er referens", invoice.get("your_reference") or ""),
+                ("Vår referens", invoice.get("our_reference") or "")]
     my = max(28, logo_bottom + 3)
     for label, val in meta:
         if not val:

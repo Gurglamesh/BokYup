@@ -3300,7 +3300,8 @@ async function invoiceForm(panel, draft) {
   refreshDueHint();
   const delivery = el("input", { type: "date", value: dp.delivery_date || "" });
   const terms = el("input", { type: "text", value: dp.payment_terms || "30 dagar netto" });
-  const yourRef = el("input", { type: "text", value: dp.your_reference || "" });
+  const yourRef = el("input", { type: "text", placeholder: "T.ex. namn, PO-/beställningsnr", value: dp.your_reference || "" });
+  const ourRef = el("input", { type: "text", placeholder: "T.ex. vår handläggare", value: dp.our_reference || "" });
   const note = el("input", { type: "text", value: dp.note || "" });
   // Licence keys: one per line; printed on their own page at the end of the faktura PDF.
   const licenseKeys = el("textarea", { rows: "3", style: "width:100%;font-family:monospace",
@@ -3377,7 +3378,8 @@ async function invoiceForm(panel, draft) {
   panel.appendChild(el("h3", { style: "margin-top:18px" }, "Summa"));
   panel.appendChild(totalsBox);
   panel.appendChild(el("div", { class: "row", style: "margin-top:14px" },
-    wrap("Betalningsvillkor", terms), wrap("Er referens", yourRef), wrap("Notering", note)));
+    wrap("Betalningsvillkor", terms), wrap("Er referens (namn/PO-nr)", yourRef),
+    wrap("Vår referens", ourRef), wrap("Notering", note)));
   panel.appendChild(el("div", { style: "margin-top:14px" },
     el("label", { style: "font-weight:600;display:block;margin-bottom:4px" }, "Licensnycklar (valfritt)"),
     licenseKeys));
@@ -3431,7 +3433,8 @@ async function invoiceForm(panel, draft) {
       category_id: cat.value ? parseInt(cat.value, 10) : null,
       invoice_date: invDate.value, due_date: computedDue(),
       delivery_date: delivery.value || null, payment_terms: terms.value || null,
-      your_reference: yourRef.value || null, note: note.value || null,
+      your_reference: yourRef.value || null, our_reference: ourRef.value || null,
+      note: note.value || null,
       lines: lines.get(), recipients: recips.get(),
       license_keys: licenseKeys.value.split("\n").map((s) => s.trim()).filter(Boolean),
     };
