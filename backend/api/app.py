@@ -108,6 +108,17 @@ def create_app(app_dir: str | Path | None = None,
         from fastapi.staticfiles import StaticFiles
         static_dir = Path(__file__).parent / "static"
         if static_dir.is_dir():
+            # Force revalidation so clients never run a stale UI after a server update:
+            # "no-cache" = the browser may cache but MUST check with the server first
+            # (conditional GET via the ETag StaticFiles already sends → 304 if unchanged,
+            # 200 with the new bundle if it changed). A plain reload then picks up updates.
+            @app.middleware("http")
+            async def _revalidate_ui(request: Request, call_next):
+                response = await call_next(request)
+                if request.url.path.startswith("/app"):
+                    response.headers["Cache-Control"] = "no-cache"
+                return response
+
             app.mount("/app", StaticFiles(directory=str(static_dir), html=True), name="ui")
     return app
 
