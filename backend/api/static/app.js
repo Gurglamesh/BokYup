@@ -793,7 +793,7 @@ const SECTION_RENDERERS = {
       el("option", { value: "namn" }, "Namn"),
       el("option", { value: "varde" }, "Lagervärde (högst först)"),
       el("option", { value: "antal" }, "Antal kvar (högst först)"));
-    const search = el("input", { type: "search", placeholder: "Sök artikel…", style: "min-width:200px" });
+    const search = el("input", { type: "search", placeholder: "Sök artikel…" });
     panel.appendChild(el("div", { class: "row", style: "gap:12px;align-items:flex-end;margin:8px 0" },
       wrap("Sortera efter", sortSel), wrap("Sök", search)));
     const listBox = el("div", {});
@@ -813,13 +813,13 @@ const SECTION_RENDERERS = {
         }
       }) }, "Batchar ▾");
       parent.appendChild(el("div", {
-        style: "display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--line)",
+        style: "display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--line)",
       },
-        el("strong", { style: "min-width:90px" }, r.article_number),
-        el("span", { style: "flex:1" }, r.description),
+        el("strong", { style: "min-width:80px" }, r.article_number),
+        el("span", { style: "flex:1;min-width:140px" }, r.description),
         el("span", { class: "num" }, `${(r.qty_remaining_centi / 100).toLocaleString("sv-SE")} ${r.unit || "st"}`),
-        el("span", { class: "muted", style: "min-width:70px;text-align:right" }, `${r.batch_count} batch`),
-        el("span", { class: "num", style: "min-width:110px;text-align:right", title: "Lagervärde (inköp)" },
+        el("span", { class: "muted", style: "min-width:60px;text-align:right" }, `${r.batch_count} batch`),
+        el("span", { class: "num", style: "min-width:100px;text-align:right", title: "Lagervärde (inköp)" },
           toKr(r.value_ore) + " kr"),
         toggle));
       parent.appendChild(details);
@@ -1764,9 +1764,7 @@ const SECTION_RENDERERS = {
 
     function renderContent() {
       content.innerHTML = "";
-      [...subnav.children].forEach((btn, i) => {
-        btn.className = state.ordersTab === subTabs[i][0] ? "active" : "";
-      });
+      // The Fakturor/Offerter/Utkast tabs live in the group nav (state.ordersTab).
       if (state.ordersTab === "offerter") return drawOfferter();
       if (state.ordersTab === "utkast") return drawUtkast();
       return drawFakturor();
@@ -4077,10 +4075,13 @@ function headerWithAdd(title, btn, onClick) {
 }
 function simpleTable(headers, rows) {
   if (rows.length === 0) return el("p", { class: "muted", style: "margin-top:14px" }, "Inget att visa ännu.");
-  return el("table", { style: "margin-top:14px" },
+  const table = el("table", {},
     el("thead", {}, el("tr", {}, headers.map((h) => el("th", {}, h)))),
     el("tbody", {}, rows.map((r) => el("tr", {}, r.map((c) =>
       el("td", {}, c instanceof Node ? c : String(c)))))));
+  // Keep wide tables (e.g. the 8-column batch table) inside their panel on narrow
+  // screens: scroll horizontally within this box instead of overflowing the workspace.
+  return el("div", { class: "tablewrap", style: "margin-top:14px;overflow-x:auto;max-width:100%" }, table);
 }
 
 // A search box over a list: re-renders a simpleTable filtered by a free-text query.
