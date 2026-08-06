@@ -177,13 +177,22 @@ function modal(title, fields, okLabel = "OK") {
       $("#modal-backdrop").classList.add("hidden");
       $("#modal-ok").onclick = null;
       $("#modal-cancel").onclick = null;
+      body.removeEventListener("keydown", onKey);
       resolve(result);
     };
-    $("#modal-ok").onclick = () => {
+    const submit = () => {
       const out = {};
       for (const [k, v] of Object.entries(inputs)) out[k] = v.type === "file" ? (v.files[0] || null) : v.value;
       close(out);
     };
+    // Keyboard: Enter submits (so you don't have to reach for the mouse to unlock a book
+    // etc.), Escape cancels. Enter inside a textarea is left alone to allow newlines.
+    const onKey = (e) => {
+      if (e.key === "Enter" && e.target.tagName !== "TEXTAREA") { e.preventDefault(); submit(); }
+      else if (e.key === "Escape") { e.preventDefault(); close(null); }
+    };
+    body.addEventListener("keydown", onKey);
+    $("#modal-ok").onclick = submit;
     $("#modal-cancel").onclick = () => close(null);
   });
 }
