@@ -1531,7 +1531,9 @@ const SECTION_RENDERERS = {
     const cName = el("input", { type: "text", value: company.name || "" });
     const cOrg = el("input", { type: "text", value: company.org_nr || "" });
     const cVat = el("input", { type: "text", value: company.vat_nr || "" });
-    const cAddr = el("input", { type: "text", value: company.address || "" });
+    const cStreet = el("input", { type: "text", value: company.street || "" });
+    const cZip = el("input", { type: "text", value: company.zip_code || "" });
+    const cCity = el("input", { type: "text", value: company.city || "" });
     const cEmail = el("input", { type: "text", value: company.email || "" });
     const cPhone = el("input", { type: "text", value: company.phone || "" });
     const cFskatt = el("select", {}, el("option", { value: "1" }, "Ja"), el("option", { value: "0" }, "Nej"));
@@ -1539,7 +1541,9 @@ const SECTION_RENDERERS = {
     panel.appendChild(el("div", { class: "row" },
       wrap("Företagsnamn", cName), wrap("Org.nr", cOrg), wrap("Momsreg.nr", cVat)));
     panel.appendChild(el("div", { class: "row" },
-      wrap("Adress", cAddr), wrap("E-post", cEmail), wrap("Telefon", cPhone),
+      wrap("Gatuadress", cStreet), wrap("Postnummer", cZip), wrap("Postort", cCity)));
+    panel.appendChild(el("div", { class: "row" },
+      wrap("E-post", cEmail), wrap("Telefon", cPhone),
       wrap("Godkänd för F-skatt", cFskatt)));
     panel.appendChild(el("div", { style: "margin:6px 0 22px" },
       el("button", { class: "btn", onclick: () => guard(saveCompany) }, "Spara företagsuppgifter")));
@@ -1590,7 +1594,8 @@ const SECTION_RENDERERS = {
     async function saveCompany() {
       await api("PUT", `/books/${bid()}/company`, {
         name: cName.value || null, org_nr: cOrg.value || null, vat_nr: cVat.value || null,
-        address: cAddr.value || null, email: cEmail.value || null, phone: cPhone.value || null,
+        street: cStreet.value || null, zip_code: cZip.value || null, city: cCity.value || null,
+        email: cEmail.value || null, phone: cPhone.value || null,
         f_skatt: parseInt(cFskatt.value, 10),
       });
       toast("Företagsuppgifter sparade");

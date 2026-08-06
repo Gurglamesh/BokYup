@@ -235,6 +235,9 @@ class CompanyReq(BaseModel):
     org_nr: Optional[str] = None
     vat_nr: Optional[str] = None
     address: Optional[str] = None
+    street: Optional[str] = None
+    zip_code: Optional[str] = None
+    city: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
     f_skatt: Optional[int] = None

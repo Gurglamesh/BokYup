@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 35
+SCHEMA_VERSION = 36
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -258,7 +258,10 @@ CREATE TABLE company (
     name        TEXT,
     org_nr      TEXT,
     vat_nr      TEXT,                                  -- momsregistreringsnummer
-    address     TEXT,
+    address     TEXT,                                  -- legacy single-line (composed from parts)
+    street      TEXT,
+    zip_code    TEXT,
+    city        TEXT,
     email       TEXT,
     phone       TEXT,
     f_skatt     INTEGER NOT NULL DEFAULT 1,            -- godkänd för F-skatt
@@ -991,6 +994,11 @@ _MIGRATIONS: dict[int, str] = {
     """,
     35: """
         ALTER TABLE invoice ADD COLUMN support_enabled INTEGER NOT NULL DEFAULT 1;
+    """,
+    36: """
+        ALTER TABLE company ADD COLUMN street TEXT;
+        ALTER TABLE company ADD COLUMN zip_code TEXT;
+        ALTER TABLE company ADD COLUMN city TEXT;
     """,
 }
 

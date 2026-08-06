@@ -814,6 +814,19 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       supporten när på) + `create_invoice_from_offert` för den vidare; PDF:en gate:ar
       support-blocket på `support_enabled`. API `CreateInvoiceReq.support_enabled`. Tester
       passerar.
+- [x] **Faktura-svans: betalsätt bottenförankrade med fotnoten; strukturerad säljaradress
+      (schema v36, 2026-08).** (1) **Betalsätt + terms + säljar-fotnot** ritas som ETT block
+      **förankrat i sidans botten**, så betalinformationen alltid är i linje med fotnoten —
+      även när artiklarna fyller en hel sida (blocket flyttas till sista sidan; verifierat
+      med 28 rader → 2 sidor). Resultatet (Summa/Att betala) står kvar direkt under raderna.
+      **Övrig info** (gratis distanssupport-noteringen, licensnycklar) hamnar på **nästa
+      sida** i stället för att klämma in sig mellan betalsätten och fotnoten.
+      (2) Företaget (säljaren) fick **strukturerad adress**: `company.street/zip_code/city`
+      (schema v36; `address` behålls som komponerad fallback). Inställningar → Företagsuppgifter
+      fick **Postnummer** + **Postort** (Adress → Gatuadress). Fotnoten renderar gatuadress +
+      "postnr ort" på egna rader, sedan skatteuppgifter (Org.nr · Momsreg.nr · Godkänd för
+      F-skatt) och kontaktinfo. `CompanyReq`/`get_company`/`set_company` + migration 36. PDF
+      visuellt verifierad (2 sidor: resultat+fotnot på sida 1, support på sida 2). Tester passerar.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

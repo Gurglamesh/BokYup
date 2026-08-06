@@ -335,43 +335,71 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         flow_text("Detta är en offert och inte en faktura. Priserna är "
                   "preliminära och giltiga till angivet datum.", W, 8, 4, style="I")
 
-    # ---- payment methods + terms --------------------------------------------
-    ty += 4
-    if methods:
-        new_page(5 + 5 * len(methods))
-        pdf.set_font("Helvetica", "B", 9); pdf.set_xy(pdf.l_margin, ty)
-        pdf.cell(0, 5, _s("Ange fakturanummer vid betalning:")); ty += 5
-        pdf.set_font("Helvetica", "", 9)
-        for m in methods:
-            new_page(5)
-            pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 5, _s(f"{m['label']}: {m['value']}")); ty += 5
-    if invoice.get("payment_terms"):
-        new_page(5)
-        pdf.set_font("Helvetica", "", 9)
-        pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 5, _s(f"Betalningsvillkor: {invoice['payment_terms']}")); ty += 5
+    # ---- note (invoice body, stays with the result) -------------------------
     if invoice.get("note"):
         ty += 2
         flow_text(invoice["note"], W, 9, 5)
 
-    # ---- support: cap-reached notice (12 h) OR the gratis distanssupport text.
-    # Per-invoice opt-out (support_enabled=False) hides the note entirely. ----
-    support_on = invoice.get("support_enabled", True)
-    if support_on and invoice.get("support_cap_reached"):
-        ty += 6
-        new_page(6)
-        pdf.set_font("Helvetica", "B", 8)
-        pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 4, _s("Gratis distanssupport")); ty += 4
-        flow_text(_support_cap_text(), W, 7.5, 3.5)
-    elif support_on and invoice.get("support_expiry_date"):
-        ty += 6
-        new_page(6)
-        pdf.set_font("Helvetica", "B", 8)
-        pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 4, _s("Gratis distanssupport")); ty += 4
-        flow_text(_support_text(invoice.get("support_minutes_earned") or 0,
-                                invoice["support_expiry_date"]), W, 7.5, 3.5)
+    # ---- bottom block: payment methods + terms and the seller footer, kept together
+    # and pinned to the BOTTOM of the page, so the payment info is always aligned right
+    # above the footer — even when the articles fill the page. Structured company name /
+    # address / postnr ort / tax / contact. Support notice + licence keys go on the NEXT
+    # page(s) instead of wedging between the payment methods and the footer. ----
+    pay_lines = []
+    if methods:
+        pay_lines.append(("Ange fakturanummer vid betalning:", "B"))
+        pay_lines += [(f"{m['label']}: {m['value']}", "") for m in methods]
+    if invoice.get("payment_terms"):
+        pay_lines.append((f"Betalningsvillkor: {invoice['payment_terms']}", ""))
 
-    # ---- licence keys: their own page at the very end ------------------------
+    tax = []
+    if seller.get("org_nr"):
+        tax.append("Org.nr: " + str(seller["org_nr"]))
+    if seller.get("vat_nr"):
+        tax.append("Momsreg.nr: " + str(seller["vat_nr"]))
+    if seller.get("f_skatt"):
+        tax.append("Godkänd för F-skatt")
+    contact = " · ".join(x for x in (seller.get("email"), seller.get("phone")) if x)
+    if seller.get("street") or seller.get("zip_code") or seller.get("city"):
+        loc = " ".join(p for p in (str(seller.get("zip_code") or "").strip(),
+                                   str(seller.get("city") or "").strip()) if p)
+        addr_lines = [seller.get("street"), loc]
+    else:
+        addr_lines = [seller.get("address")]
+    foot = [t for t in [*addr_lines, "   ·   ".join(tax), contact] if t]
+
+    pay_h = (5 * len(pay_lines) + 4) if pay_lines else 0
+    foot_h = 7 + 4 * len(foot)                         # rule + name + address/tax/contact
+    block_h = pay_h + foot_h
+    new_page(block_h + 4)                              # move the whole block to a new page if needed
+    block_top = max(ty + 6, pdf.h - pdf.b_margin - block_h)   # anchor to the bottom
+    yy = block_top
+    for txt, style in pay_lines:
+        pdf.set_font("Helvetica", style, 9)
+        pdf.set_xy(pdf.l_margin, yy); pdf.cell(0, 5, _s(txt)); yy += 5
+    fy = yy + (4 if pay_lines else 0)                  # footer rule just under the payment lines
+    pdf.set_draw_color(200, 205, 212)
+    pdf.line(pdf.l_margin, fy, pdf.w - pdf.r_margin, fy)
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_xy(pdf.l_margin, fy + 2); pdf.cell(0, 5, _s(seller.get("name") or ""))
+    yy = fy + 7
+    for txt in foot:
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_xy(pdf.l_margin, yy); pdf.cell(0, 4, _s(txt)); yy += 4
+    ty = yy
+
+    # ---- appendix on a NEW page: gratis distanssupport + licence keys --------
+    support_on = invoice.get("support_enabled", True)
+    show_support = support_on and (invoice.get("support_cap_reached")
+                                   or invoice.get("support_expiry_date"))
     keys = [k for k in (invoice.get("license_keys") or []) if str(k).strip()]
+    if show_support:
+        pdf.add_page(); ty = pdf.t_margin
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 5, _s("Gratis distanssupport")); ty += 5
+        flow_text(_support_cap_text() if invoice.get("support_cap_reached")
+                  else _support_text(invoice.get("support_minutes_earned") or 0,
+                                     invoice["support_expiry_date"]), W, 8, 4)
     if keys:
         pdf.add_page(); ty = pdf.t_margin
         pdf.set_font("Helvetica", "B", 14)
@@ -384,32 +412,6 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
             pdf.set_font("Helvetica", "", 11)
             pdf.set_xy(pdf.l_margin, ty)
             pdf.cell(0, 6, _s("• " + str(k).strip()), border="B"); ty += 7
-
-    # ---- seller block: a footer pinned to the bottom of the last page. Structured in
-    # the order company name / address / tax / contact (each on its own line). --------
-    tax = []
-    if seller.get("org_nr"):
-        tax.append("Org.nr: " + str(seller["org_nr"]))
-    if seller.get("vat_nr"):
-        tax.append("Momsreg.nr: " + str(seller["vat_nr"]))
-    if seller.get("f_skatt"):
-        tax.append("Godkänd för F-skatt")
-    contact = " · ".join(x for x in (seller.get("email"), seller.get("phone")) if x)
-    foot_lines = [(seller.get("address") or "", 8),
-                  ("   ·   ".join(tax), 8),
-                  (contact, 8)]
-    foot_lines = [(t, sz) for (t, sz) in foot_lines if t]
-    new_page(24)                                       # keep the footer off any content above
-    fy = max(ty + 8, pdf.h - pdf.b_margin - (8 + 4 * len(foot_lines)))
-    pdf.set_draw_color(200, 205, 212)
-    pdf.line(pdf.l_margin, fy, pdf.w - pdf.r_margin, fy)
-    pdf.set_font("Helvetica", "B", 9)
-    pdf.set_xy(pdf.l_margin, fy + 2); pdf.cell(0, 5, _s(seller.get("name") or ""))
-    yy = fy + 7
-    for txt, sz in foot_lines:
-        pdf.set_font("Helvetica", "", sz)
-        pdf.set_xy(pdf.l_margin, yy); pdf.cell(0, 4, _s(txt))
-        yy += 4
 
     return bytes(pdf.output())
 

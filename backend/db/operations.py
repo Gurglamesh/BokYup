@@ -1714,13 +1714,13 @@ class BookOps:
 
     def get_company(self) -> dict:
         row = self.conn.execute(
-            "SELECT id, name, org_nr, vat_nr, address, email, phone, f_skatt, updated_at, "
-            "(logo_enc IS NOT NULL) AS has_logo FROM company WHERE id=1"
+            "SELECT id, name, org_nr, vat_nr, address, street, zip_code, city, email, phone, "
+            "f_skatt, updated_at, (logo_enc IS NOT NULL) AS has_logo FROM company WHERE id=1"
         ).fetchone()
         if row is None:
             return {"id": 1, "name": None, "org_nr": None, "vat_nr": None,
-                    "address": None, "email": None, "phone": None, "f_skatt": 1,
-                    "has_logo": False}
+                    "address": None, "street": None, "zip_code": None, "city": None,
+                    "email": None, "phone": None, "f_skatt": 1, "has_logo": False}
         d = dict(row)
         d["has_logo"] = bool(d["has_logo"])
         return d
@@ -1763,8 +1763,14 @@ class BookOps:
             self.conn.execute("UPDATE company SET logo_enc=NULL, updated_at=? WHERE id=1", (_now(),))
 
     def set_company(self, **fields) -> None:
-        allowed = ("name", "org_nr", "vat_nr", "address", "email", "phone", "f_skatt")
+        allowed = ("name", "org_nr", "vat_nr", "address", "street", "zip_code", "city",
+                   "email", "phone", "f_skatt")
         data = {k: v for k, v in fields.items() if k in allowed}
+        # Compose the legacy single-line address from the structured parts (used as a
+        # fallback), unless an explicit address was given.
+        if any(data.get(k) for k in ("street", "zip_code", "city")) and not fields.get("address"):
+            data["address"] = _compose_address(data.get("street"), data.get("zip_code"),
+                                                data.get("city"), "Sverige")
         with self.conn:
             self.conn.execute("INSERT OR IGNORE INTO company(id) VALUES (1)")
             if data:
