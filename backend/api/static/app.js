@@ -3446,6 +3446,10 @@ async function invoiceForm(panel, draft) {
     for (const k of Object.keys(delivInputs)) out[k] = delivInputs[k].value.trim();
     return Object.values(out).some(Boolean) ? out : null;
   };
+  // Gratis distanssupport: when unchecked, no support time is earned and the note is
+  // not printed on the faktura/offert. Default on (checked); drafts restore the choice.
+  const supportChk = el("input", { type: "checkbox" });
+  supportChk.checked = dp.support_enabled !== false;
   // Licence keys: one per line; printed on their own page at the end of the faktura PDF.
   const licenseKeys = el("textarea", { rows: "3", style: "width:100%;font-family:monospace",
     placeholder: "En licensnyckel per rad (skrivs ut på en egen sida sist i fakturan)" },
@@ -3537,6 +3541,10 @@ async function invoiceForm(panel, draft) {
   panel.appendChild(el("div", { style: "margin-top:14px" },
     el("label", { style: "font-weight:600;display:block;margin-bottom:4px" }, "Licensnycklar (valfritt)"),
     licenseKeys));
+  panel.appendChild(el("label", { style: "display:flex;align-items:center;gap:8px;margin-top:12px;font-weight:600" },
+    supportChk, "Gratis distanssupport",
+    el("span", { class: "muted", style: "font-weight:400" },
+      "(bocka i för att beräkna supporttid och visa noteringen på fakturan/offerten)")));
   const draftStatus = el("span", { class: "muted", style: "margin-left:12px;font-size:12px" });
   panel.appendChild(el("div", { style: "margin-top:16px" },
     el("button", { class: "btn brand", onclick: () => guard(submit) }, "Skapa faktura"),
@@ -3592,6 +3600,7 @@ async function invoiceForm(panel, draft) {
       note: note.value || null,
       contact_customer_id: contactSel.value ? parseInt(contactSel.value, 10) : null,
       delivery_address: deliveryBody(),
+      support_enabled: supportChk.checked,
       lines: lines.get(), recipients: recips.get(),
       license_keys: licenseKeys.value.split("\n").map((s) => s.trim()).filter(Boolean),
     };

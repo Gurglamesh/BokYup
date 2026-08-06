@@ -325,7 +325,8 @@ class TestMigration:
                 shortfall_invoice_id INTEGER, skatteverket_reference TEXT,
                 claim_year INTEGER NOT NULL, created_at TEXT NOT NULL);
             CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT);
-            CREATE TABLE invoice (id INTEGER PRIMARY KEY);   -- migration 31 ALTERs this
+            CREATE TABLE invoice (id INTEGER PRIMARY KEY);   -- migrations 31/33/35 ALTER this
+            CREATE TABLE offert (id INTEGER PRIMARY KEY);    -- migration 34 ALTERs this
         """)
         db.execute("PRAGMA user_version = 25")
         db.execute("INSERT INTO account VALUES (3001,'x','t')")
@@ -427,6 +428,17 @@ class TestMigration:
         assert S.migrate(db) == S.SCHEMA_VERSION
         cols = {r["name"] for r in db.execute("PRAGMA table_info(offert)")}
         assert "version" in cols and "root_offert_id" in cols
+
+    def test_migrate_v35_adds_support_enabled_column(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        S.initialize_schema(db)
+        db.execute("ALTER TABLE invoice DROP COLUMN support_enabled")
+        db.execute("PRAGMA user_version = 34")
+        db.commit()
+        assert S.migrate(db) == S.SCHEMA_VERSION
+        cols = {r["name"] for r in db.execute("PRAGMA table_info(invoice)")}
+        assert "support_enabled" in cols
 
     def test_migrate_is_idempotent(self, conn):
         before = S.get_schema_version(conn)

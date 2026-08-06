@@ -576,6 +576,18 @@ class TestInvoices:
         assert client.get(f"/books/{book}/company").json()["name"] == "Min Firma AB"
         assert client.get(f"/books/{book}/payment-methods").json()[0]["label"] == "Swish"
 
+    def test_support_disabled_earns_nothing(self, client, book):
+        cat, kid = self._setup(client, book)
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-15",
+            "due_date": "2026-04-15", "support_enabled": False,
+            "lines": [{"description": "IT", "quantity_centi": 100,
+                       "unit_price_ore": round(624900 / 1.25), "rate_code": "25"}]}).json()
+        got = client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()
+        assert got["support_minutes_earned"] == 0 and got["support_enabled"] == 0
+        assert got["support_expiry_date"] is None          # PDF skips the note
+        assert client.get(f"/books/{book}/customers/{kid}/support").json()["earned_active_minutes"] == 0
+
     def test_support_time_bank(self, client, book):
         cat, kid = self._setup(client, book)
         # inc 1 249 kr -> 30 min support

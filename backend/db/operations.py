@@ -1816,7 +1816,8 @@ class BookOps:
                        note: Optional[str] = None,
                        license_keys: Optional[list] = None,
                        contact_customer_id: Optional[int] = None,
-                       delivery_address: Optional[dict] = None) -> dict:
+                       delivery_address: Optional[dict] = None,
+                       support_enabled: bool = True) -> dict:
         """
         Issue a faktura: compute the article lines, snapshot the buyer/seller/payment
         methods, split RUT across household recipients, and create the underlying
@@ -1974,12 +1975,18 @@ class BookOps:
         # down), valid 36 months — but capped so a customer's balance never exceeds the
         # config maximum (12 h). If they are already at the cap this invoice earns nothing
         # and prints the "cap reached" notice instead of the earned-time block.
-        support_cap = int(self._config("support_cap_minutes"))
-        available_before = self.support_balance(customer_id)["remaining_minutes"]
-        support_cap_reached = 1 if available_before >= support_cap else 0
-        support_minutes = 0 if support_cap_reached else min(
-            support_minutes_earned(inc_total), support_cap - available_before)
-        support_expiry = _add_months(invoice_date, 36)
+        # Per-invoice opt-out: when support is disabled nothing is earned and the note is
+        # not printed (support_expiry NULL => the PDF skips the block).
+        support_on = 1 if support_enabled else 0
+        if support_on:
+            support_cap = int(self._config("support_cap_minutes"))
+            available_before = self.support_balance(customer_id)["remaining_minutes"]
+            support_cap_reached = 1 if available_before >= support_cap else 0
+            support_minutes = 0 if support_cap_reached else min(
+                support_minutes_earned(inc_total), support_cap - available_before)
+            support_expiry = _add_months(invoice_date, 36)
+        else:
+            support_cap_reached, support_minutes, support_expiry = 0, 0, None
         license_keys_enc = self.session.encrypt_text(
             json.dumps([str(k).strip() for k in (license_keys or []) if str(k).strip()]))
 
@@ -1990,12 +1997,13 @@ class BookOps:
                 "payment_methods_snapshot, our_reference, your_reference, note, ex_moms_ore, "
                 "moms_ore, inc_moms_ore, rut_total_ore, rot_total_ore, "
                 "support_minutes_earned, support_expiry_date, support_cap_reached, "
-                "license_keys_enc, contact_customer_id, delivery_address_enc, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "support_enabled, license_keys_enc, contact_customer_id, delivery_address_enc, "
+                "created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (number, customer_id, tid, invoice_date, due_date, delivery_date, payment_terms,
                  buyer_snapshot_enc, seller_snapshot, pm_snapshot, our_reference, your_reference,
                  note, ex_total, moms_total, inc_total, rut_total, rot_total,
-                 support_minutes, support_expiry, support_cap_reached, license_keys_enc,
+                 support_minutes, support_expiry, support_cap_reached, support_on, license_keys_enc,
                  contact_id, delivery_enc, _now()))
             invoice_id = cur.lastrowid
             for cl in computed:
@@ -2277,6 +2285,11 @@ class BookOps:
         valid_until = (payload.get("valid_until") or payload.get("due_date")
                        or (datetime.fromisoformat(offert_date) + timedelta(days=30)).date().isoformat())
         number = self._next_offert_number()
+        # The offert advertises the gratis-distanssupport the resulting faktura would give,
+        # unless the toggle is off (then no note on the offert either).
+        support_on = payload.get("support_enabled", True)
+        support_minutes = support_minutes_earned(fig["inc_moms_ore"]) if support_on else 0
+        support_expiry = _add_months(offert_date, 36) if support_on else None
         render = {
             "doc_type": "offert", "invoice_number": number, "invoice_date": offert_date,
             "valid_until": valid_until, "buyer": buyer, "seller": self.get_company(),
@@ -2285,6 +2298,9 @@ class BookOps:
             "payment_methods": [], "payment_terms": payload.get("payment_terms"),
             "your_reference": payload.get("your_reference"),
             "our_reference": payload.get("our_reference"), "note": payload.get("note"),
+            "support_enabled": bool(support_on),
+            "support_minutes_earned": support_minutes,
+            "support_expiry_date": support_expiry,
             **fig,
         }
         snapshot_enc = self.session.encrypt_text(json.dumps(render, default=str))
@@ -2318,11 +2334,16 @@ class BookOps:
                                    payload.get("recipients") or [], payload.get("category_id"))
         invoice_date = payload.get("invoice_date") or _now()[:10]
         inc_total = fig["inc_moms_ore"]
-        support_cap = int(self._config("support_cap_minutes"))
-        available_before = self.support_balance(int(customer_id))["remaining_minutes"]
-        support_cap_reached = available_before >= support_cap
-        support_minutes = 0 if support_cap_reached else min(
-            support_minutes_earned(inc_total), support_cap - available_before)
+        support_on = payload.get("support_enabled", True)
+        if support_on:
+            support_cap = int(self._config("support_cap_minutes"))
+            available_before = self.support_balance(int(customer_id))["remaining_minutes"]
+            support_cap_reached = available_before >= support_cap
+            support_minutes = 0 if support_cap_reached else min(
+                support_minutes_earned(inc_total), support_cap - available_before)
+            support_expiry = _add_months(invoice_date, 36)
+        else:
+            support_cap_reached, support_minutes, support_expiry = False, 0, None
         return {
             "doc_type": "faktura_preview", "invoice_number": None,
             "invoice_date": invoice_date, "due_date": payload.get("due_date"),
@@ -2333,8 +2354,9 @@ class BookOps:
             "payment_terms": payload.get("payment_terms"),
             "your_reference": payload.get("your_reference"),
             "our_reference": payload.get("our_reference"), "note": payload.get("note"),
+            "support_enabled": bool(support_on),
             "support_minutes_earned": support_minutes,
-            "support_expiry_date": _add_months(invoice_date, 36),
+            "support_expiry_date": support_expiry,
             "support_cap_reached": 1 if support_cap_reached else 0,
             "license_keys": [str(k).strip() for k in (payload.get("license_keys") or []) if str(k).strip()],
             **fig,
@@ -2437,7 +2459,8 @@ class BookOps:
             your_reference=render.get("your_reference"),
             our_reference=render.get("our_reference"), note=render.get("note"),
             contact_customer_id=render.get("contact_customer_id"),
-            delivery_address=render.get("delivery_address"))
+            delivery_address=render.get("delivery_address"),
+            support_enabled=render.get("support_enabled", True))
         with self.conn:
             self.conn.execute("UPDATE offert SET invoice_id=? WHERE id=?",
                              (res["invoice_id"], offert_id))

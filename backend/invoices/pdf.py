@@ -354,14 +354,16 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         ty += 2
         flow_text(invoice["note"], W, 9, 5)
 
-    # ---- support: cap-reached notice (12 h) OR the gratis distanssupport text --
-    if invoice.get("support_cap_reached"):
+    # ---- support: cap-reached notice (12 h) OR the gratis distanssupport text.
+    # Per-invoice opt-out (support_enabled=False) hides the note entirely. ----
+    support_on = invoice.get("support_enabled", True)
+    if support_on and invoice.get("support_cap_reached"):
         ty += 6
         new_page(6)
         pdf.set_font("Helvetica", "B", 8)
         pdf.set_xy(pdf.l_margin, ty); pdf.cell(0, 4, _s("Gratis distanssupport")); ty += 4
         flow_text(_support_cap_text(), W, 7.5, 3.5)
-    elif invoice.get("support_expiry_date"):
+    elif support_on and invoice.get("support_expiry_date"):
         ty += 6
         new_page(6)
         pdf.set_font("Helvetica", "B", 8)

@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 34
+SCHEMA_VERSION = 35
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -311,6 +311,7 @@ CREATE TABLE invoice (
     support_minutes_earned   INTEGER NOT NULL DEFAULT 0,  -- 15 min per full 500 kr of the total
     support_expiry_date      TEXT,                  -- invoice_date + 36 months
     support_cap_reached      INTEGER NOT NULL DEFAULT 0,  -- customer already at the 12 h cap at issue
+    support_enabled          INTEGER NOT NULL DEFAULT 1,   -- per-invoice: earn support time + print the note
     license_keys_enc         TEXT,                  -- DEK-encrypted JSON array of licence keys
     contact_customer_id      INTEGER REFERENCES customer(kundnummer),  -- optional private-person contact under a business buyer
     delivery_address_enc     TEXT,                  -- DEK-encrypted JSON: per-invoice leveransadress (full fields); NULL => = billing
@@ -987,6 +988,9 @@ _MIGRATIONS: dict[int, str] = {
     34: """
         ALTER TABLE offert ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE offert ADD COLUMN root_offert_id INTEGER REFERENCES offert(id);
+    """,
+    35: """
+        ALTER TABLE invoice ADD COLUMN support_enabled INTEGER NOT NULL DEFAULT 1;
     """,
 }
 

@@ -805,6 +805,15 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       Offertnr. Bokför inget. API `POST /offerter/{id}/versions`. **Fakturor versioneras
       INTE** med suffix — obrutna fakturanummer enligt lag; rättelse/omutfärdande sker via
       kreditfaktura (befintligt). Tester passerar.
+- [x] **Gratis distanssupport per-order toggle (schema v35, 2026-08).** A "Gratis
+      distanssupport"-kryssruta på orderformuläret (default på). Bockad → supporttid
+      beräknas som förr + noteringen skrivs på fakturan/offerten. Obockad → `support_minutes=0`,
+      `support_expiry=NULL` (så PDF:en hoppar över blocket) och ingen supporttid räknas in i
+      kundens saldo. `invoice.support_enabled` (default 1, migration bevarar befintliga);
+      `create_invoice(support_enabled=)`, preview + `create_offert` (offerten annonserar
+      supporten när på) + `create_invoice_from_offert` för den vidare; PDF:en gate:ar
+      support-blocket på `support_enabled`. API `CreateInvoiceReq.support_enabled`. Tester
+      passerar.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

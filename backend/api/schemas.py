@@ -392,6 +392,7 @@ class CreateInvoiceReq(BaseModel):
     license_keys: Optional[list[str]] = None   # printed on their own page at the PDF end
     contact_customer_id: Optional[int] = None  # optional private-person contact under a business buyer
     delivery_address: Optional[DeliveryAddressReq] = None  # per-invoice leveransadress; empty => = billing
+    support_enabled: bool = True                # gratis distanssupport: earn time + print the note
 
 
 class ReceiptUploadReq(BaseModel):
