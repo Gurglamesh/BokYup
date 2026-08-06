@@ -2341,12 +2341,16 @@ class BookOps:
         }
 
     def list_offerter(self) -> list[dict]:
-        return [dict(r) for r in self.conn.execute(
+        rows = [dict(r) for r in self.conn.execute(
             "SELECT o.id, o.offert_number, o.customer_id, o.offert_date, o.valid_until, "
-            "o.inc_moms_ore, o.husavdrag_ore, o.source_draft_id, o.invoice_id, "
-            "i.invoice_number AS invoice_number, o.created_at FROM offert o "
+            "o.inc_moms_ore, o.husavdrag_ore, o.source_draft_id, o.invoice_id, o.version, "
+            "o.root_offert_id, i.invoice_number AS invoice_number, o.created_at FROM offert o "
             "LEFT JOIN invoice i ON i.id = o.invoice_id "
             "ORDER BY o.offert_number").fetchall()]
+        for r in rows:
+            r["display_number"] = self._offert_display_number(
+                r["offert_number"], r["version"], r["root_offert_id"])
+        return rows
 
     def get_offert(self, offert_id: int) -> dict:
         """Return the offert's decrypted render dict (for the PDF)."""
@@ -2355,6 +2359,50 @@ class BookOps:
         if row is None:
             raise KeyError(f"No offert {offert_id}")
         return json.loads(self.session.decrypt_text(row["snapshot_enc"]))
+
+    def _offert_display_number(self, offert_number: int, version: int, root_id) -> str:
+        """The document number shown on an offert: 'N' for an original, 'N-v' for a
+        revised version (N = the original's number)."""
+        if not version:
+            return str(offert_number)
+        root_num = self.conn.execute("SELECT offert_number FROM offert WHERE id=?",
+                                     (root_id,)).fetchone()
+        base = root_num["offert_number"] if root_num else offert_number
+        return f"{base}-{version}"
+
+    def create_offert_version(self, offert_id: int) -> dict:
+        """Create a NEW revised version of an existing offert, KEEPING the original (and
+        any earlier versions). The new document is numbered '<original>-<n>' (e.g. 5-1,
+        5-2). Books nothing — offerter never touch the ledger. Returns the new offert."""
+        base = self.conn.execute(
+            "SELECT id, offert_number, customer_id, offert_date, valid_until, inc_moms_ore, "
+            "husavdrag_ore, snapshot_enc, version, root_offert_id FROM offert WHERE id=?",
+            (offert_id,)).fetchone()
+        if base is None:
+            raise KeyError(f"No offert {offert_id}")
+        root_id = base["root_offert_id"] or base["id"]
+        # Next version number within this family (original + all its versions).
+        next_version = (self.conn.execute(
+            "SELECT COALESCE(MAX(version), 0) FROM offert WHERE id=? OR root_offert_id=?",
+            (root_id, root_id)).fetchone()[0]) + 1
+        number = self._next_offert_number()          # consumes a unique internal number
+        # The display number is <original>-<next_version> (e.g. 5-1).
+        root_num = self.conn.execute("SELECT offert_number FROM offert WHERE id=?",
+                                     (root_id,)).fetchone()["offert_number"]
+        display = f"{root_num}-{next_version}"
+        render = json.loads(self.session.decrypt_text(base["snapshot_enc"]))
+        render["invoice_number"] = display           # the PDF shows this as Offertnr
+        snapshot_enc = self.session.encrypt_text(json.dumps(render, default=str))
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO offert(offert_number, customer_id, offert_date, valid_until, "
+                "inc_moms_ore, husavdrag_ore, snapshot_enc, source_draft_id, version, "
+                "root_offert_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (number, base["customer_id"], base["offert_date"], base["valid_until"],
+                 base["inc_moms_ore"], base["husavdrag_ore"], snapshot_enc, None,
+                 next_version, root_id, _now()))
+        return {"offert_id": cur.lastrowid, "offert_number": display, "version": next_version,
+                "inc_moms_ore": base["inc_moms_ore"], "husavdrag_ore": base["husavdrag_ore"]}
 
     def create_invoice_from_offert(self, offert_id: int, invoice_date: Optional[str] = None,
                                    due_date: Optional[str] = None) -> dict:

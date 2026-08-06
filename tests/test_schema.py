@@ -416,6 +416,18 @@ class TestMigration:
         cols = {r["name"] for r in db.execute("PRAGMA table_info(invoice)")}
         assert "delivery_address_enc" in cols
 
+    def test_migrate_v34_adds_offert_version_columns(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        S.initialize_schema(db)
+        db.execute("ALTER TABLE offert DROP COLUMN version")
+        db.execute("ALTER TABLE offert DROP COLUMN root_offert_id")
+        db.execute("PRAGMA user_version = 33")
+        db.commit()
+        assert S.migrate(db) == S.SCHEMA_VERSION
+        cols = {r["name"] for r in db.execute("PRAGMA table_info(offert)")}
+        assert "version" in cols and "root_offert_id" in cols
+
     def test_migrate_is_idempotent(self, conn):
         before = S.get_schema_version(conn)
         assert S.migrate(conn) == before     # already current -> no-op

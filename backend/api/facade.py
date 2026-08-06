@@ -741,6 +741,9 @@ class AppFacade:
         return self._ops(p["book_id"]).create_invoice_from_offert(
             int(p["offert_id"]), invoice_date=b.get("invoice_date"), due_date=b.get("due_date"))
 
+    def h_offert_new_version(self, p, b, q):
+        return self._ops(p["book_id"]).create_offert_version(int(p["offert_id"]))
+
     def h_get_invoice(self, p, b, q):
         return self._ops(p["book_id"]).get_invoice(int(p["invoice_id"]))
 
@@ -915,6 +918,7 @@ _route("GET", "/books/{book_id}/offerter", "h_list_offerter")
 _route("POST", "/books/{book_id}/offerter", "h_create_offert", 201)
 _route("GET", "/books/{book_id}/offerter/{offert_id}/pdf", "h_offert_pdf")
 _route("POST", "/books/{book_id}/offerter/{offert_id}/create-invoice", "h_offert_to_invoice", 201)
+_route("POST", "/books/{book_id}/offerter/{offert_id}/versions", "h_offert_new_version", 201)
 _route("POST", "/books/{book_id}/invoices", "h_create_invoice", 201)
 _route("POST", "/books/{book_id}/invoices/preview", "h_preview_invoice")
 _route("GET", "/books/{book_id}/invoices", "h_list_invoices")

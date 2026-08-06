@@ -830,6 +830,20 @@ class TestInvoices:
         again = client.post(f"/books/{book}/offerter/{o['offert_id']}/create-invoice", json={})
         assert again.status_code == 409
 
+    def test_offert_new_versions_preserved_and_suffixed(self, client, book):
+        cat, kid = self._setup(client, book)
+        o = client.post(f"/books/{book}/offerter", json={"payload": {
+            "customer_id": kid, "invoice_date": "2026-03-01",
+            "lines": [{"description": "Jobb", "quantity_centi": 100, "unit_price_ore": 100000,
+                       "rate_code": "25", "category_id": cat}], "recipients": []}}).json()
+        v1 = client.post(f"/books/{book}/offerter/{o['offert_id']}/versions")
+        assert v1.status_code == 201 and v1.json()["offert_number"] == "1-1"
+        v2 = client.post(f"/books/{book}/offerter/{o['offert_id']}/versions").json()
+        assert v2["offert_number"] == "1-2"
+        # original + both versions are all kept, with suffixed display numbers
+        nums = sorted(r["display_number"] for r in client.get(f"/books/{book}/offerter").json())
+        assert nums == ["1", "1-1", "1-2"]
+
     def test_offert_from_payload_without_draft(self, client, book):
         cat, kid = self._setup(client, book)
         o = client.post(f"/books/{book}/offerter", json={"payload": {

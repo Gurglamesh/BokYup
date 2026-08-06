@@ -1773,14 +1773,23 @@ const SECTION_RENDERERS = {
       }
       content.appendChild(simpleTable(
         ["Offertnr", "Kund", "Datum", "Giltig till", "Summa", "Status", ""],
-        rows.map((o) => [String(o.offert_number), custName[o.customer_id] || ("Kund " + o.customer_id),
+        rows.map((o) => [o.display_number || String(o.offert_number),
+          custName[o.customer_id] || ("Kund " + o.customer_id),
           o.offert_date, o.valid_until || "—", toKr(o.inc_moms_ore || 0) + " kr",
           o.invoice_id
             ? el("span", { class: "pill paid" }, "Faktura " + (o.invoice_number || o.invoice_id))
             : el("span", { class: "pill" }, "Offert"),
           el("span", { style: "display:inline-flex;gap:4px" },
             el("button", { class: "btn small ghost",
-              onclick: () => guard(() => showPdf(`/books/${bid()}/offerter/${o.id}/pdf`, `Offert_${o.offert_number}.pdf`)) }, "PDF"),
+              onclick: () => guard(() => showPdf(`/books/${bid()}/offerter/${o.id}/pdf`, `Offert_${o.display_number || o.offert_number}.pdf`)) }, "PDF"),
+            el("button", { class: "btn small ghost",
+              title: "Skapa en ny version av offerten (behåller originalet; numreras -1, -2 …)",
+              onclick: () => guard(async () => {
+                const v = await api("POST", `/books/${bid()}/offerter/${o.id}/versions`);
+                toast(`Ny version: offert ${v.offert_number}`);
+                showPdf(`/books/${bid()}/offerter/${v.offert_id}/pdf`, `Offert_${v.offert_number}.pdf`);
+                renderWorkspace();
+              }) }, "Ny version"),
             o.invoice_id ? null : el("button", { class: "btn small",
               title: "Skapa en riktig faktura utifrån offerten",
               onclick: () => guard(() => offertToInvoiceFlow(o)) }, "Skapa faktura"))]),

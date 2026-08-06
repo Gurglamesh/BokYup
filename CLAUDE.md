@@ -795,6 +795,16 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       preview). NEXT (queued, needs clarification): a "generera ny version" button that
       re-issues a faktura/offert as a new document with a -1/-2/-3 suffix, keeping all
       versions — collides with booking/numbering, so confirm the model first.
+- [x] **Offert-versioner (schema v34, 2026-08).** A "Ny version"-knapp per offert skapar
+      en **revidering** som numreras `<original>-<n>` (5-1, 5-2 …) och **behåller** originalet
+      + alla tidigare versioner i databasen. `offert.version` (0 = original) +
+      `root_offert_id` (familjen); `create_offert_version` kopierar snapshotten, sätter
+      render-numret till display-numret och tar ett eget internt `offert_number` (så den
+      globala UNIQUE-sekvensen är orörd — display härleds från originalets nr + version).
+      `list_offerter`/`get_offert` exponerar `display_number`; PDF:en visar `5-1` som
+      Offertnr. Bokför inget. API `POST /offerter/{id}/versions`. **Fakturor versioneras
+      INTE** med suffix — obrutna fakturanummer enligt lag; rättelse/omutfärdande sker via
+      kreditfaktura (befintligt). Tester passerar.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
