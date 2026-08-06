@@ -70,9 +70,7 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         pdf.set_font("Helvetica", "B" if bold else "", size)
         pdf.cell(0, 5, _s(s))
 
-    title = "OFFERT" if is_offert else ("KREDITFAKTURA" if is_credit else "FAKTURA")
-
-    # ---- header, top-LEFT: logo, then the document title under it ----
+    # ---- header, top-LEFT: just the logo (no big heading) ----
     logo_bottom = 12
     if logo_png:
         import io
@@ -86,14 +84,15 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
             w = h * ratio
         pdf.image(io.BytesIO(logo_png), x=pdf.l_margin, y=12, w=w, h=h)
         logo_bottom = 12 + h
-    title_y = logo_bottom + (3 if logo_png else 4)
-    text(pdf.l_margin, title_y, title, size=22, bold=True)
-    title_bottom = title_y + 10
+    # No big "FAKTURA" heading (Skatteverket doesn't require it, Inet-style) — the
+    # document type is identified by the meta label on the right (Fakturanr / Offertnr /
+    # Kreditfakturanr).
+    title_bottom = logo_bottom
     if is_preview:
         pdf.set_text_color(200, 0, 0)
-        text(pdf.l_margin, title_bottom, "FÖRHANDSVISNING - ej bokförd, inget fakturanummer", size=10, bold=True)
+        text(pdf.l_margin, logo_bottom + 3, "FÖRHANDSVISNING - ej bokförd, inget fakturanummer", size=10, bold=True)
         pdf.set_text_color(0, 0, 0)
-        title_bottom += 6
+        title_bottom = logo_bottom + 9
 
     # ---- header, top-RIGHT: the document meta (number, dates, references) ----
     if is_offert:
