@@ -366,6 +366,19 @@ class AppFacade:
         ops.unlink_customers(int(p["kundnummer"]), int(p["other_kundnummer"]))
         return {"unlinked": True}
 
+    # ---- company contacts (private persons attached to a business customer) ----
+    def h_list_company_contacts(self, p, b, q):
+        return self._ops(p["book_id"]).list_company_contacts(int(p["kundnummer"]))
+
+    def h_link_company_contact(self, p, b, q):
+        return self._ops(p["book_id"]).link_company_contact(
+            int(p["kundnummer"]), int(b["contact_kundnummer"]))
+
+    def h_unlink_company_contact(self, p, b, q):
+        self._ops(p["book_id"]).unlink_company_contact(
+            int(p["kundnummer"]), int(p["contact_kundnummer"]))
+        return {"unlinked": True}
+
     def h_reduction_config(self, p, b, q):
         rut, rot = self._ops(p["book_id"]).reduction_pcts()
         return {"rut_pct": rut, "rot_pct": rot}
@@ -664,7 +677,8 @@ class AppFacade:
             recipients=b.get("recipients"), delivery_date=b.get("delivery_date"),
             payment_terms=b.get("payment_terms"), our_reference=b.get("our_reference"),
             your_reference=b.get("your_reference"), note=b.get("note"),
-            license_keys=b.get("license_keys"))
+            license_keys=b.get("license_keys"),
+            contact_customer_id=b.get("contact_customer_id"))
 
     def h_list_invoices(self, p, b, q):
         return self._ops(p["book_id"]).list_invoices()
@@ -830,6 +844,9 @@ _route("GET", "/books/{book_id}/customers/{kundnummer}/husavdrag-cap/{year}", "h
 _route("GET", "/books/{book_id}/customers/{kundnummer}/relations", "h_list_customer_relations")
 _route("POST", "/books/{book_id}/customers/{kundnummer}/relations", "h_link_customer", 201)
 _route("DELETE", "/books/{book_id}/customers/{kundnummer}/relations/{other_kundnummer}", "h_unlink_customer")
+_route("GET", "/books/{book_id}/customers/{kundnummer}/contacts", "h_list_company_contacts")
+_route("POST", "/books/{book_id}/customers/{kundnummer}/contacts", "h_link_company_contact", 201)
+_route("DELETE", "/books/{book_id}/customers/{kundnummer}/contacts/{contact_kundnummer}", "h_unlink_company_contact")
 _route("GET", "/books/{book_id}/customers/{kundnummer}", "h_get_customer")
 _route("POST", "/books/{book_id}/customers", "h_create_customer", 201)
 _route("PATCH", "/books/{book_id}/customers/{kundnummer}", "h_update_customer")

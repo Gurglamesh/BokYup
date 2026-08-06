@@ -120,6 +120,12 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     # ---- buyer block (top, over the articles): billing + shipping addresses ---
     buyer_name = (buyer.get("company_name")
                   or f"{buyer.get('first_name', '')} {buyer.get('last_name', '')}".strip())
+    # Optional contact person under a business buyer: show "Att: Förnamn Efternamn"
+    # (only the name; the rest of the details are the company's).
+    contact_name = (f"{buyer.get('contact_first_name') or ''} "
+                    f"{buyer.get('contact_last_name') or ''}".strip()
+                    or (buyer.get("contact_person") if buyer.get("company_name") else ""))
+    contact_line = f"Att: {contact_name}" if contact_name else None
     biz = []
     if buyer.get("org_nr"):
         biz.append("Org.nr: " + str(buyer["org_nr"]))
@@ -135,7 +141,7 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
             addr_lines.append(country)
     else:
         addr_lines = [buyer.get("address")]
-    bill_lines = [buyer_name, *addr_lines, *biz, buyer.get("email")]
+    bill_lines = [buyer_name, contact_line, *addr_lines, *biz, buyer.get("email")]
     ship = buyer.get("shipping_address")
     ship_lines = [buyer_name, ship] if ship else []
 

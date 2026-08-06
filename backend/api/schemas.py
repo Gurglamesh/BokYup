@@ -338,6 +338,10 @@ class CustomerRelationReq(BaseModel):
     other_kundnummer: int         # the customer to link this one to (household)
 
 
+class CompanyContactReq(BaseModel):
+    contact_kundnummer: int       # the private customer to attach as a company contact
+
+
 class PayInvoiceReq(BaseModel):
     amount_ore: Optional[int] = None   # None = full outstanding
     date: Optional[str] = None
@@ -373,6 +377,7 @@ class CreateInvoiceReq(BaseModel):
     your_reference: Optional[str] = None
     note: Optional[str] = None
     license_keys: Optional[list[str]] = None   # printed on their own page at the PDF end
+    contact_customer_id: Optional[int] = None  # optional private-person contact under a business buyer
 
 
 class ReceiptUploadReq(BaseModel):

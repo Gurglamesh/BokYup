@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -312,6 +312,7 @@ CREATE TABLE invoice (
     support_expiry_date      TEXT,                  -- invoice_date + 36 months
     support_cap_reached      INTEGER NOT NULL DEFAULT 0,  -- customer already at the 12 h cap at issue
     license_keys_enc         TEXT,                  -- DEK-encrypted JSON array of licence keys
+    contact_customer_id      INTEGER REFERENCES customer(kundnummer),  -- optional private-person contact under a business buyer
     created_at               TEXT NOT NULL
 );
 
@@ -435,6 +436,19 @@ CREATE TABLE customer_relation (
     created_at  TEXT NOT NULL,
     CHECK (customer_a < customer_b),
     UNIQUE (customer_a, customer_b)
+);
+
+-- ----- company contacts: DIRECTED links from a business customer to the private
+-- persons that act as its contacts. Distinct from the symmetric household
+-- customer_relation (RUT recipients). On an order a business buyer may optionally
+-- name one of these contacts; only the contact's name is used, the rest of the
+-- contact info comes from the company's kundkort.
+CREATE TABLE company_contact (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id  INTEGER NOT NULL REFERENCES customer(kundnummer),
+    contact_id  INTEGER NOT NULL REFERENCES customer(kundnummer),
+    created_at  TEXT NOT NULL,
+    UNIQUE (company_id, contact_id)
 );
 
 -- ----- free remote-support time bank (per customer): manual deductions when the
@@ -953,6 +967,16 @@ _MIGRATIONS: dict[int, str] = {
         ALTER TABLE invoice ADD COLUMN support_cap_reached INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE invoice ADD COLUMN license_keys_enc TEXT;
         INSERT OR IGNORE INTO config(key, value) VALUES ('support_cap_minutes', '720');
+    """,
+    32: """
+        CREATE TABLE IF NOT EXISTS company_contact (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id  INTEGER NOT NULL REFERENCES customer(kundnummer),
+            contact_id  INTEGER NOT NULL REFERENCES customer(kundnummer),
+            created_at  TEXT NOT NULL,
+            UNIQUE (company_id, contact_id)
+        );
+        ALTER TABLE invoice ADD COLUMN contact_customer_id INTEGER REFERENCES customer(kundnummer);
     """,
 }
 

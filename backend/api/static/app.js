@@ -479,7 +479,7 @@ const GROUPS = [
   { id: "inventory", icon: "📦", label: "Lager", color: "#b7791f",
     sections: [["articles", "Artiklar"], ["stock", "Lagersaldo"]] },
   { id: "customers", icon: "👥", label: "Kunder", color: "#7a5bb0",
-    sections: [["customers", "Kundregister"]] },
+    sections: [["customers", "Privatpersoner", "private"], ["customers", "Företag", "business"]] },
   { id: "bookkeeping", icon: "📒", label: "Bokföring", color: "#4a5b8f",
     sections: [["record", "Bokför"], ["transactions", "Transaktioner"],
                ["verifikat", "Verifikat"], ["huvudbok", "Huvudbok"]] },
@@ -492,6 +492,10 @@ const GROUPS = [
 const groupOf = (sectionKey) =>
   GROUPS.find((g) => g.sections.some((s) => s[0] === sectionKey)) || GROUPS[0];
 
+// A section whose sub-tabs carry a 3rd tuple element drives an "inner tab" state field.
+// invoices → ordersTab (Fakturor/Offerter/Utkast); customers → customersTab (privat/företag).
+const INNER_TAB = { invoices: "ordersTab", customers: "customersTab" };
+
 function renderWorkspace() {
   if (!state.activeBook) return renderHome();
   const v = $("#view");
@@ -501,6 +505,7 @@ function renderWorkspace() {
   // anywhere else auto-selects the right group via groupOf).
   if (!state.section) state.section = "invoices";
   if (state.section === "invoices" && !state.ordersTab) state.ordersTab = "fakturor";
+  if (state.section === "customers" && !state.customersTab) state.customersTab = "private";
   // The section determines the group (each section belongs to exactly one). Deriving it
   // from state.section means code that sets state.section directly (e.g. the customer
   // "Ny order" button) navigates correctly without also having to set state.group.
@@ -538,13 +543,14 @@ function renderWorkspace() {
   // in a sub-tab is the invoices section's inner tab (Fakturor/Offerter/Utkast).
   if (group.sections.length > 1) {
     const sub = el("div", { class: "nav subnav" });
-    for (const [key, label, ordersTab] of group.sections) {
-      const active = state.section === key && (!ordersTab || state.ordersTab === ordersTab);
+    for (const [key, label, innerVal] of group.sections) {
+      const innerKey = INNER_TAB[key];
+      const active = state.section === key && (!innerVal || state[innerKey] === innerVal);
       sub.appendChild(el("button", {
         class: active ? "active" : "",
         onclick: () => {
           state.section = key;
-          if (ordersTab) state.ordersTab = ordersTab;
+          if (innerVal && innerKey) state[innerKey] = innerVal;
           state.lastSection[group.id] = key;
           renderWorkspace();
         },
@@ -888,8 +894,12 @@ const SECTION_RENDERERS = {
 
   // ----- customers -----
   async customers(panel) {
-    const all = await api("GET", `/books/${bid()}/customers`);
-    panel.appendChild(headerWithAdd("Kundregister", "+ Ny kund", () => guard(addCustomerFlow)));
+    // The active sub-tab (Privatpersoner / Företag) drives which type is shown.
+    const type = state.customersTab === "business" ? "business" : "private";
+    const all = (await api("GET", `/books/${bid()}/customers`)).filter((c) => c.type === type);
+    const title = type === "business" ? "Företag" : "Privatpersoner";
+    const addLabel = type === "business" ? "+ Nytt företag" : "+ Ny privatperson";
+    panel.appendChild(headerWithAdd(title, addLabel, () => guard(() => addCustomerFlow(type))));
     const cname = (c) => c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim()
       || ("Kund " + c.kundnummer);
     // Alphabetical by name (Swedish locale) as the default order.
@@ -902,40 +912,28 @@ const SECTION_RENDERERS = {
       editBtn(() => guard(() => editCustomerFlow(c.kundnummer))),
       c.type === "private"
         ? el("button", { class: "btn small ghost", onclick: () => guard(() => householdFlow(c)) }, "Hushåll")
-        : null,
+        : el("button", { class: "btn small ghost", title: "Kontaktpersoner (privatpersoner kopplade till företaget)",
+            onclick: () => guard(() => contactsFlow(c)) }, "Kontakter"),
       el("button", { class: "btn small ghost danger", title: "Ta bort kundkortet (fakturor behålls)",
         onclick: () => guard(() => deleteCustomerFlow(c)) }, "Ta bort"));
     // Search across every available field.
     const match = (c, q) => [String(c.kundnummer), cname(c), c.org_nr, c.vat_nr, c.personnummer,
       c.email, c.phone, c.street, c.zip_code, c.city, c.country, c.address]
       .filter(Boolean).join(" ").toLowerCase().includes(q);
-    const rowFn = (c) => [c.kundnummer, c.type === "private" ? "Privat" : "Företag", cname(c),
-      c.org_nr || c.personnummer || "", c.email || "",
-      el("span", { class: "num", title: "Totalt fakturerat (ej makulerat)" },
-        toKr(c.invoiced_ore || 0) + " kr"), actions(c)];
-    const headers = ["Nr", "Typ", "Namn", "Org/Pers", "E-post", "Spenderat", ""];
-    // Type filter chips (default: all), remembered on state.
-    let filter = state.customersFilter || "all";
-    const box = el("div", {});
-    const draw = () => {
-      const shown = all.filter((c) => filter === "all" || c.type === filter);
-      box.innerHTML = "";
-      box.appendChild(searchTable(
-        "Sök kund (namn, nr, org/pers.nr, e-post, telefon, adress)…",
-        headers, shown, match, rowFn));
-    };
-    const chips = el("div", { class: "row", style: "gap:6px;margin-top:8px" });
-    const renderChips = () => {
-      chips.innerHTML = "";
-      for (const [val, label] of [["all", "Alla"], ["private", "Privat"], ["business", "Företag"]]) {
-        chips.appendChild(el("button", { class: "btn small " + (filter === val ? "" : "ghost"),
-          onclick: () => { filter = val; state.customersFilter = val; renderChips(); draw(); } },
-          `${label} (${val === "all" ? all.length : all.filter((c) => c.type === val).length})`));
-      }
-    };
-    renderChips(); draw();
-    panel.appendChild(chips);
-    panel.appendChild(box);
+    const rowFn = type === "business"
+      ? (c) => [c.kundnummer, cname(c), c.org_nr || "", c.vat_nr || "", c.email || "",
+          el("span", { class: "num", title: "Totalt fakturerat (ej makulerat)" },
+            toKr(c.invoiced_ore || 0) + " kr"), actions(c)]
+      : (c) => [c.kundnummer, cname(c), c.personnummer || "", c.email || "", c.phone || "",
+          el("span", { class: "num", title: "Totalt fakturerat (ej makulerat)" },
+            toKr(c.invoiced_ore || 0) + " kr"), actions(c)];
+    const headers = type === "business"
+      ? ["Nr", "Företag", "Org.nr", "Momsreg.nr", "E-post", "Spenderat", ""]
+      : ["Nr", "Namn", "Personnr", "E-post", "Telefon", "Spenderat", ""];
+    const placeholder = type === "business"
+      ? "Sök företag (namn, org.nr, momsreg.nr, e-post, adress)…"
+      : "Sök privatperson (namn, nr, e-post, telefon, adress)…";
+    panel.appendChild(searchTable(placeholder, headers, all, match, rowFn));
   },
 
   // ----- suppliers -----
@@ -2455,34 +2453,111 @@ async function reverseFlow(verId, verLabel) {
   renderWorkspace();
 }
 
-async function addCustomerFlow() {
-  const f = await modal("Ny kund", [
-    { name: "type", label: "Typ", type: "select", value: "private",
-      options: [{ value: "private", label: "Privat" }, { value: "business", label: "Företag" }] },
-    { name: "first_name", label: "Förnamn (privat)" },
-    { name: "last_name", label: "Efternamn (privat)" },
-    { name: "personnummer", label: "Personnummer (privat)" },
-    { name: "company_name", label: "Företagsnamn (företag)" },
-    { name: "org_nr", label: "Org.nr (företag)" },
-    { name: "vat_nr", label: "Momsreg.nr (företag/EU)" },
-    { name: "street", label: "Gatuadress" },
-    { name: "zip_code", label: "Postnummer" },
-    { name: "city", label: "Ort" },
-    { name: "country", label: "Land", value: "Sverige" },
-    { name: "shipping_address", label: "Leveransadress (om annan)" },
-    { name: "email", label: "E-post" },
-    { name: "phone", label: "Telefon" },
-  ], "Spara");
-  if (!f) return;
-  const body = { type: f.type };
-  for (const k of ["first_name", "last_name", "personnummer", "company_name", "org_nr",
-                   "vat_nr", "street", "zip_code", "city", "country", "shipping_address",
-                   "email", "phone"]) {
-    if (f[k]) body[k] = f[k];
+// Required fields per customer type (a customer card must carry these).
+// Personnummer stays optional here (only required when the person is used for RUT/ROT).
+const CUSTOMER_REQUIRED = {
+  business: [["company_name", "Företagsnamn"], ["org_nr", "Org.nr"], ["vat_nr", "Momsreg.nr"],
+             ["street", "Gatuadress"], ["zip_code", "Postnummer"], ["city", "Ort"], ["email", "E-post"]],
+  private: [["first_name", "Förnamn"], ["last_name", "Efternamn"], ["street", "Gatuadress"],
+            ["zip_code", "Postnummer"], ["city", "Ort"], ["email", "E-post"]],
+};
+const CUSTOMER_KEYS = ["first_name", "last_name", "personnummer", "company_name", "org_nr",
+  "vat_nr", "street", "zip_code", "city", "country", "shipping_address", "email", "phone"];
+
+// Field defs for a customer of `type`, prefilled from `v`. A trailing " *" marks a
+// required field; personnummer notes it is required for RUT/ROT.
+function customerModalFields(type, v) {
+  v = v || {};
+  const req = new Set(CUSTOMER_REQUIRED[type].map((x) => x[0]));
+  const F = (name, label) => ({ name, label: label + (req.has(name) ? " *" : ""), value: v[name] ?? "" });
+  const head = type === "business"
+    ? [F("company_name", "Företagsnamn"), F("org_nr", "Org.nr"), F("vat_nr", "Momsreg.nr")]
+    : [F("first_name", "Förnamn"), F("last_name", "Efternamn"),
+       { name: "personnummer", label: "Personnummer (valfritt, krävs för RUT/ROT)", value: v.personnummer ?? "" }];
+  return [...head,
+    F("street", "Gatuadress"), F("zip_code", "Postnummer"), F("city", "Ort"),
+    { name: "country", label: "Land", value: v.country ?? "Sverige" },
+    { name: "shipping_address", label: "Leveransadress (om annan)", value: v.shipping_address ?? "" },
+    F("email", "E-post"),
+    { name: "phone", label: "Telefon (valfritt)", value: v.phone ?? "" }];
+}
+
+// Labels of the required fields the form left empty (empty list = valid).
+function missingCustomerFields(type, f) {
+  return CUSTOMER_REQUIRED[type].filter(([k]) => !String(f[k] || "").trim()).map(([, label]) => label);
+}
+
+async function addCustomerFlow(type) {
+  type = type === "business" ? "business" : "private";
+  let v = { country: "Sverige" };
+  const titles = { business: "Nytt företag", private: "Ny privatperson" };
+  while (true) {
+    const f = await modal(titles[type], customerModalFields(type, v), "Spara");
+    if (!f) return;                                   // cancelled
+    v = f;                                            // preserve input across a retry
+    const missing = missingCustomerFields(type, f);
+    if (missing.length) { toast("Obligatoriskt saknas: " + missing.join(", "), true); continue; }
+    const body = { type };
+    for (const k of CUSTOMER_KEYS) if (f[k]) body[k] = f[k];
+    await api("POST", `/books/${bid()}/customers`, body);
+    toast(type === "business" ? "Företag sparat" : "Privatperson sparad");
+    renderWorkspace();
+    return;
   }
-  await api("POST", `/books/${bid()}/customers`, body);
-  toast("Kund sparad");
-  renderWorkspace();
+}
+
+// Manage the private-person contacts attached to a business customer: link an existing
+// private customer, or unlink one. Only the contact's name is used on documents; the
+// rest of the contact info comes from the company's kundkort.
+async function contactsFlow(company) {
+  const cn = company.company_name || ("Företag " + company.kundnummer);
+  const pname = (c) => `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer);
+  const body = $("#modal-body");
+  $("#modal-title").textContent = `Kontaktpersoner – ${cn}`;
+  body.innerHTML = "";
+  body.appendChild(el("p", { class: "muted" },
+    "Koppla privatpersoner som kontakter. På en order kan du sedan valfritt välja en kontaktperson – då visas företagets uppgifter plus personens namn."));
+  const listBox = el("div", {});
+  body.appendChild(listBox);
+  const addWrap = el("div", {});
+  body.appendChild(addWrap);
+
+  const refresh = async () => {
+    const [contacts, all] = await Promise.all([
+      api("GET", `/books/${bid()}/customers/${company.kundnummer}/contacts`),
+      api("GET", `/books/${bid()}/customers`),
+    ]);
+    listBox.innerHTML = "";
+    if (contacts.length === 0) listBox.appendChild(el("p", { class: "muted" }, "Inga kontakter ännu."));
+    for (const c of contacts) {
+      listBox.appendChild(el("div", { class: "row", style: "align-items:center;gap:8px" },
+        el("span", {}, pname(c)),
+        el("button", { class: "btn small ghost danger", onclick: () => guard(async () => {
+          await api("DELETE", `/books/${bid()}/customers/${company.kundnummer}/contacts/${c.kundnummer}`);
+          refresh();
+        }) }, "Ta bort")));
+    }
+    const linked = new Set(contacts.map((c) => c.kundnummer));
+    const privates = all.filter((c) => c.type === "private" && !linked.has(c.kundnummer));
+    addWrap.innerHTML = "";
+    const pick = el("select", {}, el("option", { value: "" }, "— välj privatperson —"),
+      ...privates.map((c) => el("option", { value: c.kundnummer }, pname(c))));
+    addWrap.appendChild(el("div", { class: "row", style: "margin-top:12px;align-items:flex-end;gap:8px" },
+      wrap("Koppla privatperson", pick),
+      el("button", { class: "btn small", onclick: () => guard(async () => {
+        if (!pick.value) return;
+        await api("POST", `/books/${bid()}/customers/${company.kundnummer}/contacts`,
+          { contact_kundnummer: parseInt(pick.value, 10) });
+        refresh();
+      }) }, "Koppla")));
+  };
+  await refresh();
+  $("#modal-ok").textContent = "Stäng";
+  $("#modal-backdrop").classList.remove("hidden");
+  await new Promise((resolve) => {
+    $("#modal-ok").onclick = () => { $("#modal-backdrop").classList.add("hidden"); resolve(); };
+    $("#modal-cancel").onclick = () => { $("#modal-backdrop").classList.add("hidden"); resolve(); };
+  });
 }
 
 async function deleteCustomerFlow(c) {
@@ -2841,26 +2916,23 @@ async function supportFlow(c) {
 
 async function editCustomerFlow(kundnummer) {
   const c = await api("GET", `/books/${bid()}/customers/${kundnummer}`);
-  const isPrivate = c.type === "private";
-  const fields = isPrivate
-    ? [{ name: "first_name", label: "Förnamn", value: c.first_name || "" },
-       { name: "last_name", label: "Efternamn", value: c.last_name || "" },
-       { name: "personnummer", label: "Personnummer", value: c.personnummer || "" }]
-    : [{ name: "company_name", label: "Företagsnamn", value: c.company_name || "" },
-       { name: "org_nr", label: "Org.nr", value: c.org_nr || "" },
-       { name: "vat_nr", label: "Momsreg.nr", value: c.vat_nr || "" }];
-  fields.push({ name: "street", label: "Gatuadress", value: c.street || "" });
-  fields.push({ name: "zip_code", label: "Postnummer", value: c.zip_code || "" });
-  fields.push({ name: "city", label: "Ort", value: c.city || "" });
-  fields.push({ name: "country", label: "Land", value: c.country || "Sverige" });
-  fields.push({ name: "shipping_address", label: "Leveransadress (om annan)", value: c.shipping_address || "" });
-  fields.push({ name: "email", label: "E-post", value: c.email || "" });
-  fields.push({ name: "phone", label: "Telefon", value: c.phone || "" });
-  const f = await modal(`Ändra kund ${kundnummer}`, fields, "Spara");
-  if (!f) return;
-  await api("PATCH", `/books/${bid()}/customers/${kundnummer}`, _nonEmpty(f));
-  toast("Kund uppdaterad");
-  renderWorkspace();
+  const type = c.type === "business" ? "business" : "private";
+  let v = { ...c };                                   // prefill from the existing card
+  while (true) {
+    const f = await modal(`Ändra kund ${kundnummer}`, customerModalFields(type, v), "Spara");
+    if (!f) return;
+    v = f;
+    const missing = missingCustomerFields(type, f);
+    if (missing.length) { toast("Obligatoriskt saknas: " + missing.join(", "), true); continue; }
+    // Only the fields shown for this type are in `f`; send them (empty allowed so an
+    // optional field can be cleared). Fields not in the form are left untouched.
+    const patch = {};
+    for (const k of Object.keys(f)) patch[k] = f[k] || "";
+    await api("PATCH", `/books/${bid()}/customers/${kundnummer}`, patch);
+    toast("Kund uppdaterad");
+    renderWorkspace();
+    return;
+  }
 }
 
 async function editSupplierFlow(s) {
@@ -3298,6 +3370,23 @@ async function invoiceForm(panel, draft) {
       label: c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer) })),
     dp.customer_id, "Sök kund…");
   const customer = custSel.select;
+  // Optional contact person, only for a business buyer: the company's linked private
+  // persons. Choosing one prints the company's details + "Att: Förnamn Efternamn".
+  const contactSel = el("select", {}, el("option", { value: "" }, "— ingen kontaktperson —"));
+  const contactWrap = wrap("Kontaktperson (företag)", contactSel);
+  contactWrap.style.display = "none";
+  async function reloadContacts() {
+    const cid = parseInt(customer.value, 10);
+    const cust = customers.find((c) => c.kundnummer === cid);
+    if (!cust || cust.type !== "business") { contactWrap.style.display = "none"; contactSel.value = ""; return; }
+    const contacts = await api("GET", `/books/${bid()}/customers/${cid}/contacts`);
+    contactSel.innerHTML = "";
+    contactSel.appendChild(el("option", { value: "" }, "— ingen kontaktperson —"));
+    for (const c of contacts) contactSel.appendChild(el("option", { value: c.kundnummer },
+      `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer)));
+    if (dp.contact_customer_id) contactSel.value = String(dp.contact_customer_id);
+    contactWrap.style.display = "";
+  }
   const cat = el("select", {},
     el("option", { value: "" }, "— välj per rad —"),
     ...incomeCats.map((c) => el("option", { value: c.id }, c.name)));
@@ -3380,11 +3469,13 @@ async function invoiceForm(panel, draft) {
   let formAutosave = () => {};
   const lines = lineItemsEditor(incomeCats,
     () => { recips.recompute(); updateTotals(); formAutosave(); }, dp.lines || [], articles, loadBatches);
-  customer.onchange = () => recips.reloadPeople();
+  customer.onchange = () => { recips.reloadPeople(); reloadContacts(); };
+  contactSel.addEventListener("change", () => formAutosave());
   invDate.onchange = () => recips.refreshCaps();
 
   panel.appendChild(el("div", { class: "row" },
-    wrap("Kund", custSel.element), wrap("Standardkategori (BAS, valfri)", cat)));
+    wrap("Kund", custSel.element), contactWrap,
+    wrap("Standardkategori (BAS, valfri)", cat)));
   panel.appendChild(el("div", { class: "row" },
     wrap("Fakturadatum", invDate),
     wrap("Förfaller om (dagar)", el("span", {}, dueDays, dueHint)),
@@ -3418,6 +3509,7 @@ async function invoiceForm(panel, draft) {
     draftStatus));
 
   await recips.reloadPeople();
+  await reloadContacts();
   updateTotals();
 
   // Auto-save the order as a draft on any change (debounced) so leaving the tab never
@@ -3460,6 +3552,7 @@ async function invoiceForm(panel, draft) {
       delivery_date: delivery.value || null, payment_terms: terms.value || null,
       your_reference: yourRef.value || null, our_reference: ourRef.value || null,
       note: note.value || null,
+      contact_customer_id: contactSel.value ? parseInt(contactSel.value, 10) : null,
       lines: lines.get(), recipients: recips.get(),
       license_keys: licenseKeys.value.split("\n").map((s) => s.trim()).filter(Boolean),
     };
@@ -3649,10 +3742,15 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatch
     // Save this row's current values to the catalog as a new article.
     const saveBtn = el("button", { class: "btn small ghost", type: "button", title: "Spara som artikel",
       onclick: () => guard(() => saveRowAsArticle(row)) }, "★");
+    // The description gets its OWN full-width row so long descriptions are readable.
+    const descWrap = wrap("Beskrivning", desc);
+    descWrap.style.flex = "1 0 100%";
+    desc.style.width = "100%";
     // All the fields live in an editor box that we hide when the row is collapsed.
     const editorBox = el("div", { class: "line-editor",
       style: "display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;flex:1" },
-      wrap("Produktkategori", catFilter), wrap("Artikel", pick), wrap("Beskrivning", desc), wrap("Kategori (BAS)", cat),
+      descWrap,
+      wrap("Produktkategori", catFilter), wrap("Artikel", pick), wrap("Kategori (BAS)", cat),
       wrap("Antal", qty), wrap("Enhet", unit), wrap("À-pris ex moms", price),
       wrap("% rabatt", disc), wrap("Moms", rate), wrap("Husavdrag", red),
       wrap("Lagerbatch", batchSel), saveBtn);

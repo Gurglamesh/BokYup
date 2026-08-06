@@ -730,9 +730,16 @@ class BookOps:
                         "offert", "invoice_draft"):
                 self.conn.execute(f"UPDATE {tbl} SET customer_id=NULL WHERE customer_id=?",
                                   (kundnummer,))
-            # Household links + this customer's support ledger go with the card.
+            # Detach the (nullable) contact link too; the frozen buyer snapshot keeps the name.
+            self.conn.execute(
+                "UPDATE invoice SET contact_customer_id=NULL WHERE contact_customer_id=?",
+                (kundnummer,))
+            # Household links, company-contact links + this customer's support ledger go with the card.
             self.conn.execute(
                 "DELETE FROM customer_relation WHERE customer_a=? OR customer_b=?",
+                (kundnummer, kundnummer))
+            self.conn.execute(
+                "DELETE FROM company_contact WHERE company_id=? OR contact_id=?",
                 (kundnummer, kundnummer))
             self.conn.execute("DELETE FROM support_ledger WHERE customer_id=?", (kundnummer,))
             self.conn.execute("DELETE FROM customer WHERE kundnummer=?", (kundnummer,))
@@ -848,6 +855,58 @@ class BookOps:
             "ELSE r.customer_a END "
             "WHERE r.customer_a=? OR r.customer_b=? ORDER BY c.kundnummer",
             (kundnummer, kundnummer, kundnummer)).fetchall()
+        return [dict(r) for r in rows]
+
+    # ---- company contacts (directed: a business customer -> private persons) ----
+
+    def link_company_contact(self, company_id: int, contact_id: int) -> dict:
+        """Attach a private customer as a contact person of a business customer
+        (idempotent). The company must be a business and the contact a private
+        customer — only the contact's name is used on documents; the rest of the
+        contact info comes from the company's kundkort."""
+        company_id, contact_id = int(company_id), int(contact_id)
+        if company_id == contact_id:
+            raise ValueError("Kan inte koppla en kund till sig själv")
+        company = self.get_customer(company_id)
+        contact = self.get_customer(contact_id)
+        if company["type"] != "business":
+            raise InvalidState("Kontaktpersoner kan bara läggas till på företagskunder")
+        if contact["type"] != "private":
+            raise InvalidState("En kontaktperson måste vara en privatkund")
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO company_contact(company_id, contact_id, created_at) "
+                "VALUES (?,?,?)", (company_id, contact_id, _now()))
+        return {"company_id": company_id, "contact_id": contact_id}
+
+    def unlink_company_contact(self, company_id: int, contact_id: int) -> None:
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM company_contact WHERE company_id=? AND contact_id=?",
+                (int(company_id), int(contact_id)))
+
+    def _apply_contact(self, customer: dict, contact_customer_id) -> dict:
+        """Return a copy of the buyer dict with an optional contact person's name merged
+        in (contact_first_name/contact_last_name/contact_person) — the rest of the
+        contact info stays the company's. No-op when no contact is given."""
+        if not contact_customer_id:
+            return customer
+        contact = self.get_customer(int(contact_customer_id))
+        out = dict(customer)
+        out["contact_first_name"] = contact.get("first_name")
+        out["contact_last_name"] = contact.get("last_name")
+        out["contact_person"] = (
+            f"{contact.get('first_name') or ''} {contact.get('last_name') or ''}".strip()
+            or customer.get("contact_person"))
+        return out
+
+    def list_company_contacts(self, company_id: int) -> list[dict]:
+        """The private-person contacts attached to a business customer."""
+        rows = self.conn.execute(
+            "SELECT c.kundnummer, c.first_name, c.last_name "
+            "FROM company_contact cc JOIN customer c ON c.kundnummer = cc.contact_id "
+            "WHERE cc.company_id=? ORDER BY c.first_name, c.last_name, c.kundnummer",
+            (int(company_id),)).fetchall()
         return [dict(r) for r in rows]
 
     def reduction_pcts(self) -> tuple[int, int]:
@@ -1744,7 +1803,8 @@ class BookOps:
                        our_reference: Optional[str] = None,
                        your_reference: Optional[str] = None,
                        note: Optional[str] = None,
-                       license_keys: Optional[list] = None) -> dict:
+                       license_keys: Optional[list] = None,
+                       contact_customer_id: Optional[int] = None) -> dict:
         """
         Issue a faktura: compute the article lines, snapshot the buyer/seller/payment
         methods, split RUT across household recipients, and create the underlying
@@ -1886,6 +1946,10 @@ class BookOps:
         # 4) Frozen snapshots + the sequential invoice number. Re-fetch the buyer so a
         # personnummer just saved via a recipient is captured in the snapshot.
         customer = self.get_customer(customer_id)
+        # Optional contact person under a business buyer: freeze only the contact's name
+        # into the buyer snapshot (the rest of the contact info stays the company's).
+        contact_id = int(contact_customer_id) if contact_customer_id else None
+        customer = self._apply_contact(customer, contact_id)
         buyer_snapshot_enc = self.session.encrypt_text(json.dumps(customer, default=str))
         seller_snapshot = json.dumps(self.get_company(), default=str)
         pm_snapshot = json.dumps(self.list_payment_methods(active_only=True), default=str)
@@ -1911,12 +1975,13 @@ class BookOps:
                 "payment_methods_snapshot, our_reference, your_reference, note, ex_moms_ore, "
                 "moms_ore, inc_moms_ore, rut_total_ore, rot_total_ore, "
                 "support_minutes_earned, support_expiry_date, support_cap_reached, "
-                "license_keys_enc, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "license_keys_enc, contact_customer_id, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (number, customer_id, tid, invoice_date, due_date, delivery_date, payment_terms,
                  buyer_snapshot_enc, seller_snapshot, pm_snapshot, our_reference, your_reference,
                  note, ex_total, moms_total, inc_total, rut_total, rot_total,
-                 support_minutes, support_expiry, support_cap_reached, license_keys_enc, _now()))
+                 support_minutes, support_expiry, support_cap_reached, license_keys_enc,
+                 contact_id, _now()))
             invoice_id = cur.lastrowid
             for cl in computed:
                 self.conn.execute(
@@ -2189,6 +2254,8 @@ class BookOps:
         if not customer_id:
             raise ValueError("Offert kräver en kund")
         customer = self.get_customer(int(customer_id))
+        contact_id = payload.get("contact_customer_id")
+        buyer = self._apply_contact(customer, contact_id)
         fig = self._offert_figures(int(customer_id), customer, payload.get("lines") or [],
                                    payload.get("recipients") or [], payload.get("category_id"))
         offert_date = payload.get("invoice_date") or _now()[:10]
@@ -2197,7 +2264,8 @@ class BookOps:
         number = self._next_offert_number()
         render = {
             "doc_type": "offert", "invoice_number": number, "invoice_date": offert_date,
-            "valid_until": valid_until, "buyer": customer, "seller": self.get_company(),
+            "valid_until": valid_until, "buyer": buyer, "seller": self.get_company(),
+            "contact_customer_id": int(contact_id) if contact_id else None,
             "payment_methods": [], "payment_terms": payload.get("payment_terms"),
             "your_reference": payload.get("your_reference"),
             "our_reference": payload.get("our_reference"), "note": payload.get("note"),
@@ -2229,6 +2297,7 @@ class BookOps:
         if not customer_id:
             raise ValueError("Välj en kund först")
         customer = self.get_customer(int(customer_id))
+        buyer = self._apply_contact(customer, payload.get("contact_customer_id"))
         fig = self._offert_figures(int(customer_id), customer, payload.get("lines") or [],
                                    payload.get("recipients") or [], payload.get("category_id"))
         invoice_date = payload.get("invoice_date") or _now()[:10]
@@ -2242,7 +2311,7 @@ class BookOps:
             "doc_type": "faktura_preview", "invoice_number": None,
             "invoice_date": invoice_date, "due_date": payload.get("due_date"),
             "delivery_date": payload.get("delivery_date"),
-            "buyer": customer, "seller": self.get_company(),
+            "buyer": buyer, "seller": self.get_company(),
             "payment_methods": self.list_payment_methods(active_only=True),
             "payment_terms": payload.get("payment_terms"),
             "your_reference": payload.get("your_reference"),
@@ -2301,7 +2370,8 @@ class BookOps:
             due_date=ddate, lines=lines, recipients=recipients,
             payment_terms=render.get("payment_terms"),
             your_reference=render.get("your_reference"),
-            our_reference=render.get("our_reference"), note=render.get("note"))
+            our_reference=render.get("our_reference"), note=render.get("note"),
+            contact_customer_id=render.get("contact_customer_id"))
         with self.conn:
             self.conn.execute("UPDATE offert SET invoice_id=? WHERE id=?",
                              (res["invoice_id"], offert_id))

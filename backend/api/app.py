@@ -338,6 +338,22 @@ def _build_router():
         return fac(request).h_unlink_customer(
             {"book_id": book_id, "kundnummer": kundnummer, "other_kundnummer": other_kundnummer}, {}, {})
 
+    # ---- company contacts (private persons attached to a business customer) ----
+    @r.get("/books/{book_id}/customers/{kundnummer}/contacts")
+    def list_company_contacts(book_id: str, kundnummer: int, request: Request):
+        return fac(request).h_list_company_contacts(
+            {"book_id": book_id, "kundnummer": kundnummer}, {}, {})
+
+    @r.post("/books/{book_id}/customers/{kundnummer}/contacts", status_code=201)
+    def link_company_contact(book_id: str, kundnummer: int, body: sc.CompanyContactReq, request: Request):
+        return fac(request).h_link_company_contact(
+            {"book_id": book_id, "kundnummer": kundnummer}, body.model_dump(), {})
+
+    @r.delete("/books/{book_id}/customers/{kundnummer}/contacts/{contact_kundnummer}")
+    def unlink_company_contact(book_id: str, kundnummer: int, contact_kundnummer: int, request: Request):
+        return fac(request).h_unlink_company_contact(
+            {"book_id": book_id, "kundnummer": kundnummer, "contact_kundnummer": contact_kundnummer}, {}, {})
+
     @r.get("/books/{book_id}/customers/{kundnummer}/support")
     def get_support(book_id: str, kundnummer: int, request: Request):
         return fac(request).h_get_support({"book_id": book_id, "kundnummer": kundnummer}, {}, {})

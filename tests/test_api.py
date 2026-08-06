@@ -1153,6 +1153,51 @@ class TestCustomerDelete:
         assert got["customer_id"] is None and got["buyer"]["company_name"] == "Acme AB"
 
 
+class TestCompanyContacts:
+    def _company_and_person(self, client, book):
+        comp = client.post(f"/books/{book}/customers", json={
+            "type": "business", "company_name": "Acme AB", "org_nr": "556000-0001",
+            "vat_nr": "SE556000000101", "street": "Storg 1", "zip_code": "11122",
+            "city": "Stockholm", "email": "a@acme.se"}).json()["kundnummer"]
+        person = client.post(f"/books/{book}/customers", json={
+            "type": "private", "first_name": "Anna", "last_name": "Andersson"}).json()["kundnummer"]
+        return comp, person
+
+    def test_link_list_unlink_contact(self, client, book):
+        comp, person = self._company_and_person(client, book)
+        r = client.post(f"/books/{book}/customers/{comp}/contacts",
+                        json={"contact_kundnummer": person})
+        assert r.status_code == 201
+        lst = client.get(f"/books/{book}/customers/{comp}/contacts").json()
+        assert [c["kundnummer"] for c in lst] == [person]
+        client.delete(f"/books/{book}/customers/{comp}/contacts/{person}")
+        assert client.get(f"/books/{book}/customers/{comp}/contacts").json() == []
+
+    def test_contact_type_guard(self, client, book):
+        comp, person = self._company_and_person(client, book)
+        # a private customer cannot host contacts (company must be a business) -> 409
+        r = client.post(f"/books/{book}/customers/{person}/contacts",
+                        json={"contact_kundnummer": comp})
+        assert r.status_code == 409
+
+    def test_invoice_with_contact_freezes_name_and_company(self, client, book):
+        comp, person = self._company_and_person(client, book)
+        client.post(f"/books/{book}/customers/{comp}/contacts", json={"contact_kundnummer": person})
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Tjänst", "kind": "income", "bas_konto": 3001}).json()["id"]
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": comp, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31", "contact_customer_id": person,
+            "lines": [{"description": "Jobb", "quantity_centi": 100, "unit_price_ore": 100000,
+                       "rate_code": "25"}]}).json()
+        got = client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()
+        assert got["contact_customer_id"] == person
+        # buyer keeps the company details; the contact's name is frozen alongside
+        assert got["buyer"]["company_name"] == "Acme AB"
+        assert got["buyer"]["vat_nr"] == "SE556000000101"
+        assert got["buyer"]["contact_person"] == "Anna Andersson"
+
+
 class TestStock:
     def _art(self, client, book):
         return client.post(f"/books/{book}/articles", json={

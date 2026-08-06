@@ -750,6 +750,32 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       now returns vat_nr + the address parts; personnummer stays out, encrypted). All three
       browser-smoke-tested (Playwright); tests pass. NEXT (offered): finputs — mobilmeny
       (hamburger på smal skärm), färg per område.
+- [x] **Business/private customer split + company contacts + required fields (schema
+      v32, 2026-08).** The **Kunder** group now has two sub-tabs — **Privatpersoner** /
+      **Företag** (`state.customersTab`, generalised subnav inner-tab via `INNER_TAB`);
+      the old Alla/Privat/Företag chips are gone. A business customer can have **contact
+      persons**: existing **private** customers linked via a new DIRECTED
+      `company_contact` table (distinct from the symmetric household `customer_relation`);
+      managed by a **"Kontakter"** action on each företag row (`link/unlink/
+      list_company_contacts`, type-guarded → 409). On an **order**, picking a business
+      buyer reveals an optional **Kontaktperson** picker (the company's linked persons);
+      choosing one freezes only the contact's **name** into the buyer snapshot
+      (`contact_first_name/last_name/contact_person`) + `invoice.contact_customer_id`, the
+      rest of the details staying the company's — the faktura PDF shows the company block
+      **+ "Att: Förnamn Efternamn"**. **VAT/Momsreg.nr** now always renders on the faktura
+      for a business buyer (required field). **Required fields on the customer card**
+      (frontend, validated in a retry-loop preserving input): företag needs företagsnamn,
+      org.nr, momsreg.nr, gatuadress, postnummer, ort, e-post (telefon optional); privat
+      needs för-/efternamn, gatuadress, postnummer, ort, e-post (personnummer optional but
+      required for RUT/ROT, telefon optional). Threaded contact through create_invoice,
+      offert (render snapshot + create_invoice_from_offert), preview, and delete-customer
+      cleanup. Also: the order line editor's **Beskrivning** box moved to its own
+      full-width row for long descriptions. API `GET/POST/DELETE /customers/{id}/contacts`;
+      `CreateInvoiceReq.contact_customer_id`. Tests pass (396); browser-smoke-tested
+      (sub-tabs, link contact, order contact picker, required-field toast). NEXT (queued):
+      per-invoice leveransadress block with full company-style fields + faktura layout
+      (logo top-left, FAKTURA under it, meta top-right, buyer bottom-left, delivery
+      bottom-right; delivery defaults to billing when omitted).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
