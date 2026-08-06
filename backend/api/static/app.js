@@ -1746,7 +1746,7 @@ const SECTION_RENDERERS = {
               onclick: () => guard(async () => {
                 const o = await api("POST", `/books/${bid()}/offerter`, { draft_id: d.id });
                 toast(`Offert ${o.offert_number} skapad`);
-                showPdf(`/books/${bid()}/offerter/${o.offert_id}/pdf`, `Offert ${o.offert_number}`);
+                showPdf(`/books/${bid()}/offerter/${o.offert_id}/pdf`, `Offert_${o.offert_number}.pdf`);
                 renderWorkspace();
               }) }, "Skapa offert"),
             el("button", { class: "btn small ghost danger", onclick: () => guard(async () => {
@@ -1771,7 +1771,7 @@ const SECTION_RENDERERS = {
             : el("span", { class: "pill" }, "Offert"),
           el("span", { style: "display:inline-flex;gap:4px" },
             el("button", { class: "btn small ghost",
-              onclick: () => guard(() => showPdf(`/books/${bid()}/offerter/${o.id}/pdf`, `Offert ${o.offert_number}`)) }, "PDF"),
+              onclick: () => guard(() => showPdf(`/books/${bid()}/offerter/${o.id}/pdf`, `Offert_${o.offert_number}.pdf`)) }, "PDF"),
             o.invoice_id ? null : el("button", { class: "btn small",
               title: "Skapa en riktig faktura utifrån offerten",
               onclick: () => guard(() => offertToInvoiceFlow(o)) }, "Skapa faktura"))]),
@@ -3472,7 +3472,7 @@ async function invoiceForm(panel, draft) {
     if (!payload.lines || payload.lines.length === 0) { toast("Lägg till minst en rad", true); return; }
     const o = await api("POST", `/books/${bid()}/offerter`, { payload });
     toast(`Offert ${o.offert_number} skapad`);
-    showPdf(`/books/${bid()}/offerter/${o.offert_id}/pdf`, `Offert ${o.offert_number}`);
+    showPdf(`/books/${bid()}/offerter/${o.offert_id}/pdf`, `Offert_${o.offert_number}.pdf`);
   }
 
   async function saveDraft() {
@@ -3989,12 +3989,12 @@ async function showPdfSrc(src, fname, revoke) {
 async function invoicePdf(invoiceId, number) {
   // Same name the server sends via Content-Disposition + the order-page download, so a
   // save right after creation isn't the browser's generic "document.pdf".
-  await showPdf(`/books/${bid()}/invoices/${invoiceId}/pdf`, `Faktura-${number || invoiceId}.pdf`);
+  await showPdf(`/books/${bid()}/invoices/${invoiceId}/pdf`, `Faktura_${number || invoiceId}.pdf`);
 }
 
 async function creditNotePdf(invoiceId, eventId, number) {
   await showPdf(`/books/${bid()}/invoices/${invoiceId}/credit-notes/${eventId}/pdf`,
-                `Kreditfaktura-${number || eventId}.pdf`);
+                `Kreditfaktura_${number || eventId}.pdf`);
 }
 
 // Makulera (void) an unbooked invoice — keeps the number, nothing was booked.

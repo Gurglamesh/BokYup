@@ -1693,3 +1693,76 @@ class TestExpenseDrafts:
         raw = ops.conn.execute("SELECT payload_enc FROM expense_draft WHERE id=?",
                                (d["id"],)).fetchone()[0]
         assert "HemligPryl" not in raw
+
+
+class TestOffertToInvoiceBookkeeping:
+    """Creating a faktura from an offert must reconstruct the exact same inputs and
+    book identically to a directly-created invoice — including per-line categories,
+    rabatt, RUT, balanced double-entry and the momsdeklaration."""
+
+    def _scenario(self, ops: BookOps):
+        cat_a = ops.create_category("Konsult", "income", 3011, default_rate_code="25")
+        cat_b = ops.create_category("Material", "income", 3012, default_rate_code="25")
+        kid = ops.create_customer("private", first_name="Anna", last_name="A",
+                                  personnummer="811218-9876")
+        lines = [
+            {"description": "Arbete", "quantity_centi": 100, "unit_price_ore": 800000,
+             "rate_code": "25", "category_id": cat_a, "reduction_type": "rut",
+             "discount_pct_centi": 1000},
+            {"description": "Material", "quantity_centi": 200, "unit_price_ore": 50000,
+             "rate_code": "25", "category_id": cat_b},
+        ]
+        recipients = [{"customer_id": kid, "rut_share_pct": 100, "rot_share_pct": 100}]
+        return kid, lines, recipients
+
+    def test_figures_match_direct_invoice(self, tmp_path):
+        # Two independent books built from the same scenario; the offert-derived
+        # invoice must produce the same figures as the directly-created one.
+        def book(name):
+            mgr = DatabaseManager(app_dir=tmp_path / name / "app")
+            _, s = mgr.create_book("B", str(tmp_path / name / "b.db"), "pw")
+            S.initialize_schema(s.connection())
+            return BookOps(s)
+
+        o1 = book("direct")
+        kid, lines, recips = self._scenario(o1)
+        direct = o1.create_invoice(customer_id=kid, invoice_date="2026-04-01",
+                                   due_date="2026-05-01", lines=lines, recipients=recips)
+
+        o2 = book("offert")
+        kid2, lines2, recips2 = self._scenario(o2)
+        off = o2.create_offert({"customer_id": kid2, "invoice_date": "2026-04-01",
+                                "lines": lines2, "recipients": recips2})
+        fromoff = o2.create_invoice_from_offert(off["offert_id"], invoice_date="2026-04-01",
+                                                due_date="2026-05-01")
+        assert (fromoff["inc_moms_ore"], fromoff["rut_total_ore"], fromoff["rot_total_ore"]) == \
+               (direct["inc_moms_ore"], direct["rut_total_ore"], direct["rot_total_ore"])
+
+    def test_books_balanced_split_income_moms_and_rut(self, ops: BookOps):
+        kid, lines, recips = self._scenario(ops)
+        off = ops.create_offert({"customer_id": kid, "invoice_date": "2026-04-01",
+                                 "lines": lines, "recipients": recips})
+        inv = ops.create_invoice_from_offert(off["offert_id"], invoice_date="2026-04-01",
+                                             due_date="2026-05-01")
+        ops.register_payment(inv["transaktion_id"], "2026-04-20")
+        # every verifikation balances
+        for row in ops.conn.execute("SELECT id FROM verifikation"):
+            assert _balance(ops, row["id"]) == 0
+        sale_vid = ops.conn.execute("SELECT verifikation_id FROM transaktion WHERE id=?",
+                                    (inv["transaktion_id"],)).fetchone()[0]
+        pr = {p["bas_konto"]: p["amount_ore"] for p in _postings(ops, sale_vid)}
+        assert pr[3011] == -720000 and pr[3012] == -100000   # per-line income split
+        assert pr[2610] == -205000                           # utgående moms
+        assert pr[1513] == 450000                            # RUT receivable
+        assert pr[1930] == 575000                            # customer cash (inc − husavdrag)
+        from backend.reports import vat as vatmod
+        boxes = vatmod.momsdeklaration(ops.conn, "2026-01-01", "2026-12-31")["boxes"]
+        assert boxes["05"] == 820000 and boxes["10"] == 205000
+
+    def test_invoicing_offert_twice_refused(self, ops: BookOps):
+        kid, lines, recips = self._scenario(ops)
+        off = ops.create_offert({"customer_id": kid, "invoice_date": "2026-04-01",
+                                 "lines": lines, "recipients": recips})
+        ops.create_invoice_from_offert(off["offert_id"])
+        with pytest.raises(InvalidState):
+            ops.create_invoice_from_offert(off["offert_id"])
