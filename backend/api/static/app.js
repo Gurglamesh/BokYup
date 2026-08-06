@@ -90,9 +90,23 @@ class ApiError extends Error {
 // ---------------------------------------------------------------------------
 // Money helpers (UI works in kronor; API works in ören)
 // ---------------------------------------------------------------------------
-// Strip grouping spaces (regular + non-breaking, e.g. "1 438,40") before parsing,
-// otherwise parseFloat stops at the space and saves a wrong amount (1438,40 -> 1).
-const toOre = (kr) => Math.round(parseFloat(String(kr).replace(/[\s ]/g, "").replace(",", ".")) * 100);
+// Parse a kronor string into ören, tolerating mixed Swedish/English grouping.
+// Rule: the LAST "," or "." is the decimal separator, and every earlier "," / "."
+// is thousands grouping (removed) — EXCEPT when exactly 3 digits follow the last
+// separator, in which case it too is a grouping separator and the value is an
+// integer. So "6,000.00" -> 6000.00, "6,000,000.00" -> 6000000.00, "6,50" -> 6.50,
+// but "6,000" -> 6000 (not 6.00) and "6,000,000" -> 6000000. Spaces (incl. nbsp)
+// are always dropped.
+const toOre = (kr) => {
+  let s = String(kr).replace(/[\s ]/g, "");
+  const li = Math.max(s.lastIndexOf(","), s.lastIndexOf("."));
+  if (li !== -1) {
+    const after = s.slice(li + 1);
+    if (/^\d{3}$/.test(after)) s = s.replace(/[.,]/g, "");        // trailing group of 3 → integer
+    else s = s.slice(0, li).replace(/[.,]/g, "") + "." + after;   // last separator is the decimal
+  }
+  return Math.round(parseFloat(s) * 100);
+};
 const toKr = (ore) => (ore / 100).toLocaleString("sv-SE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 // ---------------------------------------------------------------------------
@@ -3496,7 +3510,7 @@ async function invoiceForm(panel, draft) {
 }
 
 function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatches) {
-  const rowsBox = el("div", {});
+  const rowsBox = el("div", { class: "order-lines" });
   const cats = incomeCats || [];
   const arts = articles || [];
   const fire = () => { if (onChange) onChange(); };
@@ -3636,9 +3650,9 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatch
     const summary = el("div", { class: "line-summary",
       style: "display:none;flex:1;cursor:pointer;padding:6px 2px" });
     const collapseBtn = el("button", { class: "btn small ghost", title: "Fäll ihop raden" }, "▾");
-    const row = el("div", { class: "row line-row", style: "gap:6px;align-items:center;flex-wrap:wrap" },
+    const row = el("div", { class: "row line-row order-line", style: "gap:6px;align-items:center;flex-wrap:wrap" },
       summary, editorBox, collapseBtn,
-      el("button", { class: "btn small ghost", onclick: (e) => { e.target.closest(".row").remove(); fire(); } }, "✕"));
+      el("button", { class: "btn small ghost line-del", onclick: (e) => { e.target.closest(".row").remove(); fire(); } }, "✕"));
     row._desc = desc; row._cat = cat; row._unit = unit; row._price = price; row._disc = disc; row._rate = rate; row._red = red;
     const qtyCenti = () => Math.round(parseFloat((qty.value || "0").replace(",", ".")) * 100);
     row._get = () => ({
@@ -3712,7 +3726,7 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatch
     rows.forEach((r) => r._setCollapsed(anyOpen));
     foldBtn.textContent = anyOpen ? "Visa alla" : "Fäll ihop alla";
   };
-  const element = el("div", {}, rowsBox,
+  const element = el("div", { class: "order-lines-wrap" }, rowsBox,
     el("div", { class: "row", style: "gap:8px;margin-top:6px" },
       el("button", { class: "btn small ghost", onclick: () => addRow() }, "+ Rad"), foldBtn));
   // Aggregate real margin from rows that picked a stock batch: revenue ex moms (after

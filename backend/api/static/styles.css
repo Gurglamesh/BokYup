@@ -102,6 +102,36 @@ h3 { margin: 0 0 12px; }
 .line-summary { border-radius: 8px; }
 .line-summary:hover { background: color-mix(in srgb, var(--brand) 8%, transparent); }
 
+/* ---- order (faktura) line editor: soft blue cards (Förslag A) ---- */
+:root { --order-blue: #3a6ea5; }
+.order-lines .order-line {
+  background: #eef4fb;
+  border: 1px solid #d4e2f2;
+  border-left: 3px solid var(--order-blue);
+  border-radius: 10px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.order-lines .order-line:hover,
+.order-lines .order-line:focus-within { background: #e3edf8; }
+.order-lines .order-line .line-summary strong { color: #2b5480; }
+/* neutral row actions (collapse ▾, save-as-article ★) get a light blue fill */
+.order-lines .order-line .btn.ghost,
+.order-lines-wrap > .row .btn.ghost {
+  background: #e0e9f6;
+  color: var(--order-blue);
+  border: 1px solid #cdddf0;
+}
+.order-lines .order-line .btn.ghost:hover,
+.order-lines-wrap > .row .btn.ghost:hover { background: #d3e1f4; }
+/* the delete (✕) button reads as destructive: light red fill */
+.order-lines .order-line .btn.ghost.line-del {
+  background: #fdecea;
+  color: var(--danger);
+  border-color: #f4cfca;
+}
+.order-lines .order-line .btn.ghost.line-del:hover { background: #f9dcd7; }
+
 /* ---- forms ---- */
 label { display: block; font-size: .82rem; color: var(--muted); margin: 10px 0 4px; }
 input, select {
