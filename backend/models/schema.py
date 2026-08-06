@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 33
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -313,6 +313,7 @@ CREATE TABLE invoice (
     support_cap_reached      INTEGER NOT NULL DEFAULT 0,  -- customer already at the 12 h cap at issue
     license_keys_enc         TEXT,                  -- DEK-encrypted JSON array of licence keys
     contact_customer_id      INTEGER REFERENCES customer(kundnummer),  -- optional private-person contact under a business buyer
+    delivery_address_enc     TEXT,                  -- DEK-encrypted JSON: per-invoice leveransadress (full fields); NULL => = billing
     created_at               TEXT NOT NULL
 );
 
@@ -977,6 +978,9 @@ _MIGRATIONS: dict[int, str] = {
             UNIQUE (company_id, contact_id)
         );
         ALTER TABLE invoice ADD COLUMN contact_customer_id INTEGER REFERENCES customer(kundnummer);
+    """,
+    33: """
+        ALTER TABLE invoice ADD COLUMN delivery_address_enc TEXT;
     """,
 }
 

@@ -1525,7 +1525,9 @@ const SECTION_RENDERERS = {
     panel.appendChild(el("div", { class: "row", style: "margin-bottom:22px" },
       wrap("Metod", acctSel)));
     panel.appendChild(el("h3", {}, "Företagsuppgifter (säljare)"));
-    panel.appendChild(el("p", { class: "muted" }, "Visas på fakturor."));
+    panel.appendChild(el("p", { class: "muted" },
+      "Visas som en fotnot (företagsnamn, adress, skatteuppgifter, kontaktinfo) på "
+      + "fakturor, offerter och övriga dokument."));
     const cName = el("input", { type: "text", value: company.name || "" });
     const cOrg = el("input", { type: "text", value: company.org_nr || "" });
     const cVat = el("input", { type: "text", value: company.vat_nr || "" });
@@ -3417,6 +3419,24 @@ async function invoiceForm(panel, draft) {
   const yourRef = el("input", { type: "text", placeholder: "T.ex. namn, PO-/beställningsnr", value: dp.your_reference || "" });
   const ourRef = el("input", { type: "text", placeholder: "T.ex. vår handläggare", value: dp.our_reference || "" });
   const note = el("input", { type: "text", value: dp.note || "" });
+  // Optional per-invoice delivery address (full, company-style fields). Empty => the
+  // billing address is used as the delivery address on the document.
+  const da = dp.delivery_address || {};
+  const delivInputs = {
+    name: el("input", { type: "text", value: da.name || "", placeholder: "Namn/mottagare" }),
+    street: el("input", { type: "text", value: da.street || "" }),
+    zip_code: el("input", { type: "text", value: da.zip_code || "" }),
+    city: el("input", { type: "text", value: da.city || "" }),
+    org_nr: el("input", { type: "text", value: da.org_nr || "" }),
+    vat_nr: el("input", { type: "text", value: da.vat_nr || "" }),
+    email: el("input", { type: "text", value: da.email || "" }),
+    phone: el("input", { type: "text", value: da.phone || "" }),
+  };
+  const deliveryBody = () => {
+    const out = {};
+    for (const k of Object.keys(delivInputs)) out[k] = delivInputs[k].value.trim();
+    return Object.values(out).some(Boolean) ? out : null;
+  };
   // Licence keys: one per line; printed on their own page at the end of the faktura PDF.
   const licenseKeys = el("textarea", { rows: "3", style: "width:100%;font-family:monospace",
     placeholder: "En licensnyckel per rad (skrivs ut på en egen sida sist i fakturan)" },
@@ -3496,6 +3516,15 @@ async function invoiceForm(panel, draft) {
   panel.appendChild(el("div", { class: "row", style: "margin-top:14px" },
     wrap("Betalningsvillkor", terms), wrap("Er referens (namn/PO-nr)", yourRef),
     wrap("Vår referens", ourRef), wrap("Notering", note)));
+  panel.appendChild(el("h3", { style: "margin-top:18px" }, "Leveransadress (om annan)"));
+  panel.appendChild(el("p", { class: "muted" },
+    "Valfritt. Lämnas det tomt används faktureringsadressen som leveransadress."));
+  panel.appendChild(el("div", { class: "row" },
+    wrap("Namn/mottagare", delivInputs.name), wrap("Gatuadress", delivInputs.street),
+    wrap("Postnummer", delivInputs.zip_code), wrap("Ort", delivInputs.city)));
+  panel.appendChild(el("div", { class: "row" },
+    wrap("Org.nr", delivInputs.org_nr), wrap("Momsreg.nr", delivInputs.vat_nr),
+    wrap("E-post", delivInputs.email), wrap("Telefon", delivInputs.phone)));
   panel.appendChild(el("div", { style: "margin-top:14px" },
     el("label", { style: "font-weight:600;display:block;margin-bottom:4px" }, "Licensnycklar (valfritt)"),
     licenseKeys));
@@ -3553,6 +3582,7 @@ async function invoiceForm(panel, draft) {
       your_reference: yourRef.value || null, our_reference: ourRef.value || null,
       note: note.value || null,
       contact_customer_id: contactSel.value ? parseInt(contactSel.value, 10) : null,
+      delivery_address: deliveryBody(),
       lines: lines.get(), recipients: recips.get(),
       license_keys: licenseKeys.value.split("\n").map((s) => s.trim()).filter(Boolean),
     };

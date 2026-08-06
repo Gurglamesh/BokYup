@@ -678,7 +678,8 @@ class AppFacade:
             payment_terms=b.get("payment_terms"), our_reference=b.get("our_reference"),
             your_reference=b.get("your_reference"), note=b.get("note"),
             license_keys=b.get("license_keys"),
-            contact_customer_id=b.get("contact_customer_id"))
+            contact_customer_id=b.get("contact_customer_id"),
+            delivery_address=b.get("delivery_address"))
 
     def h_list_invoices(self, p, b, q):
         return self._ops(p["book_id"]).list_invoices()

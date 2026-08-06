@@ -776,6 +776,25 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       per-invoice leveransadress block with full company-style fields + faktura layout
       (logo top-left, FAKTURA under it, meta top-right, buyer bottom-left, delivery
       bottom-right; delivery defaults to billing when omitted).
+- [x] **Per-invoice leveransadress + faktura-layout omgjord + strukturerad säljar-fotnot
+      (schema v33, 2026-08).** (1) **Leveransadress per faktura** with full company-style
+      fields (`invoice.delivery_address_enc`, DEK-encrypted JSON: name/street/zip/city/
+      org_nr/vat_nr/email/phone) entered on the order form ("Leveransadress (om annan)");
+      frozen at issue. **Empty => the billing address IS the delivery address** on the
+      document. Threaded through create_invoice/offert(render+create_invoice_from_offert)/
+      preview; `_clean_delivery` normalises empties to NULL. (2) **New document layout** on
+      faktura/kreditfaktura/offert: **logo top-LEFT with the title (FAKTURA/KREDITFAKTURA/
+      OFFERT) under it**, **meta top-RIGHT** (nr, faktura-/förfallo-/leveransdatum, er/vår
+      referens), then **Faktureras till bottom-left** + **Leveransadress bottom-right**
+      (full fields). (3) **Säljar-fotnoten omstrukturerad** to the order företagsnamn →
+      adress → skatteuppgifter (Org.nr · Momsreg.nr · Godkänd för F-skatt) → kontaktinfo
+      (e-post · telefon), each on its own line. Company/seller fields already existed in
+      Inställningar (name/org/vat/address/email/phone/f_skatt). API
+      `CreateInvoiceReq.delivery_address` (`DeliveryAddressReq`). Tests pass (400+);
+      PDF visually verified (Chromium render) + browser-smoke-tested (delivery block +
+      preview). NEXT (queued, needs clarification): a "generera ny version" button that
+      re-issues a faktura/offert as a new document with a -1/-2/-3 suffix, keeping all
+      versions — collides with booking/numbering, so confirm the model first.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

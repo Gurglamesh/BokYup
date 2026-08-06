@@ -70,7 +70,9 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         pdf.set_font("Helvetica", "B" if bold else "", size)
         pdf.cell(0, 5, _s(s))
 
-    # ---- logo (top-right, on every document), fit within 45 x 24 mm ----------
+    title = "OFFERT" if is_offert else ("KREDITFAKTURA" if is_credit else "FAKTURA")
+
+    # ---- header, top-LEFT: logo, then the document title under it ----
     logo_bottom = 12
     if logo_png:
         import io
@@ -82,18 +84,18 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         if h > 24:
             h = 24.0
             w = h * ratio
-        pdf.image(io.BytesIO(logo_png), x=pdf.w - pdf.r_margin - w, y=12, w=w, h=h)
+        pdf.image(io.BytesIO(logo_png), x=pdf.l_margin, y=12, w=w, h=h)
         logo_bottom = 12 + h
-
-    # ---- header: title (left) + invoice meta (right). Seller goes in the footer.
-    text(pdf.l_margin, 16, "OFFERT" if is_offert else ("KREDITFAKTURA" if is_credit else "FAKTURA"),
-         size=22, bold=True)
+    title_y = logo_bottom + (3 if logo_png else 4)
+    text(pdf.l_margin, title_y, title, size=22, bold=True)
+    title_bottom = title_y + 10
     if is_preview:
         pdf.set_text_color(200, 0, 0)
-        text(pdf.l_margin, 24, "FÖRHANDSVISNING - ej bokförd, inget fakturanummer", size=10, bold=True)
+        text(pdf.l_margin, title_bottom, "FÖRHANDSVISNING - ej bokförd, inget fakturanummer", size=10, bold=True)
         pdf.set_text_color(0, 0, 0)
+        title_bottom += 6
 
-    mx = pdf.l_margin + W * 0.62
+    # ---- header, top-RIGHT: the document meta (number, dates, references) ----
     if is_offert:
         meta = [("Offertnr", str(invoice.get("invoice_number") or "")),
                 ("Offertdatum", invoice.get("invoice_date") or ""),
@@ -109,15 +111,17 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
                 ("Leveransdatum", invoice.get("delivery_date") or ""),
                 ("Er referens", invoice.get("your_reference") or ""),
                 ("Vår referens", invoice.get("our_reference") or "")]
-    my = max(28, logo_bottom + 3)
+    mx = pdf.l_margin + W * 0.60
+    my = 12
     for label, val in meta:
         if not val:
             continue
-        pdf.set_font("Helvetica", "B", 9); pdf.set_xy(mx, my); pdf.cell(35, 5, _s(label))
-        pdf.set_font("Helvetica", "", 9); pdf.set_xy(mx + 35, my); pdf.cell(0, 5, _s(val))
+        pdf.set_font("Helvetica", "B", 9); pdf.set_xy(mx, my); pdf.cell(33, 5, _s(label))
+        pdf.set_font("Helvetica", "", 9); pdf.set_xy(mx + 33, my); pdf.cell(0, 5, _s(val))
         my += 5
+    meta_bottom = my
 
-    # ---- buyer block (top, over the articles): billing + shipping addresses ---
+    # ---- buyer name + billing lines ----
     buyer_name = (buyer.get("company_name")
                   or f"{buyer.get('first_name', '')} {buyer.get('last_name', '')}".strip())
     # Optional contact person under a business buyer: show "Att: Förnamn Efternamn"
@@ -141,11 +145,31 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
             addr_lines.append(country)
     else:
         addr_lines = [buyer.get("address")]
-    bill_lines = [buyer_name, contact_line, *addr_lines, *biz, buyer.get("email")]
-    ship = buyer.get("shipping_address")
-    ship_lines = [buyer_name, ship] if ship else []
+    bill_lines = [buyer_name, contact_line, *addr_lines, *biz,
+                  buyer.get("email"), buyer.get("phone")]
 
-    top = max(my, 30) + 6
+    # ---- delivery block (per-invoice, full fields). If none given, the billing
+    # address IS the delivery address. Falls back to a legacy single-line
+    # shipping_address on older invoices. ----
+    deliv = invoice.get("delivery_address") or {}
+    deliv_keys = ("name", "street", "zip_code", "city", "org_nr", "vat_nr", "email", "phone")
+    if any(str(deliv.get(k) or "").strip() for k in deliv_keys):
+        dloc = " ".join(p for p in (str(deliv.get("zip_code") or "").strip(),
+                                    str(deliv.get("city") or "").strip()) if p)
+        dbiz = []
+        if deliv.get("org_nr"):
+            dbiz.append("Org.nr: " + str(deliv["org_nr"]))
+        if deliv.get("vat_nr"):
+            dbiz.append("Momsreg.nr: " + str(deliv["vat_nr"]))
+        delivery_lines = [deliv.get("name") or buyer_name, deliv.get("street"), dloc,
+                          *dbiz, deliv.get("email"), deliv.get("phone")]
+    elif buyer.get("shipping_address"):
+        delivery_lines = [buyer_name, buyer.get("shipping_address")]
+    else:
+        delivery_lines = bill_lines           # ingen egen leveransadress => = faktureringsadress
+
+    # ---- address blocks: Faktureras till (left) + Leveransadress (far right) ----
+    top = max(title_bottom, meta_bottom, 40) + 6
 
     def addr_block(x, heading, lines):
         pdf.set_font("Helvetica", "B", 9); pdf.set_xy(x, top); pdf.cell(0, 5, _s(heading))
@@ -157,7 +181,7 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         return yy
 
     yb = addr_block(pdf.l_margin, "Faktureras till", bill_lines)
-    ys = addr_block(pdf.l_margin + W * 0.5, "Leveransadress", ship_lines) if ship_lines else top
+    ys = addr_block(pdf.l_margin + W * 0.55, "Leveransadress", delivery_lines)
     by = max(yb, ys)
 
     # ---- line items table (page-break aware, wrapped descriptions) -----------
@@ -360,27 +384,31 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
             pdf.set_xy(pdf.l_margin, ty)
             pdf.cell(0, 6, _s("• " + str(k).strip()), border="B"); ty += 7
 
-    # ---- seller block: a footer pinned to the bottom of the last page --------
-    parts = []
+    # ---- seller block: a footer pinned to the bottom of the last page. Structured in
+    # the order company name / address / tax / contact (each on its own line). --------
+    tax = []
     if seller.get("org_nr"):
-        parts.append("Org.nr: " + str(seller["org_nr"]))
+        tax.append("Org.nr: " + str(seller["org_nr"]))
     if seller.get("vat_nr"):
-        parts.append("Momsreg.nr: " + str(seller["vat_nr"]))
+        tax.append("Momsreg.nr: " + str(seller["vat_nr"]))
     if seller.get("f_skatt"):
-        parts.append("Godkänd för F-skatt")
-    contact = " · ".join(x for x in (seller.get("address"), seller.get("email"),
-                                     seller.get("phone")) if x)
-    new_page(18)                                       # keep the footer off any content above
-    fy = max(ty + 8, pdf.h - pdf.b_margin - 16)        # near the page bottom
+        tax.append("Godkänd för F-skatt")
+    contact = " · ".join(x for x in (seller.get("email"), seller.get("phone")) if x)
+    foot_lines = [(seller.get("address") or "", 8),
+                  ("   ·   ".join(tax), 8),
+                  (contact, 8)]
+    foot_lines = [(t, sz) for (t, sz) in foot_lines if t]
+    new_page(24)                                       # keep the footer off any content above
+    fy = max(ty + 8, pdf.h - pdf.b_margin - (8 + 4 * len(foot_lines)))
     pdf.set_draw_color(200, 205, 212)
     pdf.line(pdf.l_margin, fy, pdf.w - pdf.r_margin, fy)
     pdf.set_font("Helvetica", "B", 9)
     pdf.set_xy(pdf.l_margin, fy + 2); pdf.cell(0, 5, _s(seller.get("name") or ""))
-    pdf.set_font("Helvetica", "", 8)
-    if parts:
-        pdf.set_xy(pdf.l_margin, fy + 7); pdf.cell(0, 4, _s("   ·   ".join(parts)))
-    if contact:
-        pdf.set_xy(pdf.l_margin, fy + 11); pdf.cell(0, 4, _s(contact))
+    yy = fy + 7
+    for txt, sz in foot_lines:
+        pdf.set_font("Helvetica", "", sz)
+        pdf.set_xy(pdf.l_margin, yy); pdf.cell(0, 4, _s(txt))
+        yy += 4
 
     return bytes(pdf.output())
 

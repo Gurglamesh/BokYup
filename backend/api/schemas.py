@@ -342,6 +342,19 @@ class CompanyContactReq(BaseModel):
     contact_kundnummer: int       # the private customer to attach as a company contact
 
 
+class DeliveryAddressReq(BaseModel):
+    # Per-invoice leveransadress (full, company-style fields). All optional; when all
+    # are empty the billing address IS the delivery address.
+    name: Optional[str] = None
+    street: Optional[str] = None
+    zip_code: Optional[str] = None
+    city: Optional[str] = None
+    org_nr: Optional[str] = None
+    vat_nr: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+
+
 class PayInvoiceReq(BaseModel):
     amount_ore: Optional[int] = None   # None = full outstanding
     date: Optional[str] = None
@@ -378,6 +391,7 @@ class CreateInvoiceReq(BaseModel):
     note: Optional[str] = None
     license_keys: Optional[list[str]] = None   # printed on their own page at the PDF end
     contact_customer_id: Optional[int] = None  # optional private-person contact under a business buyer
+    delivery_address: Optional[DeliveryAddressReq] = None  # per-invoice leveransadress; empty => = billing
 
 
 class ReceiptUploadReq(BaseModel):

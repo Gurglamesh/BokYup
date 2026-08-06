@@ -1198,6 +1198,50 @@ class TestCompanyContacts:
         assert got["buyer"]["contact_person"] == "Anna Andersson"
 
 
+class TestDeliveryAddress:
+    def _setup(self, client, book):
+        comp = client.post(f"/books/{book}/customers", json={
+            "type": "business", "company_name": "Acme AB", "org_nr": "556000-0001",
+            "vat_nr": "SE1", "street": "Storg 1", "zip_code": "11122",
+            "city": "Stockholm", "email": "a@acme.se"}).json()["kundnummer"]
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Tjänst", "kind": "income", "bas_konto": 3001}).json()["id"]
+        return comp, cat
+
+    def test_delivery_address_frozen_on_invoice(self, client, book):
+        comp, cat = self._setup(client, book)
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": comp, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "delivery_address": {"name": "Acme Lager", "street": "Lagerv 9",
+                                 "zip_code": "22233", "city": "Lund", "email": "l@acme.se"},
+            "lines": [{"description": "X", "quantity_centi": 100, "unit_price_ore": 10000,
+                       "rate_code": "25"}]}).json()
+        got = client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()
+        assert got["delivery_address"]["name"] == "Acme Lager"
+        assert got["delivery_address"]["city"] == "Lund"
+
+    def test_no_delivery_address_is_null(self, client, book):
+        comp, cat = self._setup(client, book)
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": comp, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "X", "quantity_centi": 100, "unit_price_ore": 10000,
+                       "rate_code": "25"}]}).json()
+        got = client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()
+        assert got["delivery_address"] is None            # PDF then uses the billing address
+
+    def test_empty_delivery_normalises_to_null(self, client, book):
+        comp, cat = self._setup(client, book)
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": comp, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31", "delivery_address": {"name": "", "city": "  "},
+            "lines": [{"description": "X", "quantity_centi": 100, "unit_price_ore": 10000,
+                       "rate_code": "25"}]}).json()
+        got = client.get(f"/books/{book}/invoices/{inv['invoice_id']}").json()
+        assert got["delivery_address"] is None
+
+
 class TestStock:
     def _art(self, client, book):
         return client.post(f"/books/{book}/articles", json={

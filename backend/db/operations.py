@@ -885,6 +885,17 @@ class BookOps:
                 "DELETE FROM company_contact WHERE company_id=? AND contact_id=?",
                 (int(company_id), int(contact_id)))
 
+    # Per-invoice delivery-address fields (full, company-style). Kept as a normalised dict.
+    _DELIVERY_KEYS = ("name", "street", "zip_code", "city", "org_nr", "vat_nr", "email", "phone")
+
+    def _clean_delivery(self, d) -> Optional[dict]:
+        """Normalise a per-invoice delivery address to a dict of the known fields, or None
+        when nothing was entered (then the billing address IS the delivery address)."""
+        if not d:
+            return None
+        out = {k: str(d.get(k) or "").strip() for k in self._DELIVERY_KEYS}
+        return out if any(out.values()) else None
+
     def _apply_contact(self, customer: dict, contact_customer_id) -> dict:
         """Return a copy of the buyer dict with an optional contact person's name merged
         in (contact_first_name/contact_last_name/contact_person) — the rest of the
@@ -1804,7 +1815,8 @@ class BookOps:
                        your_reference: Optional[str] = None,
                        note: Optional[str] = None,
                        license_keys: Optional[list] = None,
-                       contact_customer_id: Optional[int] = None) -> dict:
+                       contact_customer_id: Optional[int] = None,
+                       delivery_address: Optional[dict] = None) -> dict:
         """
         Issue a faktura: compute the article lines, snapshot the buyer/seller/payment
         methods, split RUT across household recipients, and create the underlying
@@ -1951,6 +1963,9 @@ class BookOps:
         contact_id = int(contact_customer_id) if contact_customer_id else None
         customer = self._apply_contact(customer, contact_id)
         buyer_snapshot_enc = self.session.encrypt_text(json.dumps(customer, default=str))
+        clean_delivery = self._clean_delivery(delivery_address)
+        delivery_enc = (self.session.encrypt_text(json.dumps(clean_delivery, default=str))
+                        if clean_delivery else None)
         seller_snapshot = json.dumps(self.get_company(), default=str)
         pm_snapshot = json.dumps(self.list_payment_methods(active_only=True), default=str)
         number = self._next_invoice_number()
@@ -1975,13 +1990,13 @@ class BookOps:
                 "payment_methods_snapshot, our_reference, your_reference, note, ex_moms_ore, "
                 "moms_ore, inc_moms_ore, rut_total_ore, rot_total_ore, "
                 "support_minutes_earned, support_expiry_date, support_cap_reached, "
-                "license_keys_enc, contact_customer_id, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "license_keys_enc, contact_customer_id, delivery_address_enc, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (number, customer_id, tid, invoice_date, due_date, delivery_date, payment_terms,
                  buyer_snapshot_enc, seller_snapshot, pm_snapshot, our_reference, your_reference,
                  note, ex_total, moms_total, inc_total, rut_total, rot_total,
                  support_minutes, support_expiry, support_cap_reached, license_keys_enc,
-                 contact_id, _now()))
+                 contact_id, delivery_enc, _now()))
             invoice_id = cur.lastrowid
             for cl in computed:
                 self.conn.execute(
@@ -2266,6 +2281,7 @@ class BookOps:
             "doc_type": "offert", "invoice_number": number, "invoice_date": offert_date,
             "valid_until": valid_until, "buyer": buyer, "seller": self.get_company(),
             "contact_customer_id": int(contact_id) if contact_id else None,
+            "delivery_address": self._clean_delivery(payload.get("delivery_address")),
             "payment_methods": [], "payment_terms": payload.get("payment_terms"),
             "your_reference": payload.get("your_reference"),
             "our_reference": payload.get("our_reference"), "note": payload.get("note"),
@@ -2312,6 +2328,7 @@ class BookOps:
             "invoice_date": invoice_date, "due_date": payload.get("due_date"),
             "delivery_date": payload.get("delivery_date"),
             "buyer": buyer, "seller": self.get_company(),
+            "delivery_address": self._clean_delivery(payload.get("delivery_address")),
             "payment_methods": self.list_payment_methods(active_only=True),
             "payment_terms": payload.get("payment_terms"),
             "your_reference": payload.get("your_reference"),
@@ -2371,7 +2388,8 @@ class BookOps:
             payment_terms=render.get("payment_terms"),
             your_reference=render.get("your_reference"),
             our_reference=render.get("our_reference"), note=render.get("note"),
-            contact_customer_id=render.get("contact_customer_id"))
+            contact_customer_id=render.get("contact_customer_id"),
+            delivery_address=render.get("delivery_address"))
         with self.conn:
             self.conn.execute("UPDATE offert SET invoice_id=? WHERE id=?",
                              (res["invoice_id"], offert_id))
@@ -2498,6 +2516,8 @@ class BookOps:
         inv["payment_methods"] = json.loads(inv.pop("payment_methods_snapshot") or "[]")
         lk_enc = inv.pop("license_keys_enc", None)
         inv["license_keys"] = json.loads(self.session.decrypt_text(lk_enc)) if lk_enc else []
+        da_enc = inv.pop("delivery_address_enc", None)
+        inv["delivery_address"] = json.loads(self.session.decrypt_text(da_enc)) if da_enc else None
         inv["lines"] = [dict(r) for r in self.conn.execute(
             "SELECT il.line_no, il.description, il.category_id, c.name AS category_name, "
             "c.bas_konto AS category_bas_konto, il.quantity_centi, il.unit, il.unit_price_ore, "
