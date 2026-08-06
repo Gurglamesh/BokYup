@@ -478,8 +478,10 @@ function renderWorkspace() {
   // anywhere else auto-selects the right group via groupOf).
   if (!state.section) state.section = "invoices";
   if (state.section === "invoices" && !state.ordersTab) state.ordersTab = "fakturor";
-  let group = GROUPS.find((g) => g.id === state.group) || groupOf(state.section);
-  if (!group.sections.some((s) => s[0] === state.section)) state.section = group.sections[0][0];
+  // The section determines the group (each section belongs to exactly one). Deriving it
+  // from state.section means code that sets state.section directly (e.g. the customer
+  // "Ny order" button) navigates correctly without also having to set state.group.
+  const group = groupOf(state.section);
   state.group = group.id;
   state.lastSection = state.lastSection || {};
   state.lastSection[group.id] = state.section;
@@ -870,8 +872,8 @@ const SECTION_RENDERERS = {
     // Alphabetical by name (Swedish locale) as the default order.
     all.sort((a, b) => cname(a).localeCompare(cname(b), "sv"));
     const actions = (c) => el("span", { style: "display:inline-flex;gap:4px" },
-      el("button", { class: "btn small ghost", title: "Skapa faktura till denna kund",
-        onclick: () => newInvoiceForCustomer(c.kundnummer) }, "Ny faktura"),
+      el("button", { class: "btn small ghost", title: "Skapa order till denna kund",
+        onclick: () => newInvoiceForCustomer(c.kundnummer) }, "Ny order"),
       el("button", { class: "btn small ghost", title: "Gratis distanssupport – saldo & uttag",
         onclick: () => guard(() => supportFlow(c)) }, "Support"),
       editBtn(() => guard(() => editCustomerFlow(c.kundnummer))),
@@ -1668,7 +1670,7 @@ const SECTION_RENDERERS = {
 
   // ----- invoices (faktura): list + create with line items & RUT recipients -----
   async invoices(panel) {
-    // Arriving from the "Ny faktura" button in the Kunder tab: open the form straight
+    // Arriving from the "Ny order" button in the Kunder tab: open the form straight
     // away with that customer preselected.
     if (state.pendingInvoiceCustomer != null) {
       const kid = state.pendingInvoiceCustomer;
