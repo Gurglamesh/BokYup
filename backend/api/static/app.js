@@ -689,11 +689,11 @@ const SECTION_RENDERERS = {
       if (k === "income") {
         for (const c of customers) counter.appendChild(el("option", { value: c.kundnummer },
           c.company_name || `${c.first_name || ""} ${c.last_name || ""}`.trim() || ("Kund " + c.kundnummer)));
-        for (const c of cats.filter((x) => x.kind === "income")) cat.appendChild(el("option", { value: c.id }, c.name));
+        for (const c of cats.filter((x) => x.kind === "income" && x.active !== 0)) cat.appendChild(el("option", { value: c.id }, c.name));
       } else {
         counter.appendChild(el("option", { value: "" }, "— (ingen) —"));
         for (const s of suppliers) counter.appendChild(el("option", { value: s.id }, s.name));
-        for (const c of cats.filter((x) => x.kind === "expense")) cat.appendChild(el("option", { value: c.id }, c.name));
+        for (const c of cats.filter((x) => x.kind === "expense" && x.active !== 0)) cat.appendChild(el("option", { value: c.id }, c.name));
       }
       rutRow.style.display = k === "income" ? "" : "none";
       receiptBlock.style.display = k === "expense" ? "" : "none";
@@ -750,7 +750,7 @@ const SECTION_RENDERERS = {
       api("GET", `/books/${bid()}/articles`),
       api("GET", `/books/${bid()}/categories`),
     ]);
-    const incomeCats = cats.filter((c) => c.kind === "income");
+    const incomeCats = cats.filter((c) => c.kind === "income" && c.active !== 0);
     panel.appendChild(headerWithAdd("Artiklar", "+ Ny artikel",
       () => guard(() => addArticleFlow(incomeCats))));
     panel.appendChild(el("p", { class: "muted", style: "margin-top:6px" },
@@ -2136,7 +2136,7 @@ function newCategoryDialog() {
     }).catch(() => {});
     let incomeCats = [];
     api("GET", `/books/${bid()}/categories`).then((cs) => {
-      incomeCats = cs.filter((c) => c.kind === "income");
+      incomeCats = cs.filter((c) => c.kind === "income" && c.active !== 0);
       for (const c of incomeCats) parent.appendChild(el("option", { value: String(c.id) }, categoryPath(cs, c.id)));
     }).catch(() => {});
     let done = false;
@@ -3255,8 +3255,8 @@ async function purchaseForm(panel, draft) {
     api("GET", `/books/${bid()}/suppliers`),
     api("GET", `/books/${bid()}/articles`),
   ]);
-  const expenseCats = cats.filter((c) => c.kind === "expense");
-  const incomeCats = cats.filter((c) => c.kind === "income");
+  const expenseCats = cats.filter((c) => c.kind === "expense" && c.active !== 0);
+  const incomeCats = cats.filter((c) => c.kind === "income" && c.active !== 0);
   if (expenseCats.length === 0) {
     toast("Lägg till minst en utgiftskategori (BAS-konto) först", true);
     return;
@@ -3373,7 +3373,7 @@ async function invoiceForm(panel, draft) {
     api("GET", `/books/${bid()}/reduction-config`),
     api("GET", `/books/${bid()}/articles`),
   ]);
-  const incomeCats = cats.filter((c) => c.kind === "income");
+  const incomeCats = cats.filter((c) => c.kind === "income" && c.active !== 0);
   if (customers.length === 0 || incomeCats.length === 0) {
     toast("Lägg till minst en kund och en inkomstkategori först", true);
     return;
