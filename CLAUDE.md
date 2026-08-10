@@ -827,6 +827,25 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       "postnr ort" på egna rader, sedan skatteuppgifter (Org.nr · Momsreg.nr · Godkänd för
       F-skatt) och kontaktinfo. `CompanyReq`/`get_company`/`set_company` + migration 36. PDF
       visuellt verifierad (2 sidor: resultat+fotnot på sida 1, support på sida 2). Tester passerar.
+- [x] **Rätta baskonto (ombokföring) på bokförda inkomster/utgifter + "Rättad"-status
+      (2026-08).** Ett bokfört verifikat med fel BAS-konto (t.ex. en utgift på 3003) kan
+      **rättas utan att skriva om siffrorna**: `rebook_transaktion(transaktion_id,
+      corrections)` **backar** den nuvarande bokföringen (rättelse: negerade konteringar +
+      negerad moms_line-klon för rapporterna) och **bokar om** med SAMMA belopp men
+      korrigerade konton — den öre-exakta avräkningssidan (bank/öresavrundning) behålls, så
+      varje verifikation balanserar. `corrections` = {moms_line_id → {category_id, rate_code}}
+      per rad; att byta rate håller radens inc-moms konstant och delar om ex/moms (så en
+      "momsfri fast bokförd med moms"-rad blir ren intäkt). **Fakturor/RUT refuseras**
+      (→ kreditfaktura). En syntetisk klon (note "ombokföring", filtrerad från listan) bär
+      de korrigerade moms_lines för momsdeklaration/resultat. `transaktion_corrected()` +
+      ett **corrected**-flagg i `list_transaktioner`; **Transaktioner** och **Inköp** visar
+      en **"Rättad"**-pill och en **"Rätta baskonto"**-knapp (per-rads kategori- + moms-väljare,
+      inaktiva konton gömda). API `GET /transaktioner/{id}/lines`, `POST …/rebook`. Även:
+      **inaktiverade BAS-konton göms** i alla urvalslistor (order/inköp/artikel/kategori-
+      förälder). Tester passerar (408); UI-smoke-testat (rätta → "Rättad" i webbläsaren).
+      Kvarstår (avsiktligt, nästa steg): "byt baskonto" på **manuella** verifikat (rå
+      konto-remap + kryssa ur rad, måste balansera) samt ombokning direkt från order-/faktura-
+      raden (fakturor via kreditfaktura idag).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

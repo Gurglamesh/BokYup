@@ -581,14 +581,21 @@ const SECTION_RENDERERS = {
       el("td", {}, t.trans_date),
       el("td", {}, t.direction === "in" ? "Utgift" : "Inkomst"),
       el("td", {}, catName[t.category_id] || "—"),
-      el("td", {}, el("span", { class: "pill " + t.status }, t.status === "paid" ? "Betald" : "Väntar")),
+      el("td", {}, el("span", { style: "display:inline-flex;gap:4px" },
+        el("span", { class: "pill " + t.status }, t.status === "paid" ? "Betald" : "Väntar"),
+        t.corrected ? el("span", { class: "pill", title: "Bokföringen har rättats (ombokförd med en rättelse)" }, "Rättad") : null)),
       el("td", { class: "num" }, t.verifikation_id ? ("ver " + t.verifikation_id) : ""),
       el("td", { class: "num" }, t.direction === "in"
         ? el("button", { class: "btn small ghost", onclick: () => guard(() => receiptsFlow(t.id, t.status === "pending")) }, "📎 Kvitto")
         : ""),
-      el("td", { class: "num" }, t.status === "pending"
-        ? el("button", { class: "btn small", onclick: () => guard(() => payFlow(t.id)) }, "Bokför betalning")
-        : ""),
+      el("td", { class: "num" }, el("span", { style: "display:inline-flex;gap:4px;justify-content:flex-end" },
+        t.status === "pending"
+          ? el("button", { class: "btn small", onclick: () => guard(() => payFlow(t.id)) }, "Bokför betalning")
+          : null,
+        (t.verifikation_id && !t.corrected)
+          ? el("button", { class: "btn small ghost", title: "Rätta baskonto/moms — backar och bokför om med samma belopp",
+              onclick: () => guard(() => rebookFlow(t, cats)) }, "Rätta baskonto")
+          : null)),
     ));
     panel.appendChild(el("table", {},
       el("thead", {}, el("tr", {},
@@ -638,6 +645,10 @@ const SECTION_RENDERERS = {
       el("button", { class: "btn small ghost", onclick: () => guard(() => receiptsFlow(t.id, t.status === "pending")) }, "📎 Kvitto"),
       el("button", { class: "btn small ghost", title: "Ändra leverantör, nr, notering, kvittoformat (bokföringen berörs ej)",
         onclick: () => guard(() => editPurchaseFlow(t, suppliers)) }, "Ändra"),
+      (t.verifikation_id && !t.corrected)
+        ? el("button", { class: "btn small ghost", title: "Rätta baskonto/moms — backar och bokför om med samma belopp",
+            onclick: () => guard(() => rebookFlow(t, cats)) }, "Rätta baskonto")
+        : null,
       t.status === "pending"
         ? el("button", { class: "btn small", onclick: () => guard(() => payFlow(t.id)) }, "Bokför betalning")
         : null);
@@ -650,8 +661,10 @@ const SECTION_RENDERERS = {
       (t) => [t.trans_date, t.supplier_id ? (supName[t.supplier_id] || "—") : "—",
         catName[t.category_id] || "—", t.ext_ref || "",
         toKr(t.amount_ore || 0) + " kr",
-        el("span", { class: "pill " + (t.status === "paid" ? "paid" : "pending") },
-          t.status === "paid" ? "Betald" : "Väntar"),
+        el("span", { style: "display:inline-flex;gap:4px" },
+          el("span", { class: "pill " + (t.status === "paid" ? "paid" : "pending") },
+            t.status === "paid" ? "Betald" : "Väntar"),
+          t.corrected ? el("span", { class: "pill", title: "Bokföringen har rättats" }, "Rättad") : null),
         actions(t)],
     ));
   },
@@ -2267,6 +2280,40 @@ async function payFlow(txId) {
   if (!f) return;
   await api("POST", `/books/${bid()}/transaktioner/${txId}/pay`, { payment_date: f.payment_date });
   toast("Betalning bokförd");
+  renderWorkspace();
+}
+
+// Rätta baskonto/moms på en bokförd inkomst/utgift: välj ny kategori (BAS-konto) och/eller
+// momssats per rad. Backar (rättelse) och bokar om med SAMMA belopp men korrigerade konton.
+// Fakturor/RUT refuseras av servern (rättas med kreditfaktura). Att göra en rad momsfri =
+// välj momssats "momsfri" på raden.
+async function rebookFlow(t, cats) {
+  const lines = await api("GET", `/books/${bid()}/transaktioner/${t.id}/lines`);
+  if (!lines.length) { toast("Inga bokföringsrader att rätta", true); return; }
+  const kind = t.direction === "in" ? "expense" : "income";
+  const catOpts = cats.filter((c) => c.kind === kind && c.active !== 0)
+    .map((c) => ({ value: String(c.id), label: categoryPath(cats, c.id) }));
+  if (!catOpts.length) {
+    toast("Skapa en aktiv " + (kind === "expense" ? "utgifts" : "inkomst") + "kategori först", true); return;
+  }
+  const rateOpts = RATE_OPTIONS.map((r) => ({ value: r, label: rateLabel(r) }));
+  const fields = [];
+  lines.forEach((ln, i) => {
+    const n = lines.length > 1 ? `Rad ${i + 1} ` : "";
+    fields.push({ name: `cat_${ln.id}`, label: `${n}BAS-konto (${toKr(ln.inc_moms_ore)} kr ink. moms)`,
+      type: "select", value: ln.category_id ? String(ln.category_id) : (catOpts[0].value), options: catOpts });
+    fields.push({ name: `rate_${ln.id}`, label: `${n}Moms`, type: "select", value: ln.rate_code, options: rateOpts });
+  });
+  fields.push({ name: "reason", label: "Orsak", value: "Rättat baskonto" });
+  const f = await modal("Rätta baskonto (ombokföring)", fields, "Bokför på nytt");
+  if (!f) return;
+  const corrections = {};
+  for (const ln of lines) {
+    corrections[ln.id] = { category_id: parseInt(f[`cat_${ln.id}`], 10), rate_code: f[`rate_${ln.id}`] };
+  }
+  const res = await api("POST", `/books/${bid()}/transaktioner/${t.id}/rebook`,
+    { corrections, reason: f.reason || null });
+  toast(`Ombokfört – ny verifikation ${res.ver_number}`);
   renderWorkspace();
 }
 

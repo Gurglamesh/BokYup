@@ -97,7 +97,7 @@ _UTG_MOMS_KEY = {
 # reports. They are bookkeeping artefacts, not user transactions, so the default
 # Transaktioner list hides them (the legal record lives in the verifikationer).
 SYNTHETIC_TRANSAKTION_NOTES = ("rättelse", "periodisering", "återföring",
-                               "fakturabetalning", "kreditering")
+                               "fakturabetalning", "kreditering", "ombokföring")
 
 
 # ---------------------------------------------------------------------------
@@ -1486,6 +1486,119 @@ class BookOps:
             if src:
                 self._clone_transaktion_for_report(src["id"], vid, ver_date, -1, "rättelse")
         return {"verifikation_id": vid, "ver_number": number}
+
+    def transaktion_corrected(self, transaktion_id: int) -> bool:
+        """True if this transaktion's booking has been rättat (a rättelse references its
+        verifikation). Used to flag it as 'Rättad' in Transaktioner/Inköp/Ordrar."""
+        row = self.conn.execute("SELECT verifikation_id FROM transaktion WHERE id=?",
+                                (transaktion_id,)).fetchone()
+        if not row or row["verifikation_id"] is None:
+            return False
+        return self.conn.execute("SELECT 1 FROM verifikation WHERE rattelse_of=?",
+                                 (row["verifikation_id"],)).fetchone() is not None
+
+    def rebook_transaktion(self, transaktion_id: int, corrections: dict,
+                           reason: str = "Rättat baskonto") -> dict:
+        """
+        Correct the BAS-konton / moms of a booked PLAIN income or expense by re-picking
+        the category (and optionally the moms rate) per line, WITHOUT retyping the
+        amounts: reverse the current booking (a rättelse) and post a NEW verifikation
+        with the SAME amounts but the corrected accounts. The öre-exact settlement side
+        (bank / öresavrundning) is carried over untouched, so every verifikation balances.
+
+        `corrections` maps a moms_line id -> {"category_id": int, "rate_code": str} (both
+        optional; omitted keeps the current value). Changing the rate keeps the line's
+        inc-moms total constant and re-splits ex/moms (so a "momsfri men bokförd med moms"
+        line becomes pure income).
+
+        Fakturor and RUT/ROT are refused — those are corrected with a kreditfaktura.
+        """
+        t = self.conn.execute(
+            "SELECT id, direction, category_id, verifikation_id FROM transaktion WHERE id=?",
+            (transaktion_id,)).fetchone()
+        if t is None:
+            raise KeyError(f"No transaktion {transaktion_id}")
+        vid = t["verifikation_id"]
+        if vid is None:
+            raise InvalidState("Transaktionen är inte bokförd ännu")
+        if self.conn.execute("SELECT 1 FROM invoice WHERE transaktion_id=?", (transaktion_id,)).fetchone():
+            raise InvalidState("Fakturor rättas med en kreditfaktura, inte ombokföring")
+        if self.conn.execute("SELECT 1 FROM rut_claim WHERE transaktion_id=?", (transaktion_id,)).fetchone():
+            raise InvalidState("RUT/ROT-ärenden rättas med en kreditfaktura")
+        if self.conn.execute("SELECT 1 FROM verifikation WHERE rattelse_of=?", (vid,)).fetchone():
+            raise InvalidState("Verifikatet är redan rättat")
+
+        kind = "income" if t["direction"] == "out" else "expense"
+        orig = self.conn.execute(
+            "SELECT id, rate_code, category_id, inc_moms_ore FROM moms_line "
+            "WHERE transaktion_id=? ORDER BY id", (transaktion_id,)).fetchall()
+        corrected = []
+        for ln in orig:
+            c = corrections.get(ln["id"]) or corrections.get(str(ln["id"])) or {}
+            new_cat = c.get("category_id", ln["category_id"])
+            new_rate = c.get("rate_code") or ln["rate_code"]
+            if new_rate not in S.MOMS_RATES:
+                raise ValueError(f"Unknown moms rate {new_rate!r}")
+            if new_cat is not None:
+                self._check_category(int(new_cat), kind)
+            ex, moms, inc = compute_moms_figures(ln["inc_moms_ore"], new_rate, True)
+            corrected.append({"category_id": new_cat, "rate_code": new_rate,
+                              "ex": ex, "moms": moms, "inc": inc})
+
+        ver_date = self.conn.execute("SELECT ver_date FROM verifikation WHERE id=?",
+                                     (vid,)).fetchone()["ver_date"]
+        # 1) reverse the current booking (rättelse: negates postings + report moms_lines).
+        self.reverse_verifikation(vid, reason)
+        # 2) re-book: keep the settlement postings (bank / öresavrundning), rebuild the
+        #    income/expense + moms postings from the corrected lines.
+        bank = self._sys_account("account_bank")
+        ores = self._sys_account("account_ores_kronutjamning")
+        keep = [(p["bas_konto"], p["amount_ore"], p["text"]) for p in self.conn.execute(
+            "SELECT bas_konto, amount_ore, text FROM posting WHERE verifikation_id=?", (vid,))
+            if p["bas_konto"] in (bank, ores)]
+        op = 1 if t["direction"] == "in" else -1        # expense debits, income credits
+        fb = t["category_id"]
+        inc_agg: dict[int, int] = {}
+        for cl in corrected:
+            cat = cl["category_id"] if cl["category_id"] is not None else fb
+            konto = self._category_konto(cat)
+            inc_agg[konto] = inc_agg.get(konto, 0) + cl["ex"]
+        postings = list(keep)
+        for konto, ex in sorted(inc_agg.items()):
+            postings.append((konto, op * ex, "omkontering"))
+        moms_agg: dict[str, int] = {}
+        for cl in corrected:
+            if cl["moms"]:
+                moms_agg[cl["rate_code"]] = moms_agg.get(cl["rate_code"], 0) + cl["moms"]
+        for rate, moms in sorted(moms_agg.items()):
+            if t["direction"] == "in":
+                postings.append((self._sys_account("account_ingaende_moms"), moms,
+                                 f"ingående moms {rate}%"))
+            elif rate in _UTG_MOMS_KEY:
+                postings.append((self._sys_account(_UTG_MOMS_KEY[rate]), -moms,
+                                 f"utgående moms {rate}%"))
+        with self.conn:
+            new_vid, new_num = self._post_verifikation(
+                ver_date, _now()[:10], f"Ombokföring (rättat baskonto) av ver {vid}: {reason}",
+                postings)
+            # Report clone with the CORRECTED lines (positive) so the momsdeklaration +
+            # result report attribute the corrected accounts/moms to the new verifikation.
+            src = self.conn.execute(
+                "SELECT direction, category_id, supplier_id, customer_id FROM transaktion "
+                "WHERE id=?", (transaktion_id,)).fetchone()
+            cur = self.conn.execute(
+                "INSERT INTO transaktion(direction, category_id, supplier_id, customer_id, "
+                "trans_date, status, verifikation_id, note, created_at) "
+                "VALUES (?,?,?,?,?, 'paid', ?, ?, ?)",
+                (src["direction"], src["category_id"], src["supplier_id"], src["customer_id"],
+                 ver_date, new_vid, "ombokföring", _now()))
+            rid = cur.lastrowid
+            for cl in corrected:
+                self.conn.execute(
+                    "INSERT INTO moms_line(transaktion_id, rate_code, category_id, ex_moms_ore, "
+                    "moms_ore, inc_moms_ore) VALUES (?,?,?,?,?,?)",
+                    (rid, cl["rate_code"], cl["category_id"], cl["ex"], cl["moms"], cl["inc"]))
+        return {"verifikation_id": new_vid, "ver_number": new_num}
 
     def verifikationer_full(self, start: Optional[str] = None,
                             end: Optional[str] = None) -> list[dict]:

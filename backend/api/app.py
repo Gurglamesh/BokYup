@@ -405,6 +405,16 @@ def _build_router():
         return fac(request).h_register_payment(
             {"book_id": book_id, "transaktion_id": transaktion_id}, body.model_dump(), {})
 
+    @r.get("/books/{book_id}/transaktioner/{transaktion_id}/lines")
+    def transaktion_lines(book_id: str, transaktion_id: int, request: Request):
+        return fac(request).h_transaktion_lines(
+            {"book_id": book_id, "transaktion_id": transaktion_id}, {}, {})
+
+    @r.post("/books/{book_id}/transaktioner/{transaktion_id}/rebook", status_code=201)
+    def rebook_transaktion(book_id: str, transaktion_id: int, body: sc.RebookReq, request: Request):
+        return fac(request).h_rebook_transaktion(
+            {"book_id": book_id, "transaktion_id": transaktion_id}, body.model_dump(), {})
+
     @r.post("/books/{book_id}/rut/{rut_claim_id}/skatteverket-payment")
     def rut_skatteverket_payment(book_id: str, rut_claim_id: int, body: sc.SkatteverketPaymentReq, request: Request):
         return fac(request).h_rut_skatteverket_payment(

@@ -511,6 +511,19 @@ class AppFacade:
         ops = self._ops(p["book_id"])
         return ops.reverse_verifikation(int(p["verifikation_id"]), b["reason"], b.get("reg_date"))
 
+    def h_transaktion_lines(self, p, b, q):
+        # The booking lines (moms_lines) for the re-book editor.
+        ops = self._ops(p["book_id"])
+        return [dict(r) for r in ops.conn.execute(
+            "SELECT id, rate_code, category_id, ex_moms_ore, moms_ore, inc_moms_ore "
+            "FROM moms_line WHERE transaktion_id=? ORDER BY id", (int(p["transaktion_id"]),))]
+
+    def h_rebook_transaktion(self, p, b, q):
+        # corrections keyed by moms_line id -> {category_id, rate_code}; JSON keys are strings.
+        corr = {int(k): v for k, v in (b.get("corrections") or {}).items()}
+        return self._ops(p["book_id"]).rebook_transaktion(
+            int(p["transaktion_id"]), corr, b.get("reason") or "Rättat baskonto")
+
     def h_lock_period(self, p, b, q):
         ops = self._ops(p["book_id"])
         return {"id": ops.lock_period(b["period_start"], b["period_end"], b.get("kind", "moms"))}
@@ -548,7 +561,9 @@ class AppFacade:
                 "t.category_id, t.customer_id, t.supplier_id, t.verifikation_id, t.note, "
                 "t.ext_ref, t.receipt_original_format, "
                 "(SELECT COALESCE(SUM(m.inc_moms_ore),0) FROM moms_line m "
-                "WHERE m.transaktion_id = t.id) AS amount_ore FROM transaktion t")
+                "WHERE m.transaktion_id = t.id) AS amount_ore, "
+                "EXISTS(SELECT 1 FROM verifikation v WHERE v.rattelse_of = t.verifikation_id) "
+                "AS corrected FROM transaktion t")
         if q.get("include_synthetic") in ("1", "true", True):
             return _rows(ops, cols + " ORDER BY t.id")
         from backend.db.operations import SYNTHETIC_TRANSAKTION_NOTES as _SYN
@@ -866,6 +881,8 @@ _route("POST", "/books/{book_id}/expenses", "h_record_expense", 201)
 _route("PATCH", "/books/{book_id}/transaktioner/{transaktion_id}", "h_update_expense")
 _route("POST", "/books/{book_id}/incomes", "h_record_income", 201)
 _route("POST", "/books/{book_id}/transaktioner/{transaktion_id}/pay", "h_register_payment")
+_route("GET", "/books/{book_id}/transaktioner/{transaktion_id}/lines", "h_transaktion_lines")
+_route("POST", "/books/{book_id}/transaktioner/{transaktion_id}/rebook", "h_rebook_transaktion", 201)
 _route("POST", "/books/{book_id}/rut/{rut_claim_id}/skatteverket-payment", "h_rut_skatteverket_payment")
 _route("POST", "/books/{book_id}/rut/{rut_claim_id}/skatteverket-preview", "h_skatteverket_preview")
 _route("POST", "/books/{book_id}/rut/{rut_claim_id}/receipt", "h_upload_rut_receipt", 201)

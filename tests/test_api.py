@@ -227,6 +227,55 @@ class TestBookkeeping:
         assert rev.status_code == 201
         assert rev.json()["ver_number"] == 2
 
+    def test_rebook_corrects_account_and_flags_corrected(self, client, book):
+        wrong = client.post(f"/books/{book}/categories",
+                            json={"name": "Fel", "kind": "expense", "bas_konto": 3003}).json()["id"]
+        right = client.post(f"/books/{book}/categories",
+                            json={"name": "Kontor", "kind": "expense", "bas_konto": 5460}).json()["id"]
+        exp = client.post(f"/books/{book}/expenses",
+                          json={"category_id": wrong, "lines": [{"rate_code": "25", "amount_ore": 1250}],
+                                "trans_date": "2026-02-01", "paid_date": "2026-02-01"}).json()
+        tid = exp["transaktion_id"]
+        mlid = client.get(f"/books/{book}/transaktioner/{tid}/lines").json()[0]["id"]
+        r = client.post(f"/books/{book}/transaktioner/{tid}/rebook",
+                        json={"corrections": {str(mlid): {"category_id": right}}})
+        assert r.status_code == 201
+        # transaktion is now flagged corrected, and the synthetic clone is not listed
+        txs = client.get(f"/books/{book}/transaktioner").json()
+        assert len(txs) == 1 and txs[0]["corrected"] == 1
+        # huvudbok: the wrong konto nets to 0, the right konto holds the ex-moms
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb.get(3003, 0) == 0 and hb.get(5460) == 1000
+
+    def test_rebook_to_momsfri_zeroes_moms(self, client, book):
+        res = self._setup_income(client, book).json()          # 1250 incl 25% on 3001
+        tid = res["transaktion_id"]
+        mlid = client.get(f"/books/{book}/transaktioner/{tid}/lines").json()[0]["id"]
+        client.post(f"/books/{book}/transaktioner/{tid}/rebook",
+                    json={"corrections": {str(mlid): {"rate_code": "momsfri"}}})
+        boxes = client.get(f"/books/{book}/reports/momsdeklaration",
+                           params={"start": "2026-01-01", "end": "2026-12-31"}).json()["boxes"]
+        assert boxes["10"] == 0                                  # utg moms nets out
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb.get(3001) == -1250                            # full amount is income now
+
+    def test_rebook_invoice_refused(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "T", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "X"}).json()["kundnummer"]
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-02-01",
+            "due_date": "2026-03-01",
+            "lines": [{"description": "x", "quantity_centi": 100, "unit_price_ore": 100000,
+                       "rate_code": "25"}]}).json()
+        client.post(f"/books/{book}/transaktioner/{inv['transaktion_id']}/pay",
+                    json={"payment_date": "2026-02-02"})
+        mlid = client.get(f"/books/{book}/transaktioner/{inv['transaktion_id']}/lines").json()[0]["id"]
+        r = client.post(f"/books/{book}/transaktioner/{inv['transaktion_id']}/rebook",
+                        json={"corrections": {str(mlid): {"category_id": cat}}})
+        assert r.status_code == 409                              # fakturor -> kreditfaktura
+
     def test_manual_verifikation_and_ledger(self, client, book):
         cat = client.post(f"/books/{book}/categories",
                           json={"name": "Material", "kind": "expense", "bas_konto": 5460}).json()["id"]

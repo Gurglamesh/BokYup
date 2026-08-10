@@ -345,6 +345,13 @@ class CompanyContactReq(BaseModel):
     contact_kundnummer: int       # the private customer to attach as a company contact
 
 
+class RebookReq(BaseModel):
+    # {moms_line_id (as string): {"category_id": int, "rate_code": str}} — corrected
+    # account/rate per booking line. Both keys optional; omitted keeps the current value.
+    corrections: dict[str, dict] = {}
+    reason: Optional[str] = None
+
+
 class DeliveryAddressReq(BaseModel):
     # Per-invoice leveransadress (full, company-style fields). All optional; when all
     # are empty the billing address IS the delivery address.
