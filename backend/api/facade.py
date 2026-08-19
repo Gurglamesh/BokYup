@@ -563,7 +563,10 @@ class AppFacade:
                 "(SELECT COALESCE(SUM(m.inc_moms_ore),0) FROM moms_line m "
                 "WHERE m.transaktion_id = t.id) AS amount_ore, "
                 "EXISTS(SELECT 1 FROM verifikation v WHERE v.rattelse_of = t.verifikation_id) "
-                "AS corrected FROM transaktion t")
+                "AS corrected, "
+                "EXISTS(SELECT 1 FROM invoice i WHERE i.transaktion_id = t.id) AS invoice_backed, "
+                "EXISTS(SELECT 1 FROM rut_claim rc WHERE rc.transaktion_id = t.id) AS rut "
+                "FROM transaktion t")
         if q.get("include_synthetic") in ("1", "true", True):
             return _rows(ops, cols + " ORDER BY t.id")
         from backend.db.operations import SYNTHETIC_TRANSAKTION_NOTES as _SYN

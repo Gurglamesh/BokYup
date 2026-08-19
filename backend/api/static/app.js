@@ -584,7 +584,8 @@ const SECTION_RENDERERS = {
       el("td", {}, el("span", { style: "display:inline-flex;gap:4px" },
         el("span", { class: "pill " + t.status }, t.status === "paid" ? "Betald" : "Väntar"),
         t.corrected ? el("span", { class: "pill", title: "Bokföringen har rättats (ombokförd med en rättelse)" }, "Rättad") : null)),
-      el("td", { class: "num" }, t.verifikation_id ? ("ver " + t.verifikation_id) : ""),
+      el("td", { class: "num" }, t.verifikation_id
+        ? ("ver " + t.verifikation_id + (t.corrected ? " (rättad)" : "")) : ""),
       el("td", { class: "num" }, t.direction === "in"
         ? el("button", { class: "btn small ghost", onclick: () => guard(() => receiptsFlow(t.id, t.status === "pending")) }, "📎 Kvitto")
         : ""),
@@ -592,7 +593,8 @@ const SECTION_RENDERERS = {
         t.status === "pending"
           ? el("button", { class: "btn small", onclick: () => guard(() => payFlow(t.id)) }, "Bokför betalning")
           : null,
-        (t.verifikation_id && !t.corrected)
+        // Ombokning gäller bara fristående inkomster/utgifter — fakturor/RUT rättas med kreditfaktura.
+        (t.verifikation_id && !t.corrected && !t.invoice_backed && !t.rut)
           ? el("button", { class: "btn small ghost", title: "Rätta baskonto/moms — backar och bokför om med samma belopp",
               onclick: () => guard(() => rebookFlow(t, cats)) }, "Rätta baskonto")
           : null)),
@@ -645,7 +647,7 @@ const SECTION_RENDERERS = {
       el("button", { class: "btn small ghost", onclick: () => guard(() => receiptsFlow(t.id, t.status === "pending")) }, "📎 Kvitto"),
       el("button", { class: "btn small ghost", title: "Ändra leverantör, nr, notering, kvittoformat (bokföringen berörs ej)",
         onclick: () => guard(() => editPurchaseFlow(t, suppliers)) }, "Ändra"),
-      (t.verifikation_id && !t.corrected)
+      (t.verifikation_id && !t.corrected && !t.invoice_backed && !t.rut)
         ? el("button", { class: "btn small ghost", title: "Rätta baskonto/moms — backar och bokför om med samma belopp",
             onclick: () => guard(() => rebookFlow(t, cats)) }, "Rätta baskonto")
         : null,
@@ -765,7 +767,7 @@ const SECTION_RENDERERS = {
     ]);
     const incomeCats = cats.filter((c) => c.kind === "income" && c.active !== 0);
     panel.appendChild(headerWithAdd("Artiklar", "+ Ny artikel",
-      () => guard(() => addArticleFlow(incomeCats))));
+      () => guard(() => addArticleFlow(cats))));
     panel.appendChild(el("p", { class: "muted", style: "margin-top:6px" },
       "Återanvändbara artiklar för fakturarader. Artikelnummer xxxx-xxxx (du väljer de "
       + "4 första siffrorna, resten slumpas). Priset går alltid att ändra på fakturan."));
@@ -798,7 +800,7 @@ const SECTION_RENDERERS = {
           rateLabel(a.rate_code), a.reduction_type ? a.reduction_type.toUpperCase() : "—",
           a.category_name || el("span", { class: "muted" }, "Okategoriserad"),
           el("span", { style: "display:inline-flex;gap:4px" },
-            editBtn(() => guard(() => editArticleFlow(a, incomeCats))),
+            editBtn(() => guard(() => editArticleFlow(a, cats))),
             el("button", { class: "btn small ghost danger", onclick: () => guard(async () => {
               const f = await modal(`Ta bort artikel ${a.article_number}?`, [], "Ta bort");
               if (!f) return;
@@ -2291,8 +2293,11 @@ async function rebookFlow(t, cats) {
   const lines = await api("GET", `/books/${bid()}/transaktioner/${t.id}/lines`);
   if (!lines.length) { toast("Inga bokföringsrader att rätta", true); return; }
   const kind = t.direction === "in" ? "expense" : "income";
-  const catOpts = cats.filter((c) => c.kind === kind && c.active !== 0)
-    .map((c) => ({ value: String(c.id), label: categoryPath(cats, c.id) }));
+  // Active categories of the right kind, plus any (inactive) category the current lines
+  // already sit on — so the current value shows even after the konto was inactivated.
+  const current = new Set(lines.map((l) => l.category_id).filter(Boolean));
+  const catOpts = cats.filter((c) => c.kind === kind && (c.active !== 0 || current.has(c.id)))
+    .map((c) => ({ value: String(c.id), label: categoryPath(cats, c.id) + (c.active === 0 ? " (inaktiv)" : "") }));
   if (!catOpts.length) {
     toast("Skapa en aktiv " + (kind === "expense" ? "utgifts" : "inkomst") + "kategori först", true); return;
   }
@@ -2651,7 +2656,7 @@ async function addSupplierFlow() {
   renderWorkspace();
 }
 
-function articleFields(a, incomeCats) {
+function articleFields(a, cats) {
   a = a || {};
   return [
     { name: "description", label: "Beskrivning", value: a.description || "" },
@@ -2666,9 +2671,22 @@ function articleFields(a, incomeCats) {
       value: a.category_id ? String(a.category_id) : "",
       options: [{ value: "", label: "Okategoriserad" },
         { value: NEW_CAT, label: "➕ Ny kategori…" },
-        ...incomeCats.map((c) => ({ value: String(c.id), label: categoryPath(incomeCats, c.id) }))],
+        ...incomeCatOptions(cats, a.category_id)],
       onChange: handleModalCatCreate },
   ];
+}
+
+// {value,label} income-category options: active ones, PLUS the currently-selected
+// category even if it has been inactivated (so editing an item that already uses it
+// doesn't silently drop the value). Inactive ones are labelled "(inaktiv)".
+function incomeCatOptions(cats, currentId) {
+  const out = cats.filter((c) => c.kind === "income" && c.active !== 0)
+    .map((c) => ({ value: String(c.id), label: categoryPath(cats, c.id) }));
+  const cur = currentId ? cats.find((c) => c.id === currentId) : null;
+  if (cur && cur.active === 0) {
+    out.push({ value: String(cur.id), label: categoryPath(cats, cur.id) + " (inaktiv)" });
+  }
+  return out;
 }
 
 // Category <select> inside a shared modal: open the stacking category dialog when the
@@ -2689,10 +2707,10 @@ function handleModalCatCreate(val, input) {
   });
 }
 
-async function addArticleFlow(incomeCats) {
+async function addArticleFlow(cats) {
   // No manual prefix — the article number's prefix comes from the chosen category (or
   // the provisional "NY-" bucket when uncategorised; assign a category later to reissue).
-  const f = await modal("Ny artikel", articleFields(null, incomeCats), "Skapa");
+  const f = await modal("Ny artikel", articleFields(null, cats), "Skapa");
   if (!f || !f.description) return;
   const res = await api("POST", `/books/${bid()}/articles`, {
     description: f.description,
@@ -2704,10 +2722,10 @@ async function addArticleFlow(incomeCats) {
   renderWorkspace();
 }
 
-async function editArticleFlow(a, incomeCats) {
+async function editArticleFlow(a, cats) {
   const f = await modal(`Ändra artikel ${a.article_number}`, [
     { name: "article_number", label: "Artikelnummer", value: a.article_number },
-    ...articleFields(a, incomeCats),
+    ...articleFields(a, cats),
   ], "Spara");
   if (!f || !f.description) return;
   const newCat = f.category_id ? parseInt(f.category_id, 10) : null;

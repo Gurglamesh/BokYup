@@ -259,6 +259,28 @@ class TestBookkeeping:
         hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
         assert hb.get(3001) == -1250                            # full amount is income now
 
+    def test_transaktioner_flags_invoice_backed_and_rut(self, client, book):
+        # a plain expense: not invoice-backed, no rut -> the 'Rätta baskonto' button shows
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "M", "kind": "expense", "bas_konto": 5460}).json()["id"]
+        client.post(f"/books/{book}/expenses",
+                    json={"category_id": cat, "lines": [{"rate_code": "25", "amount_ore": 1250}],
+                          "trans_date": "2026-02-01", "paid_date": "2026-02-01"})
+        # an invoice's income transaktion IS invoice-backed -> button hidden client-side
+        icat = client.post(f"/books/{book}/categories",
+                           json={"name": "S", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "X"}).json()["kundnummer"]
+        client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": icat, "invoice_date": "2026-02-01",
+            "due_date": "2026-03-01",
+            "lines": [{"description": "x", "quantity_centi": 100, "unit_price_ore": 100000,
+                       "rate_code": "25"}]})
+        txs = client.get(f"/books/{book}/transaktioner").json()
+        by = {(t["direction"], bool(t["invoice_backed"])) for t in txs}
+        assert ("in", False) in by            # the plain expense
+        assert ("out", True) in by            # the invoice income
+
     def test_rebook_invoice_refused(self, client, book):
         cat = client.post(f"/books/{book}/categories",
                           json={"name": "T", "kind": "income", "bas_konto": 3001}).json()["id"]
