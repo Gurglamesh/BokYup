@@ -465,13 +465,20 @@ class BookOps:
                 self.conn.execute(f"UPDATE article SET {sets} WHERE id=?", (*params, article_id))
 
     def delete_article(self, article_id: int) -> None:
-        """Delete a catalog article. Issued invoice lines keep their frozen values; any
-        line that referenced it just loses the (informational) link."""
+        """Delete a catalog article. Issued invoice lines keep their frozen values (incl.
+        the picked-batch cost); any live link to the article or its stock batches is just
+        detached. The article's stock batches are pure tracking, so they go with it."""
         if self.conn.execute("SELECT 1 FROM article WHERE id=?", (article_id,)).fetchone() is None:
             raise KeyError(f"No article {article_id}")
         with self.conn:
             self.conn.execute("UPDATE invoice_line SET article_id=NULL WHERE article_id=?",
                               (article_id,))
+            # Detach invoice lines that picked one of this article's batches, then drop the
+            # batches (a NOT NULL FK to article, so they must go before the article).
+            self.conn.execute(
+                "UPDATE invoice_line SET stock_batch_id=NULL WHERE stock_batch_id IN "
+                "(SELECT id FROM stock_batch WHERE article_id=?)", (article_id,))
+            self.conn.execute("DELETE FROM stock_batch WHERE article_id=?", (article_id,))
             self.conn.execute("DELETE FROM article WHERE id=?", (article_id,))
 
     # ==================================================================

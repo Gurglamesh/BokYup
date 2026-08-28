@@ -623,6 +623,12 @@ const SECTION_RENDERERS = {
     panel.appendChild(el("p", { class: "muted", style: "margin-top:6px" },
       "Inköp och utgifter till firman. Ange kvitto- eller fakturanummer och bifoga kvittot. "
       + "En leverantörsfaktura kan bokföras direkt och markeras som betald när den betalas."));
+    // Discoverability: a wrongly-created kostnadskonto is removed/hidden from the pickers here.
+    panel.appendChild(el("p", { class: "muted", style: "margin-top:2px;font-size:12px" },
+      "Fel kostnadskonto i listan? ",
+      el("a", { href: "#", style: "color:var(--order-blue,#3a6ea5)", onclick: (e) => {
+        e.preventDefault(); state.section = "categories"; renderWorkspace();
+      } }, "Inaktivera eller ta bort det under BAS-konton →")));
 
     // Sparade utkast (opåbörjade inköp) — fortsätt eller ta bort.
     if (drafts.length) {
@@ -2521,13 +2527,13 @@ async function reverseFlow(verId, verLabel) {
   renderWorkspace();
 }
 
-// Required fields per customer type (a customer card must carry these).
-// Personnummer stays optional here (only required when the person is used for RUT/ROT).
+// Required fields per customer type (a customer card must carry these). Address
+// (gatuadress/postnummer/ort) is NOT required here — it's only needed for RUT/ROT.
+// Personnummer likewise stays optional (only required when used for RUT/ROT).
 const CUSTOMER_REQUIRED = {
   business: [["company_name", "Företagsnamn"], ["org_nr", "Org.nr"], ["vat_nr", "Momsreg.nr"],
-             ["street", "Gatuadress"], ["zip_code", "Postnummer"], ["city", "Ort"], ["email", "E-post"]],
-  private: [["first_name", "Förnamn"], ["last_name", "Efternamn"], ["street", "Gatuadress"],
-            ["zip_code", "Postnummer"], ["city", "Ort"], ["email", "E-post"]],
+             ["email", "E-post"]],
+  private: [["first_name", "Förnamn"], ["last_name", "Efternamn"], ["email", "E-post"]],
 };
 const CUSTOMER_KEYS = ["first_name", "last_name", "personnummer", "company_name", "org_nr",
   "vat_nr", "street", "zip_code", "city", "country", "shipping_address", "email", "phone"];

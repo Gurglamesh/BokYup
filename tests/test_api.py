@@ -1355,6 +1355,17 @@ class TestStock:
         batches = client.get(f"/books/{book}/articles/{aid}/batches").json()
         assert batches[0]["unit_cost_ore"] == 60000
 
+    def test_delete_article_with_stock_batches(self, client, book):
+        # deleting an article that has stock batches used to 500 on the batch FK
+        aid = self._art(client, book)
+        client.post(f"/books/{book}/stock", json={
+            "article_id": aid, "qty_centi": 500, "unit_cost_ore": 60000,
+            "received_date": "2026-03-01"})
+        r = client.delete(f"/books/{book}/articles/{aid}")
+        assert r.status_code in (200, 204)
+        assert client.get(f"/books/{book}/articles").json() == []
+        assert client.get(f"/books/{book}/stock").json() == []      # its batches went too
+
     def test_invoice_picks_batch_and_reports_margin(self, client, book):
         cat = client.post(f"/books/{book}/categories",
                           json={"name": "Försäljning", "kind": "income", "bas_konto": 3001}).json()["id"]

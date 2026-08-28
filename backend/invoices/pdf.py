@@ -264,6 +264,20 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     ty += 4
     rx = pdf.l_margin + W * 0.55
     rw = W * 0.45
+    rut_total = invoice.get("rut_total_ore", 0)
+    rot_total = invoice.get("rot_total_ore", 0)
+    husavdrag = rut_total + rot_total
+    # Keep the WHOLE summary (rabatt + moms + totals + RUT-tabell + Att betala) together on
+    # one page: reserve its estimated height so it moves to a fresh page as a unit rather
+    # than splitting across the page break. A larger gap at the bottom of the previous page
+    # is preferable to a summary that is cut in half.
+    summary_h = (6 if total_rabatt else 0) + 6 * len(by_rate) + 20
+    summary_h += (21 + 7 * len(recipients) + (6 if rut_total else 0)
+                  + (6 if rot_total else 0) + 18) if husavdrag else 18
+    if is_offert:
+        summary_h += 12
+    page_h = pdf.h - pdf.t_margin - pdf.b_margin - 2
+    new_page(min(summary_h, page_h))
     # Total rabatt (summed over all lines), only shown when a discount exists — in red.
     if total_rabatt:
         new_page(6)
@@ -280,9 +294,6 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     _kv(pdf, rx, ty, rw, "Summa inkl. moms", _kr(invoice["inc_moms_ore"]), bold=True); ty += 8
 
     # ---- RUT / ROT household tax reduction (two separate pots) ----------------
-    rut_total = invoice.get("rut_total_ore", 0)
-    rot_total = invoice.get("rot_total_ore", 0)
-    husavdrag = rut_total + rot_total
     if husavdrag:
         title = "Husarbete - skattereduktion"
         if rut_total and rot_total:
