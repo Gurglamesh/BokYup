@@ -564,6 +564,7 @@ class BookOps:
             "COALESCE(SUM(sb.qty_remaining_centi * sb.unit_cost_ore) / 100, 0) AS value_ore "
             "FROM stock_batch sb JOIN article a ON a.id = sb.article_id "
             "LEFT JOIN category c ON c.id = a.category_id "
+            "WHERE sb.deleted_at IS NULL "
             "GROUP BY a.id ORDER BY a.article_number").fetchall()
         out = [dict(r) for r in rows]
         if not include_empty:
@@ -579,7 +580,7 @@ class BookOps:
                "s.name AS supplier_name, sb.purchase_transaktion_id, sb.received_date, sb.note "
                "FROM stock_batch sb LEFT JOIN supplier s ON s.id = sb.supplier_id "
                "LEFT JOIN article a ON a.id = sb.article_id "
-               "WHERE sb.article_id=? ")
+               "WHERE sb.article_id=? AND sb.deleted_at IS NULL ")
         if open_only:
             sql += "AND sb.qty_remaining_centi > 0 "
         sql += "ORDER BY sb.batch_number DESC"
@@ -633,6 +634,45 @@ class BookOps:
         params.append(batch_id)
         with self.conn:
             self.conn.execute(f"UPDATE stock_batch SET {', '.join(sets)} WHERE id=?", params)
+
+    def adjust_stock_batch(self, batch_id: int, qty_delta_centi: int, reason: str) -> dict:
+        """Write off / reduce a batch's remaining stock (svinn) with a logged reason —
+        e.g. broken, lost, used in an unpaid project. Append-only: records the reduction
+        in `stock_adjustment` and decrements qty_remaining. Reductions only (qty_delta < 0);
+        the write-off can never exceed what is left (goods already sold stay untouched).
+        Pure inventory tracking — it books nothing (the inköp is already expensed)."""
+        row = self.conn.execute(
+            "SELECT qty_remaining_centi, deleted_at FROM stock_batch WHERE id=?",
+            (batch_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No stock batch {batch_id}")
+        if row["deleted_at"] is not None:
+            raise InvalidState("Batchen är borttagen")
+        qty_delta_centi = int(qty_delta_centi)
+        if qty_delta_centi >= 0:
+            raise ValueError("Justeringen måste minska lagret (ange ett antal att skriva av)")
+        reason = (reason or "").strip()
+        if not reason:
+            raise ValueError("Ange en anledning till avskrivningen")
+        new_remaining = row["qty_remaining_centi"] + qty_delta_centi
+        if new_remaining < 0:
+            raise InvalidState(
+                f"Kan inte skriva av mer än vad som finns kvar "
+                f"(kvar {row['qty_remaining_centi'] / 100:g})")
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO stock_adjustment(batch_id, qty_delta_centi, reason, created_at) "
+                "VALUES (?,?,?,?)", (batch_id, qty_delta_centi, reason, _now()))
+            self.conn.execute(
+                "UPDATE stock_batch SET qty_remaining_centi=? WHERE id=?",
+                (new_remaining, batch_id))
+        return {"id": cur.lastrowid, "qty_remaining_centi": new_remaining}
+
+    def list_stock_adjustments(self, batch_id: int) -> list[dict]:
+        """The write-off / adjustment history for one batch (newest first)."""
+        return [dict(r) for r in self.conn.execute(
+            "SELECT id, batch_id, qty_delta_centi, reason, created_at "
+            "FROM stock_adjustment WHERE batch_id=? ORDER BY id DESC", (batch_id,)).fetchall()]
 
     def _prune_invoice_empty_batches(self, invoice_id: int) -> None:
         """After an invoice is fully paid the reserved stock is permanently gone: drop any
@@ -1042,19 +1082,27 @@ class BookOps:
                             supplier_id: Optional[int] = None,
                             ext_ref: Optional[str] = None,
                             note: Optional[str] = None,
-                            receipt_original_format: Optional[str] = None) -> dict:
-        """Edit an inköp's NON-ledger fields only: leverantör, kvitto-/fakturanummer,
-        note and kvittots originalformat. The BAS-konto, belopp, moms and any articles/
-        batches are part of the bookkeeping and stay immutable (even after the inköp is
-        booked — only this metadata is editable). A field left None is untouched; pass an
-        empty string to clear ext_ref/note."""
-        t = self.conn.execute("SELECT direction FROM transaktion WHERE id=?",
-                              (transaktion_id,)).fetchone()
+                            receipt_original_format: Optional[str] = None,
+                            ores_rounding: Optional[bool] = None) -> dict:
+        """Edit an inköp's NON-ledger fields: leverantör, kvitto-/fakturanummer, note and
+        kvittots originalformat. The BAS-konto, belopp, moms and any articles/batches stay
+        immutable (even after booking). `ores_rounding` (öresavrundning) is only meaningful
+        BEFORE the inköp is booked — it is read at register_payment — so it may only be
+        toggled while the transaktion is still pending; on a booked inköp change it via a
+        rättelse (rebook). A field left None is untouched; pass an empty string to clear
+        ext_ref/note."""
+        t = self.conn.execute("SELECT direction, status, verifikation_id FROM transaktion "
+                              "WHERE id=?", (transaktion_id,)).fetchone()
         if t is None:
             raise KeyError(f"No transaktion {transaktion_id}")
         if t["direction"] != "in":
             raise InvalidState("Endast inköp kan redigeras här")
         updates: dict[str, object] = {}
+        if ores_rounding is not None:
+            if t["status"] == "paid" or t["verifikation_id"] is not None:
+                raise InvalidState(
+                    "Öresavrundning kan bara ändras innan inköpet är bokfört (rätta annars via rättelse)")
+            updates["ores_rounding"] = 1 if ores_rounding else 0
         if supplier_id is not None:
             if supplier_id and self.conn.execute(
                     "SELECT 1 FROM supplier WHERE id=?", (supplier_id,)).fetchone() is None:
@@ -1075,6 +1123,171 @@ class BookOps:
                 self.conn.execute(f"UPDATE transaktion SET {sets} WHERE id=?",
                                   (*[updates[c] for c in cols], transaktion_id))
         return {"transaktion_id": transaktion_id, "updated": list(updates.keys())}
+
+    def update_expense(self, transaktion_id: int, *, category_id: int,
+                       lines: list[dict], trans_date: str,
+                       supplier_id: Optional[int] = None,
+                       note: Optional[str] = None,
+                       receipt_original_format: Optional[str] = None,
+                       ext_ref: Optional[str] = None,
+                       ores_rounding: bool = False) -> dict:
+        """FULL edit of an UNBOOKED inköp (a direct purchase / leverantörsfaktura that is
+        still pending). Because nothing has hit the ledger yet — no verifikation, no
+        verifikationsnummer — every field is safe to rewrite: BAS-konto, belopp, moms,
+        datum, leverantör, kvittonummer and öresavrundning. The transaktion id (and any
+        attached receipt) is preserved. A BOOKED inköp is immutable — correct it with a
+        rättelse (rebook) instead.
+
+        The old stock batches this purchase created are dropped and rebuilt by the caller
+        from the new lines; that is only allowed while they are wholly unconsumed."""
+        t = self.conn.execute(
+            "SELECT direction, status, verifikation_id, deleted_at FROM transaktion WHERE id=?",
+            (transaktion_id,)).fetchone()
+        if t is None:
+            raise KeyError(f"No transaktion {transaktion_id}")
+        if t["direction"] != "in":
+            raise InvalidState("Endast inköp kan redigeras här")
+        if t["deleted_at"] is not None:
+            raise InvalidState("Transaktionen är borttagen")
+        if t["status"] == "paid" or t["verifikation_id"] is not None:
+            raise InvalidState(
+                "Ett bokfört inköp kan inte redigeras — rätta via en rättelse istället")
+        self._check_category(category_id, "expense")
+        if receipt_original_format and receipt_original_format not in S.RECEIPT_FORMATS:
+            raise ValueError(f"Invalid receipt format: {receipt_original_format}")
+        if supplier_id and self.conn.execute(
+                "SELECT 1 FROM supplier WHERE id=?", (supplier_id,)).fetchone() is None:
+            raise KeyError(f"No supplier {supplier_id}")
+        # Guard + drop the purchase's live batches (unconsumed only); the caller rebuilds.
+        batches = self.conn.execute(
+            "SELECT id, qty_in_centi, qty_remaining_centi FROM stock_batch "
+            "WHERE purchase_transaktion_id=? AND deleted_at IS NULL", (transaktion_id,)).fetchall()
+        for sb in batches:
+            if sb["qty_remaining_centi"] != sb["qty_in_centi"] or self.conn.execute(
+                    "SELECT 1 FROM invoice_line WHERE stock_batch_id=? LIMIT 1",
+                    (sb["id"],)).fetchone():
+                raise InvalidState(
+                    "Inköpets varor är redan sålda/reserverade — inköpet kan inte redigeras")
+        with self.conn:
+            for sb in batches:
+                self.conn.execute("DELETE FROM stock_batch WHERE id=?", (sb["id"],))
+            self.conn.execute("DELETE FROM moms_line WHERE transaktion_id=?", (transaktion_id,))
+            self.conn.execute(
+                "UPDATE transaktion SET category_id=?, supplier_id=?, trans_date=?, note=?, "
+                "receipt_original_format=?, ext_ref=?, ores_rounding=? WHERE id=?",
+                (category_id, supplier_id or None, trans_date,
+                 (note.strip() if note and note.strip() else None),
+                 receipt_original_format or None,
+                 (ext_ref.strip() if ext_ref and ext_ref.strip() else None),
+                 1 if ores_rounding else 0, transaktion_id))
+        self._insert_moms_lines(transaktion_id, lines)
+        return {"transaktion_id": transaktion_id}
+
+    def expense_edit_payload(self, transaktion_id: int) -> dict:
+        """Reconstruct an inköp as a form-prefill (the same shape the inköp form edits):
+        its header fields plus `items` (article line-items). Named stock batches become
+        stocked item rows; any remaining moms per rate becomes a pure-cost row. Lets the UI
+        reopen a pending inköp for a full edit. `booked` says whether it is immutable."""
+        t = self.conn.execute(
+            "SELECT direction, supplier_id, category_id, trans_date, ext_ref, note, "
+            "ores_rounding, receipt_original_format, status, verifikation_id, deleted_at "
+            "FROM transaktion WHERE id=?", (transaktion_id,)).fetchone()
+        if t is None:
+            raise KeyError(f"No transaktion {transaktion_id}")
+        if t["direction"] != "in":
+            raise InvalidState("Endast inköp kan redigeras här")
+        remaining: dict[str, int] = {}
+        for r in self.conn.execute(
+                "SELECT rate_code, ex_moms_ore FROM moms_line WHERE transaktion_id=?",
+                (transaktion_id,)).fetchall():
+            remaining[r["rate_code"]] = remaining.get(r["rate_code"], 0) + r["ex_moms_ore"]
+        items = []
+        batches = self.conn.execute(
+            "SELECT sb.qty_in_centi, sb.unit_cost_ore, a.description, a.category_id, "
+            "a.rate_code, a.unit, a.reduction_type FROM stock_batch sb "
+            "JOIN article a ON a.id = sb.article_id "
+            "WHERE sb.purchase_transaktion_id=? AND sb.deleted_at IS NULL "
+            "ORDER BY sb.batch_number", (transaktion_id,)).fetchall()
+        for sb in batches:
+            rate = sb["rate_code"] or "25"
+            ex = round(sb["qty_in_centi"] * sb["unit_cost_ore"] / 100)
+            remaining[rate] = remaining.get(rate, 0) - ex
+            items.append({"description": sb["description"], "category_id": sb["category_id"],
+                          "quantity_centi": sb["qty_in_centi"], "unit_cost_ore": sb["unit_cost_ore"],
+                          "rate_code": rate, "unit": sb["unit"],
+                          "reduction_type": sb["reduction_type"], "to_stock": True})
+        for rate, ex in remaining.items():
+            if ex > 0:
+                items.append({"description": "", "category_id": None, "quantity_centi": 100,
+                              "unit_cost_ore": ex, "rate_code": rate, "to_stock": False})
+        return {
+            "transaktion_id": transaktion_id, "supplier_id": t["supplier_id"],
+            "category_id": t["category_id"], "trans_date": t["trans_date"],
+            "ext_ref": t["ext_ref"], "note": t["note"],
+            "ores_rounding": bool(t["ores_rounding"]),
+            "receipt_original_format": t["receipt_original_format"],
+            "status": t["status"], "booked": t["verifikation_id"] is not None,
+            "deleted": t["deleted_at"] is not None, "items": items,
+        }
+
+    def soft_delete_transaktion(self, transaktion_id: int) -> dict:
+        """Move an UNBOOKED transaktion (a pending inköp / income that never hit the
+        ledger) to the 'borttagna' list: it stays in the database but is hidden from the
+        normal lists. Legal-safe because nothing was booked — no verifikationsnummer was
+        consumed, so the sequence stays unbroken. A BOOKED transaktion cannot be soft-
+        deleted (that would leave a gap in the grundbok); reverse it with a rättelse
+        instead.
+
+        Any stock batches this purchase created are pulled out of stock too (soft-hidden),
+        but only if still wholly unconsumed — you cannot discard a purchase whose goods
+        have already been sold/reserved on an invoice."""
+        t = self.conn.execute(
+            "SELECT status, verifikation_id, deleted_at FROM transaktion WHERE id=?",
+            (transaktion_id,)).fetchone()
+        if t is None:
+            raise KeyError(f"No transaktion {transaktion_id}")
+        if t["deleted_at"] is not None:
+            raise InvalidState("Transaktionen är redan borttagen")
+        if t["status"] == "paid" or t["verifikation_id"] is not None:
+            raise InvalidState(
+                "En bokförd transaktion kan inte tas bort — reversera med en rättelse istället")
+        # Guard + collect this purchase's live stock batches; refuse if any is consumed.
+        batches = self.conn.execute(
+            "SELECT id, qty_in_centi, qty_remaining_centi FROM stock_batch "
+            "WHERE purchase_transaktion_id=? AND deleted_at IS NULL", (transaktion_id,)).fetchall()
+        for sb in batches:
+            if sb["qty_remaining_centi"] != sb["qty_in_centi"] or self.conn.execute(
+                    "SELECT 1 FROM invoice_line WHERE stock_batch_id=? LIMIT 1",
+                    (sb["id"],)).fetchone():
+                raise InvalidState(
+                    "Inköpets varor är redan sålda/reserverade och inköpet kan inte tas bort")
+        now = _now()
+        with self.conn:
+            self.conn.execute("UPDATE transaktion SET deleted_at=? WHERE id=?",
+                              (now, transaktion_id))
+            for sb in batches:
+                self.conn.execute("UPDATE stock_batch SET deleted_at=? WHERE id=?",
+                                  (now, sb["id"]))
+        return {"transaktion_id": transaktion_id, "deleted_at": now,
+                "batches_hidden": [sb["id"] for sb in batches]}
+
+    def restore_transaktion(self, transaktion_id: int) -> dict:
+        """Bring a soft-deleted transaktion (and the stock batches hidden with it) back to
+        the normal lists."""
+        t = self.conn.execute(
+            "SELECT deleted_at FROM transaktion WHERE id=?", (transaktion_id,)).fetchone()
+        if t is None:
+            raise KeyError(f"No transaktion {transaktion_id}")
+        if t["deleted_at"] is None:
+            raise InvalidState("Transaktionen är inte borttagen")
+        with self.conn:
+            self.conn.execute("UPDATE transaktion SET deleted_at=NULL WHERE id=?",
+                              (transaktion_id,))
+            self.conn.execute(
+                "UPDATE stock_batch SET deleted_at=NULL "
+                "WHERE purchase_transaktion_id=? AND deleted_at=?",
+                (transaktion_id, t["deleted_at"]))
+        return {"transaktion_id": transaktion_id, "restored": True}
 
     def record_income(self, customer_id: int, category_id: int,
                       lines: list[dict], trans_date: str, *,

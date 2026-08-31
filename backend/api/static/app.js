@@ -610,11 +610,12 @@ const SECTION_RENDERERS = {
 
   // ----- inköp (purchases: expenses + supplier invoices + receipts) -----
   async purchases(panel) {
-    const [txs, cats, suppliers, drafts] = await Promise.all([
+    const [txs, cats, suppliers, drafts, deleted] = await Promise.all([
       api("GET", `/books/${bid()}/transaktioner`),
       api("GET", `/books/${bid()}/categories`),
       api("GET", `/books/${bid()}/suppliers`),
       api("GET", `/books/${bid()}/expense-drafts`),
+      api("GET", `/books/${bid()}/transaktioner?only_deleted=true`),
     ]);
     const catName = Object.fromEntries(cats.map((c) => [c.id, c.name]));
     const supName = Object.fromEntries(suppliers.map((s) => [s.id, s.name]));
@@ -648,14 +649,40 @@ const SECTION_RENDERERS = {
               toast("Utkast borttaget"); renderWorkspace();
             }) }, "Ta bort"))])));
     }
-    if (list.length === 0) { panel.appendChild(el("p", { class: "muted" }, "Inga inköp ännu.")); return; }
+    // Borttagna (soft-deleted, unbooked) inköp — kept in the database, hidden here; restorable.
+    // Rendered even when the live list is empty (you must be able to restore the last one).
+    const appendDeleted = () => {
+      const del = (deleted || []).filter((t) => t.direction === "in");
+      if (!del.length) return;
+      const box = el("details", { style: "margin-top:16px" },
+        el("summary", { style: "cursor:pointer;color:var(--muted,#777)" }, `Borttagna (${del.length})`));
+      box.appendChild(simpleTable(
+        ["Datum", "Leverantör", "Kategori", "Kvitto/Faktura-nr", "Belopp", ""],
+        del.map((t) => [t.trans_date, supName[t.supplier_id] || "—", catName[t.category_id] || "—",
+          t.ext_ref || "", toKr(t.amount_ore || 0) + " kr",
+          el("button", { class: "btn small ghost", onclick: () => guard(() => restoreInkop(t.id)) }, "Återställ")])));
+      panel.appendChild(box);
+    };
+    if (list.length === 0) {
+      panel.appendChild(el("p", { class: "muted" }, "Inga inköp ännu."));
+      appendDeleted();
+      return;
+    }
+    const unbooked = (t) => t.status === "pending" && !t.verifikation_id;
     const actions = (t) => el("span", { style: "display:inline-flex;gap:4px" },
       el("button", { class: "btn small ghost", onclick: () => guard(() => receiptsFlow(t.id, t.status === "pending")) }, "📎 Kvitto"),
-      el("button", { class: "btn small ghost", title: "Ändra leverantör, nr, notering, kvittoformat (bokföringen berörs ej)",
-        onclick: () => guard(() => editPurchaseFlow(t, suppliers)) }, "Ändra"),
+      unbooked(t)
+        ? el("button", { class: "btn small ghost", title: "Ändra allt — inköpet är inte bokfört",
+            onclick: () => guard(() => editInkopFull(t.id, panel)) }, "Ändra")
+        : el("button", { class: "btn small ghost", title: "Ändra leverantör, nr, notering, kvittoformat (bokföringen berörs ej)",
+            onclick: () => guard(() => editPurchaseFlow(t, suppliers)) }, "Ändra"),
       (t.verifikation_id && !t.corrected && !t.invoice_backed && !t.rut)
         ? el("button", { class: "btn small ghost", title: "Rätta baskonto/moms — backar och bokför om med samma belopp",
             onclick: () => guard(() => rebookFlow(t, cats)) }, "Rätta baskonto")
+        : null,
+      unbooked(t)
+        ? el("button", { class: "btn small ghost danger", title: "Flytta till borttagna (inget är bokfört)",
+            onclick: () => guard(() => softDeleteInkop(t.id)) }, "Ta bort")
         : null,
       t.status === "pending"
         ? el("button", { class: "btn small", onclick: () => guard(() => payFlow(t.id)) }, "Bokför betalning")
@@ -675,6 +702,7 @@ const SECTION_RENDERERS = {
           t.corrected ? el("span", { class: "pill", title: "Bokföringen har rättats" }, "Rättad") : null),
         actions(t)],
     ));
+    appendDeleted();
   },
 
   // ----- record income/expense -----
@@ -2089,6 +2117,7 @@ function receiptPicker(opts = {}) {
   return {
     element,
     getFormat() { return fmt.value; },     // "" | "paper" | "digital"
+    setFormat(v) { if (v) fmt.value = v; },
     getStaged() { return staged ? { ...staged, original_format: fmt.value || null } : null; },
   };
 }
@@ -2797,6 +2826,12 @@ async function stockBatchesTable(articleId, suppliers) {
       el("span", { style: "display:flex;gap:4px;justify-content:flex-end" },
         el("button", { class: "btn small ghost", title: "Ändra batch",
           onclick: () => guard(() => editStockBatchFlow(b, suppliers)) }, "Ändra"),
+        b.qty_remaining_centi > 0
+          ? el("button", { class: "btn small ghost", title: "Skriv av svinn (trasig, förlorad, använd utan betalning …)",
+              onclick: () => guard(() => writeOffBatchFlow(b)) }, "Skriv av")
+          : null,
+        el("button", { class: "btn small ghost", title: "Visa avskrivningar (svinn)",
+          onclick: () => guard(() => viewAdjustmentsFlow(b)) }, "Historik"),
         b.qty_remaining_centi === b.qty_in_centi
           ? el("button", { class: "btn small ghost danger", title: "Ta bort (oanvänd batch)",
               onclick: () => guard(async () => {
@@ -2830,6 +2865,53 @@ async function editStockBatchFlow(b, suppliers) {
   body.supplier_id = f.supplier_id ? parseInt(f.supplier_id, 10) : null;
   await api("PATCH", `/books/${bid()}/stock/${b.id}`, body);
   toast("Batch uppdaterad"); renderWorkspace();
+}
+
+// Write off (svinn) some or all of a batch's remaining stock, with a logged reason.
+const WRITEOFF_REASONS = ["Trasig", "Trasig vid test", "Förlorad",
+  "Använd i projekt utan betalning", "Använd internt", "Reklamation"];
+async function writeOffBatchFlow(b) {
+  const remaining = b.qty_remaining_centi / 100;
+  const f = await modal(`Skriv av lager — batch ${b.full_batch_id || b.batch_number}`, [
+    { name: "qty", label: `Antal att skriva av (kvar: ${remaining.toLocaleString("sv-SE")})`,
+      type: "number", value: "" },
+    { name: "reason", label: "Anledning", type: "datalist",
+      options: WRITEOFF_REASONS.map((r) => ({ value: r, label: r })), value: "" },
+  ], "Skriv av");
+  if (!f) return;
+  const qty = parseFloat(String(f.qty).replace(",", "."));
+  if (!qty || qty <= 0) { toast("Ange ett antal större än 0", true); return; }
+  if (!f.reason || !f.reason.trim()) { toast("Ange en anledning", true); return; }
+  await api("POST", `/books/${bid()}/stock/${b.id}/adjust`, {
+    qty_delta_centi: -Math.round(qty * 100), reason: f.reason.trim() });
+  toast("Avskrivning bokförd i lager");
+  renderWorkspace();
+}
+
+async function viewAdjustmentsFlow(b) {
+  const log = await api("GET", `/books/${bid()}/stock/${b.id}/adjustments`);
+  await new Promise((resolve) => {
+    $("#modal-title").textContent = `Avskrivningar — batch ${b.full_batch_id || b.batch_number}`;
+    const body = $("#modal-body");
+    body.innerHTML = "";
+    if (!log.length) {
+      body.appendChild(el("p", { class: "muted" }, "Inga avskrivningar för den här batchen."));
+    } else {
+      body.appendChild(simpleTable(["När", "Antal", "Anledning"],
+        log.map((a) => [a.created_at ? a.created_at.slice(0, 16).replace("T", " ") : "—",
+          (a.qty_delta_centi / 100).toLocaleString("sv-SE"), a.reason])));
+    }
+    $("#modal-ok").textContent = "Stäng";
+    $("#modal-cancel").style.display = "none";
+    $("#modal-backdrop").classList.remove("hidden");
+    const done = () => {
+      $("#modal-backdrop").classList.add("hidden");
+      $("#modal-ok").onclick = null;
+      $("#modal-cancel").style.display = "";
+      resolve();
+    };
+    $("#modal-ok").onclick = done;
+  });
 }
 
 async function addCategoryFlow(presetParentId) {
@@ -3295,9 +3377,33 @@ function purchaseItemsEditor(incomeCats, articles, onChange, initialItems) {
   return { element, get: () => [...rowsBox.children].map((r) => r._get()).filter((l) => l.quantity_centi > 0) };
 }
 
-// Edit an inköp's NON-ledger fields only. BAS-konto, belopp, moms and articles are part
-// of the bookkeeping and stay fixed; only leverantör, kvitto-/fakturanummer, notering and
-// kvittots originalformat are editable (even after the inköp is booked).
+// Full edit of an UNBOOKED inköp: reopen the inköp form prefilled from the record.
+async function editInkopFull(tid, panel) {
+  const prefill = await api("GET", `/books/${bid()}/transaktioner/${tid}/edit-payload`);
+  if (prefill.booked) {
+    toast("Bokfört inköp kan inte redigeras helt — rätta via en rättelse", true); return;
+  }
+  await purchaseForm(panel, null, { id: tid, prefill });
+}
+
+async function softDeleteInkop(tid) {
+  const c = await modal("Flytta inköpet till Borttagna? Inget är bokfört — det kan återställas.",
+    [], "Ta bort");
+  if (!c) return;
+  await api("POST", `/books/${bid()}/transaktioner/${tid}/delete`);
+  toast("Inköp flyttat till Borttagna");
+  renderWorkspace();
+}
+
+async function restoreInkop(tid) {
+  await api("POST", `/books/${bid()}/transaktioner/${tid}/restore`);
+  toast("Inköp återställt");
+  renderWorkspace();
+}
+
+// Edit a BOOKED inköp's NON-ledger fields only. BAS-konto, belopp, moms and articles are
+// part of the bookkeeping and stay fixed; only leverantör, kvitto-/fakturanummer, notering
+// and kvittots originalformat are editable. (Unbooked inköp use editInkopFull instead.)
 async function editPurchaseFlow(t, suppliers) {
   const f = await modal("Ändra inköp (endast icke-bokförda uppgifter)", [
     { name: "supplier_id", label: "Leverantör", type: "select", value: t.supplier_id ? String(t.supplier_id) : "",
@@ -3318,8 +3424,11 @@ async function editPurchaseFlow(t, suppliers) {
   renderWorkspace();
 }
 
-async function purchaseForm(panel, draft) {
-  const dp = (draft && draft.payload) || {};      // prefill from a saved inköp-utkast
+async function purchaseForm(panel, draft, edit) {
+  // `edit` = {id, prefill} reopens an UNBOOKED inköp for a full edit (PATCH); otherwise
+  // this creates a new inköp (POST), optionally continuing a saved utkast.
+  const dp = edit ? edit.prefill : ((draft && draft.payload) || {});
+  const editId = edit ? edit.id : null;
   let draftId = draft ? draft.id : null;
   const [cats, suppliers, articles] = await Promise.all([
     api("GET", `/books/${bid()}/categories`),
@@ -3337,7 +3446,9 @@ async function purchaseForm(panel, draft) {
     return;
   }
   panel.innerHTML = "";
-  panel.appendChild(el("h2", {}, draftId ? "Inköp (utkast forts.)" : "Nytt inköp"));
+  panel.appendChild(el("h2", {}, editId ? "Ändra inköp" : (draftId ? "Inköp (utkast forts.)" : "Nytt inköp")));
+  if (editId) panel.appendChild(el("p", { class: "muted", style: "margin-top:2px" },
+    "Inköpet är inte bokfört ännu, så allt kan ändras. Bokförda inköp rättas via en rättelse."));
   // Leverantör is required — start on a placeholder so nothing is booked without one.
   const supplier = el("select", {}, el("option", { value: "" }, "— Välj leverantör —"),
     ...suppliers.map((s) => el("option", { value: s.id }, s.name)));
@@ -3370,7 +3481,10 @@ async function purchaseForm(panel, draft) {
     totalsBox.textContent = `Summa: ${toKr(ex)} kr ex moms + ${toKr(moms)} kr moms = ${toKr(ex + moms)} kr`;
   };
   const items = purchaseItemsEditor(incomeCats, articles, updateTotals, dp.items);
-  const receipt = receiptPicker({ requireFormat: true });
+  // On a create the kvittoformat is required; on an edit the inköp already has one, so a
+  // new receipt is optional (its format is prefilled and kept if none is picked).
+  const receipt = receiptPicker({ requireFormat: !editId });
+  if (editId && dp.receipt_original_format && receipt.setFormat) receipt.setFormat(dp.receipt_original_format);
   const draftPayload = () => ({
     supplier_id: supplier.value ? parseInt(supplier.value, 10) : null,
     category_id: cat.value ? parseInt(cat.value, 10) : null,
@@ -3390,8 +3504,12 @@ async function purchaseForm(panel, draft) {
   panel.appendChild(el("div", { class: "row" },
     wrap("Leverantör", supplier), wrap("Bokförs på (kostnadskonto)", cat),
     wrap("Kvitto-/fakturanummer", extRef)));
-  panel.appendChild(el("div", { class: "row" },
-    wrap("Inköpsdatum", date), wrap("Betald?", paidNow), payDateWrap));
+  // Editing an unbooked inköp never changes its booking status — it stays a pending
+  // leverantörsfaktura; only the fields change. So hide the pay controls in edit mode.
+  if (editId) { paidNow.value = "no"; payDateWrap.style.display = "none"; }
+  panel.appendChild(editId
+    ? el("div", { class: "row" }, wrap("Inköpsdatum", date))
+    : el("div", { class: "row" }, wrap("Inköpsdatum", date), wrap("Betald?", paidNow), payDateWrap));
   panel.appendChild(el("div", { style: "margin-top:6px" }, oresWrap));
   panel.appendChild(el("div", { style: "margin-top:6px" },
     el("label", {}, "Artiklar (namnge en rad → den läggs i lager som en batch)"), items.element));
@@ -3399,8 +3517,9 @@ async function purchaseForm(panel, draft) {
   panel.appendChild(el("div", { style: "margin-top:6px" },
     el("label", {}, "Kvitto/faktura (bild eller PDF) — välj papper eller digitalt"), receipt.element));
   panel.appendChild(el("div", { style: "margin-top:14px" },
-    el("button", { class: "btn brand", onclick: () => guard(submit) }, "Bokför inköp"),
-    el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(saveDraft) }, "Spara utkast"),
+    el("button", { class: "btn brand", onclick: () => guard(submit) }, editId ? "Spara ändringar" : "Bokför inköp"),
+    editId ? null
+      : el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(saveDraft) }, "Spara utkast"),
     el("button", { class: "btn ghost", style: "margin-left:8px",
       onclick: () => { state.section = "purchases"; renderWorkspace(); } }, "Avbryt")));
   updateTotals();
@@ -3410,8 +3529,27 @@ async function purchaseForm(panel, draft) {
     if (rows.length === 0) { toast("Lägg till minst en rad med belopp", true); return; }
     if (!supplier.value) { toast("Välj en leverantör", true); return; }
     const fmt = receipt.getFormat();
-    if (fmt !== "paper" && fmt !== "digital") {
+    if (!editId && fmt !== "paper" && fmt !== "digital") {
       toast("Välj kvittots originalformat (papper eller digitalt)", true); return;
+    }
+    if (editId) {
+      // Full edit of an UNBOOKED inköp: rewrite everything in place (PATCH), keep the id.
+      await api("PATCH", `/books/${bid()}/transaktioner/${editId}`, {
+        supplier_id: parseInt(supplier.value, 10),
+        category_id: parseInt(cat.value, 10), items: rows, trans_date: date.value,
+        ext_ref: extRef.value || null, ores_rounding: ores.checked,
+        receipt_original_format: fmt || dp.receipt_original_format || null,
+      });
+      const staged = receipt.getStaged();
+      if (staged) {
+        await api("POST", `/books/${bid()}/transaktioner/${editId}/receipts`, {
+          image_base64: staged.image_base64, mime: staged.mime, original_format: staged.original_format,
+        });
+      }
+      state.section = "purchases";
+      renderWorkspace();
+      toast("Inköp uppdaterat");
+      return;
     }
     const paid_date = paidNow.value === "yes" ? payDate.value : null;
     const res = await api("POST", `/books/${bid()}/expenses`, {

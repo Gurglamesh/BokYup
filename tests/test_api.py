@@ -1443,6 +1443,169 @@ class TestStock:
                           json={"name": "B", "kind": "income", "bas_konto": 3002, "prefix": "0500"})
         assert dup.status_code == 409          # prefix in use -> InvalidState
 
+    def test_stock_writeoff_logs_reason_and_lowers_qty(self, client, book):
+        aid = self._art(client, book)
+        bid = client.post(f"/books/{book}/stock", json={
+            "article_id": aid, "qty_centi": 500, "unit_cost_ore": 60000}).json()["id"]
+        # write off 2 units (200 centi) — broken during testing
+        r = client.post(f"/books/{book}/stock/{bid}/adjust",
+                        json={"qty_delta_centi": -200, "reason": "Trasig vid test"})
+        assert r.status_code == 201 and r.json()["qty_remaining_centi"] == 300
+        assert client.get(f"/books/{book}/stock").json()[0]["qty_remaining_centi"] == 300
+        log = client.get(f"/books/{book}/stock/{bid}/adjustments").json()
+        assert len(log) == 1 and log[0]["reason"] == "Trasig vid test"
+        assert log[0]["qty_delta_centi"] == -200
+
+    def test_stock_writeoff_cannot_exceed_remaining_or_be_positive(self, client, book):
+        aid = self._art(client, book)
+        bid = client.post(f"/books/{book}/stock", json={
+            "article_id": aid, "qty_centi": 100, "unit_cost_ore": 60000}).json()["id"]
+        assert client.post(f"/books/{book}/stock/{bid}/adjust",
+                           json={"qty_delta_centi": -200, "reason": "för mycket"}).status_code == 409
+        assert client.post(f"/books/{book}/stock/{bid}/adjust",
+                           json={"qty_delta_centi": 50, "reason": "ökning"}).status_code == 400
+        assert client.post(f"/books/{book}/stock/{bid}/adjust",
+                           json={"qty_delta_centi": -50, "reason": ""}).status_code == 400
+
+
+class TestInkopEditDelete:
+    def _expcat(self, client, book):
+        return client.post(f"/books/{book}/categories",
+                           json={"name": "Förbrukning", "kind": "expense",
+                                 "bas_konto": 5460}).json()["id"]
+
+    def _pending(self, client, book, cat, amount=10000):
+        return client.post(f"/books/{book}/expenses",
+                           json={"category_id": cat, "trans_date": "2026-03-01",
+                                 "lines": [{"rate_code": "25", "amount_ore": amount,
+                                            "inclusive": True}]}).json()["transaktion_id"]
+
+    def _row(self, client, book, tid, **kw):
+        rows = client.get(f"/books/{book}/transaktioner", params=kw).json()
+        return next((t for t in rows if t["id"] == tid), None)
+
+    def test_full_edit_of_unbooked_inkop(self, client, book):
+        cat = self._expcat(client, book)
+        other = client.post(f"/books/{book}/categories",
+                            json={"name": "Kontor", "kind": "expense", "bas_konto": 6110}).json()["id"]
+        tid = self._pending(client, book, cat)
+        # full edit: change konto, belopp, moms, date, öresavrundning
+        r = client.patch(f"/books/{book}/transaktioner/{tid}", json={
+            "category_id": other, "trans_date": "2026-04-02",
+            "lines": [{"rate_code": "6", "amount_ore": 21200, "inclusive": True}],
+            "ores_rounding": True, "ext_ref": "NY-REF"})
+        assert r.status_code == 200
+        row = self._row(client, book, tid)
+        assert row["category_id"] == other and row["amount_ore"] == 21200
+        assert row["trans_date"] == "2026-04-02" and row["ext_ref"] == "NY-REF"
+        assert row["ores_rounding"] == 1
+        # the moms line was rebuilt at 6 %
+        mls = client.get(f"/books/{book}/transaktioner/{tid}/lines").json()
+        assert len(mls) == 1 and mls[0]["rate_code"] == "6"
+
+    def test_full_edit_refused_after_booked(self, client, book):
+        cat = self._expcat(client, book)
+        tid = self._pending(client, book, cat)
+        client.post(f"/books/{book}/transaktioner/{tid}/pay", json={"payment_date": "2026-03-05"})
+        r = client.patch(f"/books/{book}/transaktioner/{tid}", json={
+            "category_id": cat, "trans_date": "2026-03-01",
+            "lines": [{"rate_code": "25", "amount_ore": 50000, "inclusive": True}]})
+        assert r.status_code == 409          # booked -> immutable, use rättelse
+
+    def test_ores_toggle_refused_after_booked(self, client, book):
+        cat = self._expcat(client, book)
+        tid = self._pending(client, book, cat)
+        client.post(f"/books/{book}/transaktioner/{tid}/pay", json={"payment_date": "2026-03-05"})
+        assert client.patch(f"/books/{book}/transaktioner/{tid}",
+                            json={"ores_rounding": True}).status_code == 409
+
+    def test_soft_delete_and_restore_pending(self, client, book):
+        cat = self._expcat(client, book)
+        tid = self._pending(client, book, cat)
+        assert client.post(f"/books/{book}/transaktioner/{tid}/delete").status_code == 200
+        assert self._row(client, book, tid) is None                    # hidden from normal list
+        deleted = self._row(client, book, tid, only_deleted=True)
+        assert deleted is not None and deleted["deleted"] == 1          # shows in Borttagna
+        assert client.post(f"/books/{book}/transaktioner/{tid}/restore").status_code == 200
+        assert self._row(client, book, tid) is not None                # back in the normal list
+
+    def test_soft_delete_refused_after_booked(self, client, book):
+        cat = self._expcat(client, book)
+        tid = self._pending(client, book, cat)
+        client.post(f"/books/{book}/transaktioner/{tid}/pay", json={"payment_date": "2026-03-05"})
+        assert client.post(f"/books/{book}/transaktioner/{tid}/delete").status_code == 409
+
+    def test_soft_delete_hides_stock_then_restores(self, client, book):
+        prod = client.post(f"/books/{book}/categories",
+                           json={"name": "Nät", "kind": "income", "bas_konto": 3001,
+                                 "prefix": "0300"}).json()["id"]
+        cat = self._expcat(client, book)
+        res = client.post(f"/books/{book}/expenses", json={
+            "category_id": cat, "trans_date": "2026-05-01",
+            "items": [{"description": "Kabel", "category_id": prod, "quantity_centi": 500,
+                       "unit_cost_ore": 6000, "rate_code": "25"}]}).json()
+        tid = res["transaktion_id"]
+        assert client.get(f"/books/{book}/stock").json()[0]["qty_remaining_centi"] == 500
+        client.post(f"/books/{book}/transaktioner/{tid}/delete")
+        assert client.get(f"/books/{book}/stock").json() == []          # stock hidden with it
+        client.post(f"/books/{book}/transaktioner/{tid}/restore")
+        assert client.get(f"/books/{book}/stock").json()[0]["qty_remaining_centi"] == 500
+
+    def test_edit_payload_reconstructs_items_and_full_edit_rebuilds_stock(self, client, book):
+        prod = client.post(f"/books/{book}/categories",
+                           json={"name": "Nät", "kind": "income", "bas_konto": 3001,
+                                 "prefix": "0600"}).json()["id"]
+        cat = self._expcat(client, book)
+        res = client.post(f"/books/{book}/expenses", json={
+            "category_id": cat, "trans_date": "2026-05-01",
+            "items": [{"description": "Kabel", "category_id": prod, "quantity_centi": 500,
+                       "unit_cost_ore": 6000, "rate_code": "25"},
+                      {"description": "", "quantity_centi": 100, "unit_cost_ore": 4000,
+                       "rate_code": "25"}]}).json()
+        tid = res["transaktion_id"]
+        pf = client.get(f"/books/{book}/transaktioner/{tid}/edit-payload").json()
+        assert pf["booked"] is False and pf["category_id"] == cat
+        stocked = [i for i in pf["items"] if i["description"]]
+        assert stocked and stocked[0]["description"] == "Kabel"
+        assert stocked[0]["quantity_centi"] == 500 and stocked[0]["unit_cost_ore"] == 6000
+        # edit: bump the cable qty to 800 — the batch is rebuilt
+        newitems = [dict(i) for i in pf["items"]]
+        for i in newitems:
+            if i["description"] == "Kabel":
+                i["quantity_centi"] = 800
+        r = client.patch(f"/books/{book}/transaktioner/{tid}", json={
+            "category_id": cat, "trans_date": pf["trans_date"], "items": newitems})
+        assert r.status_code == 200
+        assert client.get(f"/books/{book}/stock").json()[0]["qty_remaining_centi"] == 800
+        # and it still books cleanly when paid
+        pay = client.post(f"/books/{book}/transaktioner/{tid}/pay",
+                          json={"payment_date": "2026-05-10"})
+        assert pay.status_code == 200
+
+    def test_delete_refused_when_stock_consumed(self, client, book):
+        prod = client.post(f"/books/{book}/categories",
+                           json={"name": "Nät", "kind": "income", "bas_konto": 3001,
+                                 "prefix": "0400"}).json()["id"]
+        icat = client.post(f"/books/{book}/categories",
+                           json={"name": "Sälj", "kind": "income", "bas_konto": 3002}).json()["id"]
+        cat = self._expcat(client, book)
+        res = client.post(f"/books/{book}/expenses", json={
+            "category_id": cat, "trans_date": "2026-05-01",
+            "items": [{"description": "Switch", "category_id": prod, "quantity_centi": 500,
+                       "unit_cost_ore": 6000, "rate_code": "25"}]}).json()
+        tid = res["transaktion_id"]
+        aid = res["batches"][0]["article_id"]
+        bid = res["batches"][0]["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "Y AB"}).json()["kundnummer"]
+        client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": icat, "invoice_date": "2026-05-02",
+            "due_date": "2026-05-30",
+            "lines": [{"description": "Switch", "quantity_centi": 100, "unit_price_ore": 10000,
+                       "rate_code": "25", "article_id": aid, "stock_batch_id": bid}]})
+        # goods sold -> the inköp can no longer be discarded
+        assert client.post(f"/books/{book}/transaktioner/{tid}/delete").status_code == 409
+
 
 class TestBasKontonAndAddress:
     def test_accounts_endpoint_lists_system_konton(self, client, book):

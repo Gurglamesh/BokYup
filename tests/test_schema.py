@@ -453,6 +453,23 @@ class TestMigration:
         cols = {r["name"] for r in db.execute("PRAGMA table_info(company)")}
         assert {"street", "zip_code", "city"} <= cols
 
+    def test_migrate_v37_adds_softdelete_and_stock_adjustment(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        S.initialize_schema(db)
+        db.execute("ALTER TABLE transaktion DROP COLUMN deleted_at")
+        db.execute("ALTER TABLE stock_batch DROP COLUMN deleted_at")
+        db.execute("DROP TABLE stock_adjustment")
+        db.execute("PRAGMA user_version = 36")
+        db.commit()
+        assert S.migrate(db) == S.SCHEMA_VERSION
+        tcols = {r["name"] for r in db.execute("PRAGMA table_info(transaktion)")}
+        bcols = {r["name"] for r in db.execute("PRAGMA table_info(stock_batch)")}
+        assert "deleted_at" in tcols and "deleted_at" in bcols
+        tables = {r["name"] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "stock_adjustment" in tables
+
     def test_migrate_is_idempotent(self, conn):
         before = S.get_schema_version(conn)
         assert S.migrate(conn) == before     # already current -> no-op

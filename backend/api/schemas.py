@@ -165,11 +165,18 @@ class RecordExpenseReq(BaseModel):
 
 
 class ExpenseMetaReq(BaseModel):
-    # Editable NON-ledger fields of an inköp (BAS-konto/belopp/moms/artiklar are immutable).
+    # PATCH an inköp. Metadata (leverantör/kvittonr/note/format/öresavrundning) is always
+    # editable. A FULL edit — belopp/konto/moms/datum — is allowed only while the inköp is
+    # UNBOOKED, by also sending category_id + trans_date + lines OR items.
     supplier_id: Optional[int] = None
     ext_ref: Optional[str] = None
     note: Optional[str] = None
     receipt_original_format: Optional[str] = None
+    ores_rounding: Optional[bool] = None            # supplier rounded to whole krona
+    category_id: Optional[int] = None               # full edit: expense BAS-konto
+    trans_date: Optional[str] = None                # full edit
+    lines: Optional[list[MomsLineReq]] = None       # full edit: raw moms lines
+    items: Optional[list[ExpenseItemReq]] = None    # full edit: article line-items
 
 
 class RecordIncomeReq(BaseModel):
@@ -322,6 +329,13 @@ class StockBatchPatchReq(BaseModel):
     received_date: Optional[str] = None
     supplier_id: Optional[int] = None
     note: Optional[str] = None
+
+
+class StockAdjustReq(BaseModel):
+    # Write off / reduce a batch's remaining stock (svinn) with a logged reason. Reduction
+    # only: qty_delta_centi < 0 (e.g. trasig, förlorad, använd i projekt utan betalning).
+    qty_delta_centi: int
+    reason: str
 
 
 class RutRecipientReq(BaseModel):

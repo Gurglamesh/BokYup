@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 36
+SCHEMA_VERSION = 37
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -192,6 +192,7 @@ CREATE TABLE transaktion (
     note                   TEXT,
     ext_ref                TEXT,        -- supplier's kvitto-/fakturanummer (purchases)
     ores_rounding          INTEGER NOT NULL DEFAULT 0,  -- supplier rounded the total to whole krona
+    deleted_at             TEXT,        -- soft-delete: hidden from lists (only for UNBOOKED rows)
     created_at             TEXT NOT NULL
 );
 
@@ -412,8 +413,21 @@ CREATE TABLE stock_batch (
     purchase_transaktion_id INTEGER REFERENCES transaktion(id),     -- optional linked inköp
     received_date           TEXT NOT NULL,
     note                    TEXT,
+    deleted_at              TEXT,        -- soft-hidden when its unbooked purchase is removed
     created_at              TEXT NOT NULL,
     UNIQUE (article_id, batch_number)   -- full batch id = article_number + batch_number
+);
+
+-- ----- stock write-offs / adjustments (svinn) — append-only, with a reason ----
+-- A batch's goods can be lost/broken/used-without-payment. Each reduction is logged
+-- here (qty_delta_centi < 0) with a free-text reason and decrements the batch's
+-- qty_remaining. Pure inventory tracking — books nothing (inköp is already expensed).
+CREATE TABLE stock_adjustment (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id        INTEGER NOT NULL REFERENCES stock_batch(id),
+    qty_delta_centi INTEGER NOT NULL,          -- negative = write-off/reduction
+    reason          TEXT NOT NULL,
+    created_at      TEXT NOT NULL
 );
 
 -- ----- RUT/ROT recipients: a household can split the skattereduktion across ----
@@ -999,6 +1013,17 @@ _MIGRATIONS: dict[int, str] = {
         ALTER TABLE company ADD COLUMN street TEXT;
         ALTER TABLE company ADD COLUMN zip_code TEXT;
         ALTER TABLE company ADD COLUMN city TEXT;
+    """,
+    37: """
+        ALTER TABLE transaktion ADD COLUMN deleted_at TEXT;
+        ALTER TABLE stock_batch ADD COLUMN deleted_at TEXT;
+        CREATE TABLE IF NOT EXISTS stock_adjustment (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id        INTEGER NOT NULL REFERENCES stock_batch(id),
+            qty_delta_centi INTEGER NOT NULL,
+            reason          TEXT NOT NULL,
+            created_at      TEXT NOT NULL
+        );
     """,
 }
 

@@ -285,6 +285,16 @@ def _build_router():
             {"book_id": book_id, "batch_id": batch_id},
             body.model_dump(exclude_none=True), {})
 
+    @r.post("/books/{book_id}/stock/{batch_id}/adjust", status_code=201)
+    def adjust_stock_batch(book_id: str, batch_id: int, body: sc.StockAdjustReq, request: Request):
+        return fac(request).h_adjust_stock_batch(
+            {"book_id": book_id, "batch_id": batch_id}, body.model_dump(), {})
+
+    @r.get("/books/{book_id}/stock/{batch_id}/adjustments")
+    def list_stock_adjustments(book_id: str, batch_id: int, request: Request):
+        return fac(request).h_list_stock_adjustments(
+            {"book_id": book_id, "batch_id": batch_id}, {}, {})
+
     @r.post("/books/{book_id}/categories", status_code=201)
     def create_category(book_id: str, body: sc.CategoryReq, request: Request):
         return fac(request).h_create_category({"book_id": book_id}, body.model_dump(), {})
@@ -410,10 +420,25 @@ def _build_router():
         return fac(request).h_transaktion_lines(
             {"book_id": book_id, "transaktion_id": transaktion_id}, {}, {})
 
+    @r.get("/books/{book_id}/transaktioner/{transaktion_id}/edit-payload")
+    def expense_edit_payload(book_id: str, transaktion_id: int, request: Request):
+        return fac(request).h_expense_edit_payload(
+            {"book_id": book_id, "transaktion_id": transaktion_id}, {}, {})
+
     @r.post("/books/{book_id}/transaktioner/{transaktion_id}/rebook", status_code=201)
     def rebook_transaktion(book_id: str, transaktion_id: int, body: sc.RebookReq, request: Request):
         return fac(request).h_rebook_transaktion(
             {"book_id": book_id, "transaktion_id": transaktion_id}, body.model_dump(), {})
+
+    @r.post("/books/{book_id}/transaktioner/{transaktion_id}/delete")
+    def soft_delete_transaktion(book_id: str, transaktion_id: int, request: Request):
+        return fac(request).h_soft_delete_transaktion(
+            {"book_id": book_id, "transaktion_id": transaktion_id}, {}, {})
+
+    @r.post("/books/{book_id}/transaktioner/{transaktion_id}/restore")
+    def restore_transaktion(book_id: str, transaktion_id: int, request: Request):
+        return fac(request).h_restore_transaktion(
+            {"book_id": book_id, "transaktion_id": transaktion_id}, {}, {})
 
     @r.post("/books/{book_id}/rut/{rut_claim_id}/skatteverket-payment")
     def rut_skatteverket_payment(book_id: str, rut_claim_id: int, body: sc.SkatteverketPaymentReq, request: Request):
@@ -479,9 +504,12 @@ def _build_router():
         return fac(request).h_manual_verifikation({"book_id": book_id}, body.model_dump(), {})
 
     @r.get("/books/{book_id}/transaktioner")
-    def list_transaktioner(book_id: str, request: Request, include_synthetic: bool = False):
+    def list_transaktioner(book_id: str, request: Request, include_synthetic: bool = False,
+                           only_deleted: bool = False):
         return fac(request).h_list_transaktioner(
-            {"book_id": book_id}, {}, {"include_synthetic": "1" if include_synthetic else "0"})
+            {"book_id": book_id}, {},
+            {"include_synthetic": "1" if include_synthetic else "0",
+             "only_deleted": "1" if only_deleted else "0"})
 
     # ---- receipts (encrypted photos) ----
     @r.post("/books/{book_id}/transaktioner/{transaktion_id}/receipts", status_code=201)

@@ -404,6 +404,39 @@ class AppFacade:
         return {"id": int(p["supplier_id"])}
 
     # ---- bookkeeping ----
+    @staticmethod
+    def _expense_moms_lines(items):
+        """Translate inköp line-items (qty × à-cost ex moms, per rate) into moms lines."""
+        moms_lines = []
+        for it in items:
+            ex = round(int(it["quantity_centi"]) * int(it["unit_cost_ore"]) / 100)
+            if ex > 0:
+                moms_lines.append({"rate_code": it["rate_code"], "amount_ore": ex,
+                                   "inclusive": False})
+        if not moms_lines:
+            raise ValueError("Inköpet behöver minst en rad med belopp")
+        return moms_lines
+
+    @staticmethod
+    def _apply_expense_batches(ops, tid, items, trans_date, supplier_id):
+        """Create a stock batch under its product category for every named, to-stock item
+        of an inköp. Returns the list of created batches."""
+        batches = []
+        for it in items:
+            desc = (it.get("description") or "").strip()
+            if not desc or not it.get("to_stock", True):
+                continue
+            aid = ops.find_or_create_article(
+                desc, it.get("category_id"), rate_code=it.get("rate_code", "25"),
+                reduction_type=it.get("reduction_type"), unit=it.get("unit"),
+                unit_price_ore=int(it.get("unit_cost_ore") or 0))
+            batch = ops.add_stock_batch(
+                aid, int(it["quantity_centi"]), int(it["unit_cost_ore"]),
+                received_date=trans_date, supplier_id=supplier_id,
+                purchase_transaktion_id=tid, note=it.get("note"))
+            batches.append({"article_id": aid, **batch})
+        return batches
+
     def h_record_expense(self, p, b, q):
         ops = self._ops(p["book_id"])
         items = b.get("items")
@@ -411,35 +444,14 @@ class AppFacade:
             # New line-item inköp: each item is qty × à-cost (ex moms) at a rate; the cost
             # books to the single expense konto (b["category_id"]). An item that names an
             # article gets a stock batch under its product (income) category.
-            moms_lines = []
-            for it in items:
-                ex = round(int(it["quantity_centi"]) * int(it["unit_cost_ore"]) / 100)
-                if ex > 0:
-                    moms_lines.append({"rate_code": it["rate_code"], "amount_ore": ex,
-                                       "inclusive": False})
-            if not moms_lines:
-                raise ValueError("Inköpet behöver minst en rad med belopp")
             res = ops.record_expense(
-                b.get("supplier_id"), b["category_id"], moms_lines, b["trans_date"],
-                note=b.get("note"), receipt_original_format=b.get("receipt_original_format"),
+                b.get("supplier_id"), b["category_id"], self._expense_moms_lines(items),
+                b["trans_date"], note=b.get("note"),
+                receipt_original_format=b.get("receipt_original_format"),
                 ext_ref=b.get("ext_ref"), ores_rounding=bool(b.get("ores_rounding")),
                 paid_date=b.get("paid_date"))
-            tid = res["transaktion_id"]
-            batches = []
-            for it in items:
-                desc = (it.get("description") or "").strip()
-                if not desc or not it.get("to_stock", True):
-                    continue
-                aid = ops.find_or_create_article(
-                    desc, it.get("category_id"), rate_code=it.get("rate_code", "25"),
-                    reduction_type=it.get("reduction_type"), unit=it.get("unit"),
-                    unit_price_ore=int(it.get("unit_cost_ore") or 0))
-                batch = ops.add_stock_batch(
-                    aid, int(it["quantity_centi"]), int(it["unit_cost_ore"]),
-                    received_date=b["trans_date"], supplier_id=b.get("supplier_id"),
-                    purchase_transaktion_id=tid, note=it.get("note"))
-                batches.append({"article_id": aid, **batch})
-            res["batches"] = batches
+            res["batches"] = self._apply_expense_batches(
+                ops, res["transaktion_id"], items, b["trans_date"], b.get("supplier_id"))
             return res
         return ops.record_expense(
             b.get("supplier_id"), b["category_id"], b["lines"], b["trans_date"],
@@ -449,10 +461,46 @@ class AppFacade:
         )
 
     def h_update_expense(self, p, b, q):
-        return self._ops(p["book_id"]).update_expense_meta(
-            int(p["transaktion_id"]), supplier_id=b.get("supplier_id"),
+        """PATCH an inköp. A FULL edit (category_id + lines/items + trans_date given) is
+        allowed only while the inköp is UNBOOKED — it rewrites belopp/konto/moms/datum/
+        öresavrundning and rebuilds the stock batches. Otherwise only the non-ledger
+        metadata (leverantör/kvittonr/note/format/öresavrundning) is touched."""
+        ops = self._ops(p["book_id"])
+        tid = int(p["transaktion_id"])
+        items = b.get("items")
+        full = b.get("category_id") is not None and b.get("trans_date") and (
+            items is not None or b.get("lines") is not None)
+        if full:
+            lines = self._expense_moms_lines(items) if items is not None else b["lines"]
+            ops.update_expense(
+                tid, category_id=b["category_id"], lines=lines, trans_date=b["trans_date"],
+                supplier_id=b.get("supplier_id"), note=b.get("note"),
+                receipt_original_format=b.get("receipt_original_format"),
+                ext_ref=b.get("ext_ref"), ores_rounding=bool(b.get("ores_rounding")))
+            batches = self._apply_expense_batches(
+                ops, tid, items, b["trans_date"], b.get("supplier_id")) if items is not None else []
+            return {"transaktion_id": tid, "batches": batches}
+        return ops.update_expense_meta(
+            tid, supplier_id=b.get("supplier_id"),
             ext_ref=b.get("ext_ref"), note=b.get("note"),
-            receipt_original_format=b.get("receipt_original_format"))
+            receipt_original_format=b.get("receipt_original_format"),
+            ores_rounding=b.get("ores_rounding"))
+
+    def h_expense_edit_payload(self, p, b, q):
+        return self._ops(p["book_id"]).expense_edit_payload(int(p["transaktion_id"]))
+
+    def h_soft_delete_transaktion(self, p, b, q):
+        return self._ops(p["book_id"]).soft_delete_transaktion(int(p["transaktion_id"]))
+
+    def h_restore_transaktion(self, p, b, q):
+        return self._ops(p["book_id"]).restore_transaktion(int(p["transaktion_id"]))
+
+    def h_adjust_stock_batch(self, p, b, q):
+        return self._ops(p["book_id"]).adjust_stock_batch(
+            int(p["batch_id"]), int(b["qty_delta_centi"]), b.get("reason", ""))
+
+    def h_list_stock_adjustments(self, p, b, q):
+        return self._ops(p["book_id"]).list_stock_adjustments(int(p["batch_id"]))
 
     def h_record_income(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -559,7 +607,8 @@ class AppFacade:
         ops = self._ops(p["book_id"])
         cols = ("SELECT t.id, t.direction, t.status, t.trans_date, t.payment_date, "
                 "t.category_id, t.customer_id, t.supplier_id, t.verifikation_id, t.note, "
-                "t.ext_ref, t.receipt_original_format, "
+                "t.ext_ref, t.receipt_original_format, t.ores_rounding, "
+                "(t.deleted_at IS NOT NULL) AS deleted, "
                 "(SELECT COALESCE(SUM(m.inc_moms_ore),0) FROM moms_line m "
                 "WHERE m.transaktion_id = t.id) AS amount_ore, "
                 "EXISTS(SELECT 1 FROM verifikation v WHERE v.rattelse_of = t.verifikation_id) "
@@ -567,12 +616,15 @@ class AppFacade:
                 "EXISTS(SELECT 1 FROM invoice i WHERE i.transaktion_id = t.id) AS invoice_backed, "
                 "EXISTS(SELECT 1 FROM rut_claim rc WHERE rc.transaktion_id = t.id) AS rut "
                 "FROM transaktion t")
+        # Soft-delete: default lists exclude removed rows; only_deleted shows the Borttagna list.
+        only_deleted = q.get("only_deleted") in ("1", "true", True)
+        del_cond = "t.deleted_at IS NOT NULL" if only_deleted else "t.deleted_at IS NULL"
         if q.get("include_synthetic") in ("1", "true", True):
-            return _rows(ops, cols + " ORDER BY t.id")
+            return _rows(ops, f"{cols} WHERE {del_cond} ORDER BY t.id")
         from backend.db.operations import SYNTHETIC_TRANSAKTION_NOTES as _SYN
         placeholders = ",".join("?" for _ in _SYN)
-        return _rows(ops, f"{cols} WHERE t.note IS NULL OR t.note NOT IN ({placeholders}) "
-                          "ORDER BY t.id", tuple(_SYN))
+        return _rows(ops, f"{cols} WHERE {del_cond} AND (t.note IS NULL OR "
+                          f"t.note NOT IN ({placeholders})) ORDER BY t.id", tuple(_SYN))
 
     # ---- receipts (encrypted photos) ----
     def h_upload_receipt(self, p, b, q):
@@ -855,6 +907,8 @@ _route("POST", "/books/{book_id}/stock", "h_add_stock_batch", 201)
 _route("GET", "/books/{book_id}/articles/{article_id}/batches", "h_list_article_batches")
 _route("DELETE", "/books/{book_id}/stock/{batch_id}", "h_delete_stock_batch")
 _route("PATCH", "/books/{book_id}/stock/{batch_id}", "h_update_stock_batch")
+_route("POST", "/books/{book_id}/stock/{batch_id}/adjust", "h_adjust_stock_batch", 201)
+_route("GET", "/books/{book_id}/stock/{batch_id}/adjustments", "h_list_stock_adjustments")
 _route("POST", "/books/{book_id}/categories", "h_create_category", 201)
 _route("PATCH", "/books/{book_id}/categories/{category_id}", "h_update_category")
 _route("DELETE", "/books/{book_id}/categories/{category_id}", "h_delete_category")
@@ -885,7 +939,10 @@ _route("PATCH", "/books/{book_id}/transaktioner/{transaktion_id}", "h_update_exp
 _route("POST", "/books/{book_id}/incomes", "h_record_income", 201)
 _route("POST", "/books/{book_id}/transaktioner/{transaktion_id}/pay", "h_register_payment")
 _route("GET", "/books/{book_id}/transaktioner/{transaktion_id}/lines", "h_transaktion_lines")
+_route("GET", "/books/{book_id}/transaktioner/{transaktion_id}/edit-payload", "h_expense_edit_payload")
 _route("POST", "/books/{book_id}/transaktioner/{transaktion_id}/rebook", "h_rebook_transaktion", 201)
+_route("POST", "/books/{book_id}/transaktioner/{transaktion_id}/delete", "h_soft_delete_transaktion")
+_route("POST", "/books/{book_id}/transaktioner/{transaktion_id}/restore", "h_restore_transaktion")
 _route("POST", "/books/{book_id}/rut/{rut_claim_id}/skatteverket-payment", "h_rut_skatteverket_payment")
 _route("POST", "/books/{book_id}/rut/{rut_claim_id}/skatteverket-preview", "h_skatteverket_preview")
 _route("POST", "/books/{book_id}/rut/{rut_claim_id}/receipt", "h_upload_rut_receipt", 201)
