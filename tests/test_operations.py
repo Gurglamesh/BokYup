@@ -581,26 +581,26 @@ class TestInvoices:
 
     def test_support_minutes_earned_and_expiry(self, ops):
         cat, kid = self._setup(ops)
-        # inc = 124 900 öre (1 249 kr) -> floor(1249/500)=2 -> 30 min; expiry +36 months
+        # inc = 124 900 öre (1 249 kr) -> floor(1249/1000)=1 -> 15 min; expiry +36 months
         ex = round(124900 / 1.25)
         inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-15",
             due_date="2026-04-15",
             lines=[{"description": "IT", "quantity_centi": 100, "unit_price_ore": ex, "rate_code": "25"}])
         assert inv["inc_moms_ore"] == 124900
-        assert inv["support_minutes_earned"] == 30
+        assert inv["support_minutes_earned"] == 15
         assert inv["support_expiry_date"] == "2029-03-15"
         got = ops.get_invoice(inv["invoice_id"])
-        assert got["support_minutes_earned"] == 30 and got["support_expiry_date"] == "2029-03-15"
+        assert got["support_minutes_earned"] == 15 and got["support_expiry_date"] == "2029-03-15"
 
     def test_support_balance_expiry_and_ledger(self, ops):
         cat, kid = self._setup(ops)
-        # two active invoices: 30 min + 15 min = 45 earned
+        # two active invoices: 2 000 kr -> 30 min + 1 000 kr -> 15 min = 45 earned
         ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-15",
             due_date="2026-04-15",
-            lines=[{"description": "A", "quantity_centi": 100, "unit_price_ore": round(124900/1.25), "rate_code": "25"}])
+            lines=[{"description": "A", "quantity_centi": 100, "unit_price_ore": round(200000/1.25), "rate_code": "25"}])
         ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-04-01",
             due_date="2026-05-01",
-            lines=[{"description": "B", "quantity_centi": 100, "unit_price_ore": round(60000/1.25), "rate_code": "25"}])
+            lines=[{"description": "B", "quantity_centi": 100, "unit_price_ore": round(100000/1.25), "rate_code": "25"}])
         assert ops.support_balance(kid)["remaining_minutes"] == 45
         # deduct 15 + 30, add 10 -> net used 35 -> remaining 10
         ops.record_support_entry(kid, 15, "deduction", "Felsökning")
@@ -622,7 +622,7 @@ class TestInvoices:
         cat, kid = self._setup(ops)
         inv = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-03-15",
             due_date="2026-04-15",
-            lines=[{"description": "A", "quantity_centi": 100, "unit_price_ore": round(124900/1.25), "rate_code": "25"}])
+            lines=[{"description": "A", "quantity_centi": 100, "unit_price_ore": round(200000/1.25), "rate_code": "25"}])
         assert ops.support_balance(kid)["earned_active_minutes"] == 30
         ops.cancel_invoice(inv["invoice_id"])          # makulera -> no support time
         assert ops.support_balance(kid)["earned_active_minutes"] == 0
@@ -637,9 +637,10 @@ class TestInvoices:
     def test_support_cap_12h(self, ops):
         cat, kid = self._setup(ops)
         # A big invoice earns more than the 12 h (720 min) cap -> capped at issue + balance.
+        # inc = 5 000 000 öre (50 000 kr) -> floor(50000/1000)*15 = 750 raw -> capped 720.
         first = ops.create_invoice(customer_id=kid, category_id=cat, invoice_date="2026-01-01",
             due_date="2026-01-31",
-            lines=[{"description": "Big", "quantity_centi": 100, "unit_price_ore": 2000000, "rate_code": "25"}])
+            lines=[{"description": "Big", "quantity_centi": 100, "unit_price_ore": 4000000, "rate_code": "25"}])
         assert first["support_minutes_earned"] == 720           # capped, not the raw 750
         bal = ops.support_balance(kid)
         assert bal["cap_minutes"] == 720

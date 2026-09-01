@@ -661,12 +661,12 @@ class TestInvoices:
 
     def test_support_time_bank(self, client, book):
         cat, kid = self._setup(client, book)
-        # inc 1 249 kr -> 30 min support
+        # inc 2 000 kr -> 30 min support (15 min per full 1 000 kr)
         client.post(f"/books/{book}/invoices", json={
             "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-15",
             "due_date": "2026-04-15",
             "lines": [{"description": "IT", "quantity_centi": 100,
-                       "unit_price_ore": round(124900 / 1.25), "rate_code": "25"}]})
+                       "unit_price_ore": round(200000 / 1.25), "rate_code": "25"}]})
         s = client.get(f"/books/{book}/customers/{kid}/support").json()
         assert s["earned_active_minutes"] == 30 and s["remaining_minutes"] == 30
         assert len(s["active_invoices"]) == 1

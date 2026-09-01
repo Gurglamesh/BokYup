@@ -133,14 +133,14 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# Support-time (gratis distanssupport) constants: 15 minutes per full 500 kr.
-SUPPORT_STEP_ORE = 50000            # 500 kr
+# Support-time (gratis distanssupport) constants: 15 minutes per full 1000 kr.
+SUPPORT_STEP_ORE = 100000           # 1000 kr
 SUPPORT_MINUTES_PER_STEP = 15
 
 
 def support_minutes_earned(total_inc_ore: int) -> int:
-    """15 minutes for every full 500 kr of the invoice total (round down; any
-    remainder under 500 kr earns nothing). E.g. 1 249 kr -> 30 min, not 37,5."""
+    """15 minutes for every full 1000 kr of the invoice total (round down; any
+    remainder under 1000 kr earns nothing). E.g. 2 499 kr -> 30 min, not 37,5."""
     if total_inc_ore <= 0:
         return 0
     return (total_inc_ore // SUPPORT_STEP_ORE) * SUPPORT_MINUTES_PER_STEP
@@ -2310,7 +2310,7 @@ class BookOps:
         pm_snapshot = json.dumps(self.list_payment_methods(active_only=True), default=str)
         number = self._next_invoice_number()
 
-        # "Gratis distanssupport": 15 min per full 500 kr of the invoice total (round
+        # "Gratis distanssupport": 15 min per full 1000 kr of the invoice total (round
         # down), valid 36 months — but capped so a customer's balance never exceeds the
         # config maximum (12 h). If they are already at the cap this invoice earns nothing
         # and prints the "cap reached" notice instead of the earned-time block.

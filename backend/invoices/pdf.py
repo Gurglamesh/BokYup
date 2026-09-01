@@ -433,8 +433,8 @@ def _support_text(minutes: int, expiry_date: str) -> str:
     """The 'gratis distanssupport' block, with the earned minutes + expiry inserted."""
     return (
         "Som betald kund hos magIT erbjuds du kostnadsfri enkel support på distans. "
-        "Supporttiden beräknas som 15 minuter för varje fullt 500-kronorsbelopp av "
-        "fakturerat belopp (överskjutande belopp under 500 kr ger ingen ytterligare tid), "
+        "Supporttiden beräknas som 15 minuter för varje fullt 1000-kronorsbelopp av "
+        "fakturerat belopp (överskjutande belopp under 1 000 kr ger ingen ytterligare tid), "
         "giltigt i 36 månader från fakturadatum. Tiden räknas per påbörjade 15 minuter vid "
         "uttag och kan nyttjas vid flera tillfällen tills tillgänglig tid är förbrukad eller "
         "giltighetstiden löpt ut. Erbjudandet gäller enklare support (felsökning, rådgivning, "
