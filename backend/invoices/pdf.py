@@ -223,8 +223,11 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         desc = ln["description"]
         if ln.get("reduction_type"):
             desc += f"  ({ln['reduction_type'].upper()})"     # mark RUT/ROT eligible lines
-        # Any rabatt is applied silently: à-pris stays the list price, Belopp is the net
-        # (discounted) amount — the discount itself is not called out on the document.
+        # Rabatt is a program-internal tool that NEVER shows on the document: the à-pris
+        # printed here is the DISCOUNTED unit price (net line total ÷ antal), so à-pris ×
+        # antal equals Belopp exactly. A non-discounted line is unchanged (net == list).
+        qcenti = ln["quantity_centi"]
+        unit_ore = round(ln["ex_moms_ore"] * 100 / qcenti) if qcenti else ln["unit_price_ore"]
         desc_lines = _wrap(pdf, desc, W * 0.34 - 2, 9)        # wrap into the Beskrivning column
         row_h = max(6.0, len(desc_lines) * line_h + 1.5)
         new_page(row_h, header=True)
@@ -234,7 +237,7 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         pdf.set_font("Helvetica", "", 9)
         pdf.set_xy(pdf.l_margin + W * 0.34, ty)
         pdf.cell(W * 0.08, row_h, _s(qty), border="B", align="R")
-        pdf.cell(W * 0.14, row_h, _s(_kr(ln["unit_price_ore"])), border="B", align="R")
+        pdf.cell(W * 0.14, row_h, _s(_kr(unit_ore)), border="B", align="R")
         pdf.cell(W * 0.10, row_h, _s(_RATE_LABEL.get(ln["rate_code"], ln["rate_code"])), border="B", align="R")
         pdf.cell(W * 0.17, row_h, _s(_kr(ln["ex_moms_ore"])), border="B", align="R")
         pdf.cell(W * 0.17, row_h, _s(_kr(line_inc)), border="B", align="R")
