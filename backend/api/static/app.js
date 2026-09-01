@@ -44,6 +44,19 @@ async function api(method, path, body) {
   return data;
 }
 
+// Turn a failed binary/media Response into a helpful ApiError: an error response is JSON
+// (FastAPI's {"detail": …}) even when the OK response would be a PDF/image, so read the
+// body and surface `detail` — never a bare "HTTP 400". Used by the media helpers below.
+async function mediaError(resp) {
+  let detail = "";
+  try {
+    const txt = await resp.text();
+    try { detail = (JSON.parse(txt) || {}).detail || ""; } catch (e) { detail = txt; }
+  } catch (e) { /* body already consumed / unreadable */ }
+  detail = (detail || "").toString().trim();
+  return new ApiError(detail || ("Serverfel (HTTP " + resp.status + ")"), resp.status);
+}
+
 // A usable src for binary media (PDF/receipt/logo). In server mode a plain URL can't carry
 // the bearer token, so fetch it authed and hand back a blob: URL; local same-origin uses
 // the URL directly; phone (WASM) returns a data: URL from the in-process call.
@@ -54,7 +67,7 @@ async function mediaUrl(path) {
   }
   if (isServer()) {
     const resp = await fetch(apiBase() + path, { headers: authHeaders() });
-    if (!resp.ok) throw new ApiError("HTTP " + resp.status, resp.status);
+    if (!resp.ok) throw await mediaError(resp);
     const url = URL.createObjectURL(await resp.blob());
     return { src: url, revoke: url };
   }
@@ -3820,12 +3833,27 @@ async function invoiceForm(panel, draft) {
     };
   }
 
+  // Client-side guard for the most common faktura mistake: a line is tagged RUT/ROT but no
+  // recipient was added (Skatteverket needs someone to claim the husavdrag). Returns a
+  // message pointing at the fix, or "" when fine. The backend enforces this too (400).
+  function reductionRecipientMsg(body) {
+    const hasReduction = (body.lines || []).some((l) => l.reduction_type);
+    const hasRecipient = (body.recipients || []).length > 0;
+    if (hasReduction && !hasRecipient) {
+      return "En eller flera rader är märkta RUT/ROT — lägg till minst en mottagare "
+        + "(husavdraget måste tillhöra en person) eller ta bort RUT/ROT-märkningen.";
+    }
+    return "";
+  }
+
   async function previewInvoice() {
     const body = collectBody();
     if (!body.customer_id) { toast("Välj en kund först", true); return; }
     if (!(body.lines || []).some((l) => (l.description || "").trim())) {
       toast("Lägg till minst en artikelrad", true); return;
     }
+    const rm = reductionRecipientMsg(body);
+    if (rm) { toast(rm, true); return; }
     const m = await postMediaUrl(`/books/${bid()}/invoices/preview`, body);
     await showPdfSrc(m.src, "Förhandsvisning-faktura.pdf", m.revoke);
   }
@@ -3834,6 +3862,8 @@ async function invoiceForm(panel, draft) {
     const payload = collectBody();
     if (!payload.customer_id) { toast("Välj en kund först", true); return; }
     if (!payload.lines || payload.lines.length === 0) { toast("Lägg till minst en rad", true); return; }
+    const rm = reductionRecipientMsg(payload);
+    if (rm) { toast(rm, true); return; }
     const o = await api("POST", `/books/${bid()}/offerter`, { payload });
     toast(`Offert ${o.offert_number} skapad`);
     showPdf(`/books/${bid()}/offerter/${o.offert_id}/pdf`, `Offert_${o.offert_number}.pdf`);
@@ -3853,6 +3883,8 @@ async function invoiceForm(panel, draft) {
   async function submit() {
     const body = collectBody();
     if ((body.lines || []).length === 0) { toast("Lägg till minst en artikelrad", true); return; }
+    const rm = reductionRecipientMsg(body);
+    if (rm) { toast(rm, true); return; }
     formClosed = true; clearTimeout(autosaveTimer);   // stop autosave re-creating the draft
     const res = await api("POST", `/books/${bid()}/invoices`, body);
     if (draftId) { try { await api("DELETE", `/books/${bid()}/invoice-drafts/${draftId}`); } catch (e) { /* ignore */ } }
@@ -4316,7 +4348,7 @@ async function postMediaUrl(path, body) {
   const resp = await fetch(apiBase() + path, {
     method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify(body) });
-  if (!resp.ok) throw new ApiError("HTTP " + resp.status, resp.status);
+  if (!resp.ok) throw await mediaError(resp);
   const url = URL.createObjectURL(await resp.blob());
   return { src: url, revoke: url };
 }
