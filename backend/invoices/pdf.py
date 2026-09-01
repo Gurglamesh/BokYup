@@ -185,8 +185,8 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
 
     # ---- line items table (page-break aware, wrapped descriptions) -----------
     ty = by + 12
-    cols = [("Beskrivning", 0.40, "L"), ("Antal", 0.10, "R"), ("À-pris", 0.16, "R"),
-            ("Moms", 0.12, "R"), ("Belopp", 0.22, "R")]
+    cols = [("Beskrivning", 0.34, "L"), ("Antal", 0.08, "R"), ("À-pris", 0.14, "R"),
+            ("Moms", 0.10, "R"), ("Belopp", 0.17, "R"), ("Inkl. moms", 0.17, "R")]
     bottom = pdf.h - pdf.b_margin
     line_h = 4.5
 
@@ -229,24 +229,27 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         gross_ex = round(ln["quantity_centi"] * ln["unit_price_ore"] / 100)
         rabatt = gross_ex - ln["ex_moms_ore"]
         total_rabatt += rabatt
-        desc_lines = _wrap(pdf, desc, W * 0.40 - 2, 9)        # wrap into the Beskrivning column
+        desc_lines = _wrap(pdf, desc, W * 0.34 - 2, 9)        # wrap into the Beskrivning column
         # The rabatt note lives INSIDE the row (under the description, above the bottom
         # border) so it clearly belongs to this line and not the next one.
         disc_h = 4.5 if disc else 0
         row_h = max(6.0, len(desc_lines) * line_h + 1.5 + disc_h)
         new_page(row_h, header=True)
         # Numeric columns: one cell each spanning the whole (possibly multi-line) row.
+        # Belopp is the line total ex moms; Inkl. moms is that same line incl. its moms.
+        line_inc = ln["ex_moms_ore"] + ln["moms_ore"]
         pdf.set_font("Helvetica", "", 9)
-        pdf.set_xy(pdf.l_margin + W * 0.40, ty)
-        pdf.cell(W * 0.10, row_h, _s(qty), border="B", align="R")
-        pdf.cell(W * 0.16, row_h, _s(_kr(ln["unit_price_ore"])), border="B", align="R")
-        pdf.cell(W * 0.12, row_h, _s(_RATE_LABEL.get(ln["rate_code"], ln["rate_code"])), border="B", align="R")
-        pdf.cell(W * 0.22, row_h, _s(_kr(ln["ex_moms_ore"])), border="B", align="R")
+        pdf.set_xy(pdf.l_margin + W * 0.34, ty)
+        pdf.cell(W * 0.08, row_h, _s(qty), border="B", align="R")
+        pdf.cell(W * 0.14, row_h, _s(_kr(ln["unit_price_ore"])), border="B", align="R")
+        pdf.cell(W * 0.10, row_h, _s(_RATE_LABEL.get(ln["rate_code"], ln["rate_code"])), border="B", align="R")
+        pdf.cell(W * 0.17, row_h, _s(_kr(ln["ex_moms_ore"])), border="B", align="R")
+        pdf.cell(W * 0.17, row_h, _s(_kr(line_inc)), border="B", align="R")
         # Description column: an empty bottom-bordered cell with the wrapped lines on top.
-        pdf.set_xy(pdf.l_margin, ty); pdf.cell(W * 0.40, row_h, "", border="B")
+        pdf.set_xy(pdf.l_margin, ty); pdf.cell(W * 0.34, row_h, "", border="B")
         for i, dl in enumerate(desc_lines):
             pdf.set_xy(pdf.l_margin + W * 0.005, ty + 1 + i * line_h)
-            pdf.cell(W * 0.40, line_h, _s(dl))
+            pdf.cell(W * 0.34, line_h, _s(dl))
         # The rabatt sub-line (red), drawn within this row right under its description.
         if disc:
             pct = (f"{disc / 100:.2f}".rstrip("0").rstrip(".")).replace(".", ",")
