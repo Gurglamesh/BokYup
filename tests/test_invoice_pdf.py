@@ -42,8 +42,8 @@ def test_render_plain_invoice(ops):
 
 
 def test_render_invoice_with_line_discount(ops):
-    # One discounted line + one without: exercises the per-line rabatt sub-line and
-    # the "Total rabatt" summary row (red). Non-discounted line shows no rabatt field.
+    # One discounted line + one without: the rabatt is applied silently (à-pris stays the
+    # list price, Belopp is the net) — no discount callout is drawn on the document.
     ops.set_company(name="Firma AB", org_nr="556677-8899")
     cat = ops.create_category("Tjänster", "income", 3001, default_rate_code="25")
     kid = ops.create_customer("business", company_name="Köpare AB")

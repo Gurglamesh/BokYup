@@ -218,22 +218,15 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
 
     ty = header_row(ty)
     pdf.set_font("Helvetica", "", 9)
-    total_rabatt = 0
     for ln in lines:
         qty = f"{_qty(ln['quantity_centi'])} {ln.get('unit') or ''}".strip()
         desc = ln["description"]
         if ln.get("reduction_type"):
             desc += f"  ({ln['reduction_type'].upper()})"     # mark RUT/ROT eligible lines
-        disc = ln.get("discount_pct_centi") or 0
-        # Ordinary line total (à-pris × antal, before rabatt); Belopp is the net.
-        gross_ex = round(ln["quantity_centi"] * ln["unit_price_ore"] / 100)
-        rabatt = gross_ex - ln["ex_moms_ore"]
-        total_rabatt += rabatt
+        # Any rabatt is applied silently: à-pris stays the list price, Belopp is the net
+        # (discounted) amount — the discount itself is not called out on the document.
         desc_lines = _wrap(pdf, desc, W * 0.34 - 2, 9)        # wrap into the Beskrivning column
-        # The rabatt note lives INSIDE the row (under the description, above the bottom
-        # border) so it clearly belongs to this line and not the next one.
-        disc_h = 4.5 if disc else 0
-        row_h = max(6.0, len(desc_lines) * line_h + 1.5 + disc_h)
+        row_h = max(6.0, len(desc_lines) * line_h + 1.5)
         new_page(row_h, header=True)
         # Numeric columns: one cell each spanning the whole (possibly multi-line) row.
         # Belopp is the line total ex moms; Inkl. moms is that same line incl. its moms.
@@ -250,13 +243,6 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
         for i, dl in enumerate(desc_lines):
             pdf.set_xy(pdf.l_margin + W * 0.005, ty + 1 + i * line_h)
             pdf.cell(W * 0.34, line_h, _s(dl))
-        # The rabatt sub-line (red), drawn within this row right under its description.
-        if disc:
-            pct = (f"{disc / 100:.2f}".rstrip("0").rstrip(".")).replace(".", ",")
-            pdf.set_font("Helvetica", "", 8); pdf.set_text_color(200, 0, 0)
-            pdf.set_xy(pdf.l_margin + W * 0.02, ty + 1 + len(desc_lines) * line_h)
-            pdf.cell(0, 4, _s(f"Rabatt {pct} %  (ord. {_kr(gross_ex)})  {_kr(-rabatt)}"))
-            pdf.set_text_color(0, 0, 0); pdf.set_font("Helvetica", "", 9)
         ty += row_h
 
     # ---- moms summary per rate + totals -------------------------------------
@@ -274,19 +260,13 @@ def render_invoice_pdf(invoice: dict, logo_png: bytes | None = None) -> bytes:
     # one page: reserve its estimated height so it moves to a fresh page as a unit rather
     # than splitting across the page break. A larger gap at the bottom of the previous page
     # is preferable to a summary that is cut in half.
-    summary_h = (6 if total_rabatt else 0) + 6 * len(by_rate) + 20
+    summary_h = 6 * len(by_rate) + 20
     summary_h += (21 + 7 * len(recipients) + (6 if rut_total else 0)
                   + (6 if rot_total else 0) + 18) if husavdrag else 18
     if is_offert:
         summary_h += 12
     page_h = pdf.h - pdf.t_margin - pdf.b_margin - 2
     new_page(min(summary_h, page_h))
-    # Total rabatt (summed over all lines), only shown when a discount exists — in red.
-    if total_rabatt:
-        new_page(6)
-        pdf.set_text_color(200, 0, 0)
-        _kv(pdf, rx, ty, rw, "Total rabatt", _kr(-total_rabatt)); ty += 6
-        pdf.set_text_color(0, 0, 0)
     for rate, (ex, mm) in sorted(by_rate.items()):
         new_page(6)
         _kv(pdf, rx, ty, rw, f"Moms {_RATE_LABEL.get(rate, rate)} (underlag {_kr(ex)})", _kr(mm))
