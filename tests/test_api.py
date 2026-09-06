@@ -1105,6 +1105,75 @@ class TestInvoiceLifecycleApi:
         client.post(f"/books/{book}/invoices/{inv['invoice_id']}/pay", json={"date": "2026-03-10"})
         assert client.post(f"/books/{book}/invoices/{inv['invoice_id']}/cancel").status_code == 409
 
+    def test_update_unpaid_invoice_keeps_number(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "T", "kind": "income", "bas_konto": 3001}).json()["id"]
+        cat2 = client.post(f"/books/{book}/categories",
+                           json={"name": "T2", "kind": "income", "bas_konto": 3002}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "private", "first_name": "A", "last_name": "B",
+                                "personnummer": "811218-9876"}).json()["kundnummer"]
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "X", "quantity_centi": 100, "unit_price_ore": 100000,
+                       "rate_code": "25"}]}).json()
+        num = inv["invoice_number"]
+        # adjust: new category, two lines, different amount
+        r = client.put(f"/books/{book}/invoices/{inv['invoice_id']}", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-02",
+            "due_date": "2026-04-02",
+            "lines": [{"description": "Y", "quantity_centi": 200, "unit_price_ore": 80000,
+                       "rate_code": "25", "category_id": cat2},
+                      {"description": "Z", "quantity_centi": 100, "unit_price_ore": 20000,
+                       "rate_code": "6", "category_id": cat}]})
+        assert r.status_code == 200
+        assert r.json()["invoice_number"] == num          # same fakturanummer
+        got = client.get(f"/books/{book}/invoices/{r.json()['invoice_id']}").json()
+        assert len(got["lines"]) == 2 and got["invoice_date"] == "2026-03-02"
+        assert got["state"] == "pending"
+        # the number series is unbroken: the next invoice is num+1
+        nxt = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-05",
+            "due_date": "2026-04-05",
+            "lines": [{"description": "N", "quantity_centi": 100, "unit_price_ore": 10000,
+                       "rate_code": "25"}]}).json()
+        assert nxt["invoice_number"] == num + 1
+
+    def test_update_paid_invoice_refused(self, client, book):
+        inv = self._inv(client, book)
+        client.post(f"/books/{book}/invoices/{inv['invoice_id']}/pay", json={"date": "2026-03-10"})
+        r = client.put(f"/books/{book}/invoices/{inv['invoice_id']}", json={
+            "customer_id": inv["customer_id"] if "customer_id" in inv else 1,
+            "category_id": 1, "invoice_date": "2026-03-01", "due_date": "2026-03-31",
+            "lines": [{"description": "X", "quantity_centi": 100, "unit_price_ore": 100000,
+                       "rate_code": "25", "category_id": 1}]})
+        assert r.status_code == 409          # booked/paid -> kreditera instead
+
+    def test_update_unpaid_invoice_restocks_and_reconsumes(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "T", "kind": "income", "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "Y AB"}).json()["kundnummer"]
+        aid = client.post(f"/books/{book}/articles", json={
+            "description": "Widget", "prefix": "2000", "unit_price_ore": 100000}).json()["id"]
+        bid = client.post(f"/books/{book}/stock", json={
+            "article_id": aid, "qty_centi": 500, "unit_cost_ore": 60000}).json()["id"]
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "Widget", "quantity_centi": 200, "unit_price_ore": 100000,
+                       "rate_code": "25", "article_id": aid, "stock_batch_id": bid}]}).json()
+        assert client.get(f"/books/{book}/articles/{aid}/batches").json()[0]["qty_remaining_centi"] == 300
+        # edit to consume 100 instead of 200 -> batch back to 400
+        r = client.put(f"/books/{book}/invoices/{inv['invoice_id']}", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "Widget", "quantity_centi": 100, "unit_price_ore": 100000,
+                       "rate_code": "25", "article_id": aid, "stock_batch_id": bid}]})
+        assert r.status_code == 200
+        assert client.get(f"/books/{book}/articles/{aid}/batches").json()[0]["qty_remaining_centi"] == 400
+
     def test_kreditera_paid(self, client, book):
         inv = self._inv(client, book)
         client.post(f"/books/{book}/invoices/{inv['invoice_id']}/pay", json={"date": "2026-03-10"})

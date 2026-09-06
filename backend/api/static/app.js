@@ -1910,6 +1910,7 @@ const SECTION_RENDERERS = {
         // RUT/ROT invoices: first book the customer payment, then (once that's done)
         // book the Skatteverket husavdrag payout — the button stays here until it lands.
         if (iv.state === "pending") {
+          actions.appendChild(act("Ändra", "ghost", () => editInvoiceFlow(iv, panel)));
           actions.appendChild(act("Bokför betalning", "", () => payFlow(iv.transaktion_id)));
           actions.appendChild(act("Makulera", "ghost danger", () => makuleraInvoiceFlow(iv)));
         } else if (iv.rut_claim_state === "customer_paid" && iv.rut_claim_id) {
@@ -1932,6 +1933,7 @@ const SECTION_RENDERERS = {
           actions.appendChild(act(owed ? "Återbetala" : "Återbetala", "ghost", () => refundInvoiceFlow(iv)));
         }
         if (iv.state === "pending" && iv.paid_ore === 0 && iv.credited_ore === 0) {
+          actions.appendChild(act("Ändra", "ghost", () => editInvoiceFlow(iv, panel)));
           actions.appendChild(act("Makulera", "ghost danger", () => makuleraInvoiceFlow(iv)));
         }
       }
@@ -3586,8 +3588,46 @@ async function purchaseForm(panel, draft, edit) {
   }
 }
 
-async function invoiceForm(panel, draft) {
-  const dp = (draft && draft.payload) || {};   // prefill from a saved draft
+// Build the invoice-form prefill (dp shape) from a get_invoice result, for editing an
+// unpaid faktura in place.
+function invoicePrefillFromGet(inv) {
+  return {
+    customer_id: inv.customer_id, category_id: null,   // lines carry their own category
+    invoice_date: inv.invoice_date, due_date: inv.due_date,
+    delivery_date: inv.delivery_date || null, payment_terms: inv.payment_terms || null,
+    your_reference: inv.your_reference || null, our_reference: inv.our_reference || null,
+    note: inv.note || null, contact_customer_id: inv.contact_customer_id || null,
+    delivery_address: inv.delivery_address || null,
+    support_enabled: inv.support_enabled !== 0,
+    license_keys: inv.license_keys || [],
+    lines: (inv.lines || []).map((l) => ({
+      description: l.description, category_id: l.category_id, quantity_centi: l.quantity_centi,
+      unit: l.unit, unit_price_ore: l.unit_price_ore, discount_pct_centi: l.discount_pct_centi,
+      rate_code: l.rate_code, reduction_type: l.reduction_type, article_id: l.article_id,
+      stock_batch_id: l.stock_batch_id,
+    })),
+    recipients: (inv.recipients || []).map((r) => ({
+      customer_id: r.customer_id, first_name: r.first_name, last_name: r.last_name,
+      personnummer: r.personnummer, rut_share_pct: r.rut_share_pct, rot_share_pct: r.rot_share_pct,
+    })),
+  };
+}
+
+// Open the faktura form to adjust an UNPAID, UNBOOKED order in place (same fakturanummer).
+async function editInvoiceFlow(iv, panel) {
+  const inv = await api("GET", `/books/${bid()}/invoices/${iv.id}`);
+  if (inv.state !== "pending") {
+    toast("Bara obetalda, obokförda fakturor kan ändras — kreditera i stället", true); return;
+  }
+  await invoiceForm(panel, null,
+    { id: iv.id, number: iv.invoice_number, prefill: invoicePrefillFromGet(inv) });
+}
+
+async function invoiceForm(panel, draft, editCtx) {
+  // `editCtx` = {id, number, prefill} adjusts an UNPAID, UNBOOKED faktura in place (PUT,
+  // same fakturanummer); otherwise this creates a new faktura (POST), optionally from a draft.
+  const dp = editCtx ? editCtx.prefill : ((draft && draft.payload) || {});
+  const editId = editCtx ? editCtx.id : null;
   let draftId = draft ? draft.id : null;
   const [customers, cats, redCfg, articles] = await Promise.all([
     api("GET", `/books/${bid()}/customers`),
@@ -3601,7 +3641,11 @@ async function invoiceForm(panel, draft) {
     return;
   }
   panel.innerHTML = "";
-  panel.appendChild(el("h2", {}, draftId ? `Utkast (forts.)` : "Ny faktura"));
+  panel.appendChild(el("h2", {}, editId ? `Ändra faktura ${editCtx.number}`
+    : (draftId ? `Utkast (forts.)` : "Ny faktura")));
+  if (editId) panel.appendChild(el("p", { class: "muted", style: "margin-top:2px" },
+    "Fakturan är obetald och obokförd, så den kan ändras. Fakturanumret behålls. "
+    + "En betald/bokförd faktura rättas i stället med en kreditfaktura."));
 
   const custSel = searchableSelect(
     customers.map((c) => ({ value: c.kundnummer,
@@ -3774,10 +3818,12 @@ async function invoiceForm(panel, draft) {
       "(bocka i för att beräkna supporttid och visa noteringen på fakturan/offerten)")));
   const draftStatus = el("span", { class: "muted", style: "margin-left:12px;font-size:12px" });
   panel.appendChild(el("div", { style: "margin-top:16px" },
-    el("button", { class: "btn brand", onclick: () => guard(submit) }, "Skapa faktura"),
+    el("button", { class: "btn brand", onclick: () => guard(submit) }, editId ? "Spara ändringar" : "Skapa faktura"),
     el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(previewInvoice) }, "Förhandsgranska"),
-    el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(saveDraft) }, "Spara utkast"),
-    el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(createOffert) }, "Skapa offert"),
+    editId ? null
+      : el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(saveDraft) }, "Spara utkast"),
+    editId ? null
+      : el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => guard(createOffert) }, "Skapa offert"),
     el("button", { class: "btn ghost", style: "margin-left:8px", onclick: () => { state.section = "invoices"; renderWorkspace(); } }, "Avbryt"),
     draftStatus));
 
@@ -3790,7 +3836,7 @@ async function invoiceForm(panel, draft) {
   // it is dropped when the invoice is actually issued (submit) or the draft is deleted.
   let autosaveTimer = null, autosaving = false, formClosed = false;
   async function autosave() {
-    if (autosaving || formClosed) return;
+    if (autosaving || formClosed || editId) return;   // editing a faktura never makes drafts
     const payload = collectBody();
     const hasContent = payload.customer_id
       || (payload.lines || []).some((l) => (l.description || "").trim())
@@ -3808,6 +3854,7 @@ async function invoiceForm(panel, draft) {
     finally { autosaving = false; }
   }
   const scheduleAutosave = () => {
+    if (editId) return;                     // no draft autosave while editing a faktura
     draftStatus.textContent = "Sparar utkast…";
     clearTimeout(autosaveTimer);
     autosaveTimer = setTimeout(() => guard(autosave), 1200);
@@ -3886,9 +3933,11 @@ async function invoiceForm(panel, draft) {
     const rm = reductionRecipientMsg(body);
     if (rm) { toast(rm, true); return; }
     formClosed = true; clearTimeout(autosaveTimer);   // stop autosave re-creating the draft
-    const res = await api("POST", `/books/${bid()}/invoices`, body);
-    if (draftId) { try { await api("DELETE", `/books/${bid()}/invoice-drafts/${draftId}`); } catch (e) { /* ignore */ } }
-    toast(`Faktura ${res.invoice_number} skapad`);
+    const res = editId
+      ? await api("PUT", `/books/${bid()}/invoices/${editId}`, body)
+      : await api("POST", `/books/${bid()}/invoices`, body);
+    if (!editId && draftId) { try { await api("DELETE", `/books/${bid()}/invoice-drafts/${draftId}`); } catch (e) { /* ignore */ } }
+    toast(`Faktura ${res.invoice_number} ${editId ? "uppdaterad" : "skapad"}`);
     for (const w of res.cap_warnings || []) {
       if (w.over_cap || w.near_cap) {
         toast(`OBS: ${w.name} ${w.over_cap ? "har överskridit" : "närmar sig"} `

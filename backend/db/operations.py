@@ -2156,7 +2156,8 @@ class BookOps:
                        license_keys: Optional[list] = None,
                        contact_customer_id: Optional[int] = None,
                        delivery_address: Optional[dict] = None,
-                       support_enabled: bool = True) -> dict:
+                       support_enabled: bool = True,
+                       _reuse_number: Optional[int] = None) -> dict:
         """
         Issue a faktura: compute the article lines, snapshot the buyer/seller/payment
         methods, split RUT across household recipients, and create the underlying
@@ -2308,7 +2309,9 @@ class BookOps:
                         if clean_delivery else None)
         seller_snapshot = json.dumps(self.get_company(), default=str)
         pm_snapshot = json.dumps(self.list_payment_methods(active_only=True), default=str)
-        number = self._next_invoice_number()
+        # `_reuse_number` re-issues an edited faktura under its existing number (update_invoice);
+        # otherwise take the next unbroken number.
+        number = _reuse_number if _reuse_number is not None else self._next_invoice_number()
 
         # "Gratis distanssupport": 15 min per full 1000 kr of the invoice total (round
         # down), valid 36 months — but capped so a customer's balance never exceeds the
@@ -2932,7 +2935,7 @@ class BookOps:
             "SELECT il.line_no, il.description, il.category_id, c.name AS category_name, "
             "c.bas_konto AS category_bas_konto, il.quantity_centi, il.unit, il.unit_price_ore, "
             "il.rate_code, il.rut_eligible, il.reduction_type, il.discount_pct_centi, "
-            "il.stock_batch_id, sb.batch_number, il.cost_ore, il.ex_moms_ore, il.moms_ore "
+            "il.article_id, il.stock_batch_id, sb.batch_number, il.cost_ore, il.ex_moms_ore, il.moms_ore "
             "FROM invoice_line il LEFT JOIN category c ON c.id = il.category_id "
             "LEFT JOIN stock_batch sb ON sb.id = il.stock_batch_id "
             "WHERE il.invoice_id=? ORDER BY il.line_no", (invoice_id,)).fetchall()]
@@ -3001,6 +3004,119 @@ class BookOps:
                 self.conn.execute("DELETE FROM rut_claim WHERE transaktion_id=?", (tid,))
                 self.conn.execute("DELETE FROM transaktion WHERE id=?", (tid,))
         return {"invoice_id": invoice_id, "cancelled": True}
+
+    def update_invoice(self, invoice_id: int, *, customer_id: int,
+                       category_id: Optional[int] = None, invoice_date: str, due_date: str,
+                       lines: list[dict], recipients: Optional[list[dict]] = None,
+                       delivery_date: Optional[str] = None, payment_terms: Optional[str] = None,
+                       our_reference: Optional[str] = None, your_reference: Optional[str] = None,
+                       note: Optional[str] = None, license_keys: Optional[list] = None,
+                       contact_customer_id: Optional[int] = None,
+                       delivery_address: Optional[dict] = None,
+                       support_enabled: bool = True) -> dict:
+        """Adjust an UNPAID, UNBOOKED faktura in place, keeping its fakturanummer. Allowed
+        only while nothing has hit the ledger (kontantmetod: the underlying income is still
+        pending, no payments/credits) — a booked or paid faktura must be corrected with a
+        kreditfaktura instead. The old lines/recipients/stock consumption + the pending
+        transaktion are reversed and the faktura is rebuilt from the new payload under the
+        SAME number. The whole new payload is validated BEFORE anything is removed, so a
+        bad edit can never destroy the existing faktura."""
+        inv = self.conn.execute("SELECT * FROM invoice WHERE id=?", (invoice_id,)).fetchone()
+        if inv is None:
+            raise KeyError(f"No invoice {invoice_id}")
+        if inv["cancelled_at"] or inv["credited_at"]:
+            raise InvalidState("Fakturan är makulerad/krediterad och kan inte ändras")
+        if inv["parent_invoice_id"] or inv["husavdrag_shortfall_ore"]:
+            raise InvalidState("En följdfaktura kan inte ändras")
+        tid = inv["transaktion_id"]
+        t = self.conn.execute("SELECT verifikation_id FROM transaktion WHERE id=?",
+                              (tid,)).fetchone() if tid else None
+        if t is None or t["verifikation_id"] is not None:
+            raise InvalidState(
+                "Bara obetalda, obokförda fakturor kan ändras — kreditera fakturan i stället")
+        if self.conn.execute("SELECT 1 FROM invoice_event WHERE invoice_id=? LIMIT 1",
+                             (invoice_id,)).fetchone():
+            raise InvalidState(
+                "Fakturan har betalningar/krediteringar — kreditera/återbetala i stället")
+
+        # --- Pre-validate the NEW payload up front (no side effects), so the reversal +
+        #     recreate below can only run on input that is guaranteed to succeed. ---
+        if not lines:
+            raise ValueError("En faktura behöver minst en artikelrad")
+        customer = self.get_customer(customer_id)          # raises if the customer is gone
+        if category_id is not None:
+            self._check_category(category_id, "income")
+        # Batch availability must account for restocking THIS invoice's current consumption.
+        restock: dict[int, int] = {}
+        for r in self.conn.execute(
+                "SELECT stock_batch_id, quantity_centi FROM invoice_line "
+                "WHERE invoice_id=? AND stock_batch_id IS NOT NULL", (invoice_id,)).fetchall():
+            restock[r["stock_batch_id"]] = restock.get(r["stock_batch_id"], 0) + r["quantity_centi"]
+        has_reduction_line = False
+        for ln in lines:
+            if ln["rate_code"] not in S.MOMS_RATES:
+                raise ValueError(f"Unknown moms rate {ln['rate_code']!r}")
+            line_cat = ln.get("category_id") or category_id
+            if line_cat is None:
+                raise ValueError("Varje rad behöver en kategori (eller en standardkategori)")
+            self._check_category(line_cat, "income")
+            disc = int(ln.get("discount_pct_centi") or 0)
+            if not 0 <= disc <= 10000:
+                raise ValueError("Rabatt måste vara mellan 0 och 100 %")
+            rt = ln.get("reduction_type") or ("rut" if ln.get("rut_eligible") else None)
+            if rt not in (None, "rut", "rot"):
+                raise ValueError(f"Unknown reduction_type {rt!r}")
+            has_reduction_line = has_reduction_line or bool(rt)
+            sb = ln.get("stock_batch_id")
+            if sb is not None:
+                batch = self.conn.execute("SELECT qty_remaining_centi FROM stock_batch WHERE id=?",
+                                          (int(sb),)).fetchone()
+                if batch is None:
+                    raise KeyError(f"No stock batch {sb}")
+                if int(ln["quantity_centi"]) > batch["qty_remaining_centi"] + restock.get(int(sb), 0):
+                    raise InvalidState("Batchen har inte tillräckligt i lager")
+        if has_reduction_line:
+            if customer["type"] != "private":
+                raise ValueError("RUT/ROT gäller endast privatpersoner")
+            if not (recipients or []):
+                raise ValueError("RUT/ROT-rader kräver minst en mottagare")
+            if not customer["personnummer"]:
+                raise ValueError("RUT/ROT kräver kundens personnummer")
+
+        number = inv["invoice_number"]
+        src_offert = self.conn.execute("SELECT id FROM offert WHERE invoice_id=?",
+                                       (invoice_id,)).fetchone()
+        with self.conn:
+            # Return this invoice's consumed stock to its batches (the goods are un-sold).
+            for r in self.conn.execute(
+                    "SELECT stock_batch_id, quantity_centi FROM invoice_line "
+                    "WHERE invoice_id=? AND stock_batch_id IS NOT NULL", (invoice_id,)).fetchall():
+                self.conn.execute(
+                    "UPDATE stock_batch SET qty_remaining_centi = qty_remaining_centi + ? "
+                    "WHERE id=?", (r["quantity_centi"], r["stock_batch_id"]))
+            self.conn.execute("DELETE FROM invoice_line WHERE invoice_id=?", (invoice_id,))
+            self.conn.execute("DELETE FROM rut_recipient WHERE invoice_id=?", (invoice_id,))
+            if src_offert:                       # break the FK before the row is deleted
+                self.conn.execute("UPDATE offert SET invoice_id=NULL WHERE invoice_id=?",
+                                  (invoice_id,))
+            self.conn.execute("UPDATE invoice SET transaktion_id=NULL WHERE id=?", (invoice_id,))
+            if tid:
+                self.conn.execute("DELETE FROM moms_line WHERE transaktion_id=?", (tid,))
+                self.conn.execute("DELETE FROM rut_claim WHERE transaktion_id=?", (tid,))
+                self.conn.execute("DELETE FROM transaktion WHERE id=?", (tid,))
+            self.conn.execute("DELETE FROM invoice WHERE id=?", (invoice_id,))
+        res = self.create_invoice(
+            customer_id=customer_id, category_id=category_id, invoice_date=invoice_date,
+            due_date=due_date, lines=lines, recipients=recipients, delivery_date=delivery_date,
+            payment_terms=payment_terms, our_reference=our_reference, your_reference=your_reference,
+            note=note, license_keys=license_keys, contact_customer_id=contact_customer_id,
+            delivery_address=delivery_address, support_enabled=support_enabled,
+            _reuse_number=number)
+        if src_offert:                           # re-point the offert at the rebuilt faktura
+            with self.conn:
+                self.conn.execute("UPDATE offert SET invoice_id=? WHERE id=?",
+                                  (res["invoice_id"], src_offert["id"]))
+        return res
 
     # ---- settlement subledger: partial payments / refunds / credits ----------
 

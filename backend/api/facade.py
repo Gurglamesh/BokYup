@@ -752,6 +752,19 @@ class AppFacade:
             delivery_address=b.get("delivery_address"),
             support_enabled=b.get("support_enabled", True))
 
+    def h_update_invoice(self, p, b, q):
+        return self._ops(p["book_id"]).update_invoice(
+            int(p["invoice_id"]),
+            customer_id=b["customer_id"], category_id=b.get("category_id"),
+            invoice_date=b["invoice_date"], due_date=b["due_date"], lines=b["lines"],
+            recipients=b.get("recipients"), delivery_date=b.get("delivery_date"),
+            payment_terms=b.get("payment_terms"), our_reference=b.get("our_reference"),
+            your_reference=b.get("your_reference"), note=b.get("note"),
+            license_keys=b.get("license_keys"),
+            contact_customer_id=b.get("contact_customer_id"),
+            delivery_address=b.get("delivery_address"),
+            support_enabled=b.get("support_enabled", True))
+
     def h_list_invoices(self, p, b, q):
         return self._ops(p["book_id"]).list_invoices()
 
@@ -998,6 +1011,7 @@ _route("GET", "/books/{book_id}/offerter/{offert_id}/pdf", "h_offert_pdf")
 _route("POST", "/books/{book_id}/offerter/{offert_id}/create-invoice", "h_offert_to_invoice", 201)
 _route("POST", "/books/{book_id}/offerter/{offert_id}/versions", "h_offert_new_version", 201)
 _route("POST", "/books/{book_id}/invoices", "h_create_invoice", 201)
+_route("PUT", "/books/{book_id}/invoices/{invoice_id}", "h_update_invoice")
 _route("POST", "/books/{book_id}/invoices/preview", "h_preview_invoice")
 _route("GET", "/books/{book_id}/invoices", "h_list_invoices")
 _route("GET", "/books/{book_id}/invoices/{invoice_id}/pdf", "h_invoice_pdf")
