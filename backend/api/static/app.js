@@ -3954,6 +3954,98 @@ async function invoiceForm(panel, draft, editCtx) {
   }
 }
 
+// Browsable article picker: a popup that groups the catalog by category → subcategory →
+// articles (collapsible), with a search that flattens to matching articles. Resolves with
+// the picked article's id, or null on cancel. Used by the order line editor.
+function articlePickerModal(cats, articles) {
+  return new Promise((resolve) => {
+    const incomeCats = (cats || []).filter((c) => c.kind === "income");
+    const arts = articles || [];
+    $("#modal-title").textContent = "Välj artikel";
+    const body = $("#modal-body");
+    body.innerHTML = "";
+    const search = el("input", { type: "search", placeholder: "Sök artikel (nr, namn, kategori)…",
+      style: "width:100%;margin-bottom:8px" });
+    const tree = el("div", { style: "max-height:55vh;overflow:auto;border:1px solid var(--border,#ddd);border-radius:6px;padding:4px" });
+    body.appendChild(search);
+    body.appendChild(tree);
+
+    const finish = (val) => {
+      $("#modal-backdrop").classList.add("hidden");
+      $("#modal-ok").style.display = ""; $("#modal-ok").onclick = null;
+      $("#modal-cancel").onclick = null;
+      resolve(val);
+    };
+    const childCats = (pid) => incomeCats.filter((c) => (c.parent_id || null) === (pid || null));
+    const artsInCat = (cid) => arts.filter((a) => String(a.category_id || "") === String(cid || ""));
+
+    const artRow = (a, indent, withPath) => {
+      const r = el("div", { class: "pick-art", style:
+        `padding:5px 6px;cursor:pointer;border-radius:4px;margin-left:${indent}px` },
+        el("strong", {}, a.article_number || ""), " " + (a.description || ""),
+        a.unit_price_ore != null
+          ? el("span", { class: "muted", style: "margin-left:6px" }, toKr(a.unit_price_ore) + " kr") : null);
+      if (withPath && a.category_id) r.appendChild(
+        el("div", { class: "muted", style: "font-size:11px" }, categoryPath(cats, a.category_id)));
+      r.onmouseenter = () => { r.style.background = "var(--hover,#eef3ff)"; };
+      r.onmouseleave = () => { r.style.background = ""; };
+      r.onclick = () => finish(a.id);
+      return r;
+    };
+
+    // A category node: header (toggles) + its articles + its child categories, nested so
+    // collapsing a parent hides the whole subtree. Empty categories are skipped.
+    const catNode = (c, depth) => {
+      const kids = childCats(c.id).map((k) => catNode(k, depth + 1)).filter(Boolean);
+      const myArts = artsInCat(c.id);
+      if (!kids.length && !myArts.length) return null;
+      const box = el("div", {});
+      for (const a of myArts) box.appendChild(artRow(a, (depth + 1) * 14, false));
+      for (const kn of kids) box.appendChild(kn);
+      const caret = el("span", {}, "▾ ");
+      const header = el("div", { style:
+        `padding:5px 6px;font-weight:600;cursor:pointer;margin-left:${depth * 14}px` },
+        caret, el("span", {}, c.name),
+        el("span", { class: "muted", style: "font-weight:400;margin-left:6px;font-size:11px" },
+          `(${myArts.length})`));
+      header.onclick = () => {
+        box.hidden = !box.hidden; caret.textContent = box.hidden ? "▸ " : "▾ ";
+      };
+      return el("div", {}, header, box);
+    };
+
+    const render = () => {
+      tree.innerHTML = "";
+      const q = search.value.trim().toLowerCase();
+      if (q) {                                    // search → flat list of matching articles
+        const matches = arts.filter((a) =>
+          `${a.article_number || ""} ${a.description || ""} ${a.category_id ? categoryPath(cats, a.category_id) : ""}`
+            .toLowerCase().includes(q));
+        if (!matches.length) { tree.appendChild(el("p", { class: "muted" }, "Inga träffar.")); return; }
+        for (const a of matches) tree.appendChild(artRow(a, 2, true));
+        return;
+      }
+      let any = false;
+      for (const c of childCats(null)) { const n = catNode(c, 0); if (n) { tree.appendChild(n); any = true; } }
+      const uncat = arts.filter((a) => !a.category_id);
+      if (uncat.length) {
+        tree.appendChild(el("div", { style: "padding:5px 6px;font-weight:600" }, "Okategoriserade"));
+        for (const a of uncat) tree.appendChild(artRow(a, 14, false));
+        any = true;
+      }
+      if (!any) tree.appendChild(el("p", { class: "muted" }, "Inga artiklar ännu."));
+    };
+    search.oninput = render;
+    render();
+
+    $("#modal-ok").style.display = "none";        // pick by clicking an article; Avbryt cancels
+    $("#modal-cancel").textContent = "Avbryt";
+    $("#modal-cancel").onclick = () => finish(null);
+    $("#modal-backdrop").classList.remove("hidden");
+    search.focus();
+  });
+}
+
 function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatches) {
   const rowsBox = el("div", { class: "order-lines" });
   const cats = incomeCats || [];
@@ -4089,11 +4181,24 @@ function lineItemsEditor(incomeCats, onChange, initialLines, articles, loadBatch
     const descWrap = wrap("Beskrivning", desc);
     descWrap.style.flex = "1 0 100%";
     desc.style.width = "100%";
+    // "Bläddra…" opens the category → subcategory → article popup; picking one fills the
+    // row (reusing the dropdown's selection logic incl. the FIFO batch/price baseline).
+    const browseBtn = el("button", { type: "button", class: "btn small ghost",
+      title: "Bläddra artiklar per kategori", onclick: () => guard(async () => {
+        const aid = await articlePickerModal(cats, arts);
+        if (!aid) return;
+        const a = arts.find((x) => String(x.id) === String(aid));
+        catFilter.value = a && a.category_id ? String(a.category_id) : "";
+        refreshArticleOptions(aid);
+        pick.onchange();
+      }) }, "Bläddra…");
     // All the fields live in an editor box that we hide when the row is collapsed.
     const editorBox = el("div", { class: "line-editor",
       style: "display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;flex:1" },
       descWrap,
-      wrap("Produktkategori", catFilter), wrap("Artikel", pick), wrap("Kategori (BAS)", cat),
+      wrap("Produktkategori", catFilter),
+      wrap("Artikel", el("span", { style: "display:inline-flex;gap:4px;align-items:center" }, pick, browseBtn)),
+      wrap("Kategori (BAS)", cat),
       wrap("Antal", qty), wrap("Enhet", unit), wrap("À-pris ex moms", price),
       wrap("% rabatt", disc), wrap("Moms", rate), wrap("Husavdrag", red),
       wrap("Lagerbatch", batchSel), saveBtn);
