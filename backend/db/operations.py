@@ -2116,14 +2116,26 @@ class BookOps:
                + ("WHERE active=1 " if active_only else "") + "ORDER BY sort_order, id")
         return [dict(r) for r in self.conn.execute(sql).fetchall()]
 
-    def create_payment_method(self, label: str, value: str, sort_order: int = 0) -> int:
+    def create_payment_method(self, label: str, value: str,
+                              sort_order: Optional[int] = None) -> int:
         if not label or not value:
             raise ValueError("Payment method needs a label and a value")
+        if sort_order is None:            # append at the end of the current order
+            sort_order = self.conn.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM payment_method").fetchone()["n"]
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO payment_method(label, value, sort_order) VALUES (?,?,?)",
                 (label, value, sort_order))
         return cur.lastrowid
+
+    def reorder_payment_methods(self, ordered_ids: list) -> None:
+        """Set the display order of the payment methods to the given id sequence. The order
+        shows on the faktura for every UNPAID invoice (paid ones keep their frozen snapshot)."""
+        with self.conn:
+            for i, pid in enumerate(ordered_ids):
+                self.conn.execute("UPDATE payment_method SET sort_order=? WHERE id=?",
+                                  (i, int(pid)))
 
     def update_payment_method(self, payment_method_id: int, **fields) -> None:
         allowed = ("label", "value", "sort_order", "active")
@@ -2927,6 +2939,11 @@ class BookOps:
         inv["buyer"] = json.loads(self.session.decrypt_text(inv.pop("buyer_snapshot_enc")))
         inv["seller"] = json.loads(inv.pop("seller_snapshot") or "{}")
         inv["payment_methods"] = json.loads(inv.pop("payment_methods_snapshot") or "[]")
+        # An UNPAID invoice (customer still owes) shows the CURRENT active payment methods in
+        # their current order — so newly added / reordered betalsätt appear when the PDF is
+        # regenerated. A settled invoice keeps its frozen snapshot (historical accuracy).
+        if inv.get("state") in ("pending", "partial"):
+            inv["payment_methods"] = self.list_payment_methods(active_only=True)
         lk_enc = inv.pop("license_keys_enc", None)
         inv["license_keys"] = json.loads(self.session.decrypt_text(lk_enc)) if lk_enc else []
         da_enc = inv.pop("delivery_address_enc", None)

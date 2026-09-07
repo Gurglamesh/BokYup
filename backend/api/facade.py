@@ -729,7 +729,11 @@ class AppFacade:
 
     def h_create_payment_method(self, p, b, q):
         return {"id": self._ops(p["book_id"]).create_payment_method(
-            b["label"], b["value"], b.get("sort_order", 0))}
+            b["label"], b["value"], b.get("sort_order"))}
+
+    def h_reorder_payment_methods(self, p, b, q):
+        self._ops(p["book_id"]).reorder_payment_methods(b["ordered_ids"])
+        return {"ok": True}
 
     def h_update_payment_method(self, p, b, q):
         self._ops(p["book_id"]).update_payment_method(int(p["payment_method_id"]), **_clean(b))
@@ -993,6 +997,7 @@ _route("PUT", "/books/{book_id}/logo", "h_set_logo")
 _route("DELETE", "/books/{book_id}/logo", "h_delete_logo")
 _route("GET", "/books/{book_id}/payment-methods", "h_list_payment_methods")
 _route("POST", "/books/{book_id}/payment-methods", "h_create_payment_method", 201)
+_route("POST", "/books/{book_id}/payment-methods/reorder", "h_reorder_payment_methods")
 _route("PATCH", "/books/{book_id}/payment-methods/{payment_method_id}", "h_update_payment_method")
 _route("DELETE", "/books/{book_id}/payment-methods/{payment_method_id}", "h_delete_payment_method")
 _route("GET", "/books/{book_id}/invoice-drafts", "h_list_drafts")

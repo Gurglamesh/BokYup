@@ -1640,12 +1640,30 @@ const SECTION_RENDERERS = {
     // --- Payment methods ---
     panel.appendChild(el("h3", {}, "Betalsätt"));
     panel.appendChild(el("p", { class: "muted" }, "T.ex. Swish, Bankgiro, IBAN — namn + nummer/länk. "
-      + "Redigering påverkar inte redan skapade fakturor (de har egna kopior)."));
-    const pmActions = (m) => el("span", { style: "display:inline-flex;gap:4px" },
-      editBtn(() => guard(() => editPaymentMethod(m))),
-      el("button", { class: "btn small ghost", onclick: () => guard(() => togglePaymentMethod(m)) },
-        m.active ? "Inaktivera" : "Aktivera"),
-      el("button", { class: "btn small ghost danger", onclick: () => guard(() => deletePaymentMethod(m)) }, "Ta bort"));
+      + "Ordningen (↑/↓) visas på fakturan. Betalda fakturor behåller sin kopia; obetalda "
+      + "fakturor uppdateras med nya/ändrade betalsätt när du hämtar PDF:en på nytt."));
+    const movePaymentMethod = async (idx, dir) => {
+      const j = idx + dir;
+      if (j < 0 || j >= methods.length) return;
+      const ids = methods.map((x) => x.id);
+      [ids[idx], ids[j]] = [ids[j], ids[idx]];
+      await api("POST", `/books/${bid()}/payment-methods/reorder`, { ordered_ids: ids });
+      renderWorkspace();
+    };
+    const pmActions = (m) => {
+      const idx = methods.findIndex((x) => x.id === m.id);
+      const up = el("button", { class: "btn small ghost", title: "Flytta upp",
+        onclick: () => guard(() => movePaymentMethod(idx, -1)) }, "↑");
+      const down = el("button", { class: "btn small ghost", title: "Flytta ner",
+        onclick: () => guard(() => movePaymentMethod(idx, +1)) }, "↓");
+      up.disabled = idx <= 0;
+      down.disabled = idx >= methods.length - 1;
+      return el("span", { style: "display:inline-flex;gap:4px" }, up, down,
+        editBtn(() => guard(() => editPaymentMethod(m))),
+        el("button", { class: "btn small ghost", onclick: () => guard(() => togglePaymentMethod(m)) },
+          m.active ? "Inaktivera" : "Aktivera"),
+        el("button", { class: "btn small ghost danger", onclick: () => guard(() => deletePaymentMethod(m)) }, "Ta bort"));
+    };
     panel.appendChild(simpleTable(["Betalsätt", "Nummer/länk", "Aktiv", ""],
       methods.map((m) => [m.label, m.value,
         el("span", { class: "pill " + (m.active ? "paid" : "") }, m.active ? "Ja" : "Nej"),

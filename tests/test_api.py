@@ -647,6 +647,36 @@ class TestInvoices:
         assert client.get(f"/books/{book}/company").json()["name"] == "Min Firma AB"
         assert client.get(f"/books/{book}/payment-methods").json()[0]["label"] == "Swish"
 
+    def test_payment_methods_append_and_reorder(self, client, book):
+        a = client.post(f"/books/{book}/payment-methods", json={"label": "Swish", "value": "1"}).json()["id"]
+        b = client.post(f"/books/{book}/payment-methods", json={"label": "Bankgiro", "value": "2"}).json()["id"]
+        c = client.post(f"/books/{book}/payment-methods", json={"label": "IBAN", "value": "3"}).json()["id"]
+        order = [m["label"] for m in client.get(f"/books/{book}/payment-methods").json()]
+        assert order == ["Swish", "Bankgiro", "IBAN"]         # new ones append at the end
+        r = client.post(f"/books/{book}/payment-methods/reorder", json={"ordered_ids": [c, a, b]})
+        assert r.status_code == 200
+        order2 = [m["label"] for m in client.get(f"/books/{book}/payment-methods").json()]
+        assert order2 == ["IBAN", "Swish", "Bankgiro"]
+
+    def test_unpaid_invoice_uses_live_payment_methods(self, client, book):
+        cat, kid = self._setup(client, book)              # seeds a "Swish" method
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-15",
+            "due_date": "2026-04-15",
+            "lines": [{"description": "IT", "quantity_centi": 100, "unit_price_ore": 100000,
+                       "rate_code": "25"}]}).json()
+        iid = inv["invoice_id"]
+        # add a NEW payment method AFTER the invoice was issued
+        client.post(f"/books/{book}/payment-methods", json={"label": "Bankgiro", "value": "999-8888"})
+        pms = [m["label"] for m in client.get(f"/books/{book}/invoices/{iid}").json()["payment_methods"]]
+        assert "Bankgiro" in pms and "Swish" in pms        # unpaid -> live methods
+        # the PDF regenerates fine
+        assert client.get(f"/books/{book}/invoices/{iid}/pdf").content[:4] == b"%PDF"
+        # once paid, it keeps the frozen snapshot (no Bankgiro)
+        client.post(f"/books/{book}/invoices/{iid}/pay", json={"date": "2026-03-20"})
+        pms2 = [m["label"] for m in client.get(f"/books/{book}/invoices/{iid}").json()["payment_methods"]]
+        assert pms2 == ["Swish"]
+
     def test_support_disabled_earns_nothing(self, client, book):
         cat, kid = self._setup(client, book)
         inv = client.post(f"/books/{book}/invoices", json={

@@ -267,7 +267,11 @@ class LogoReq(BaseModel):
 class PaymentMethodReq(BaseModel):
     label: str                    # "Swish" | "Bankgiro" | "IBAN" | ...
     value: str                    # the number / link
-    sort_order: int = 0
+    sort_order: Optional[int] = None   # None = append at the end of the current order
+
+
+class PaymentMethodReorderReq(BaseModel):
+    ordered_ids: list[int]        # payment-method ids in the desired display order
 
 
 class PaymentMethodUpdateReq(BaseModel):

@@ -605,6 +605,10 @@ def _build_router():
     def create_payment_method(book_id: str, body: sc.PaymentMethodReq, request: Request):
         return fac(request).h_create_payment_method({"book_id": book_id}, body.model_dump(), {})
 
+    @r.post("/books/{book_id}/payment-methods/reorder")
+    def reorder_payment_methods(book_id: str, body: sc.PaymentMethodReorderReq, request: Request):
+        return fac(request).h_reorder_payment_methods({"book_id": book_id}, body.model_dump(), {})
+
     @r.patch("/books/{book_id}/payment-methods/{payment_method_id}")
     def update_payment_method(book_id: str, payment_method_id: int,
                               body: sc.PaymentMethodUpdateReq, request: Request):
