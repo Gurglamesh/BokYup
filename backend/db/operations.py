@@ -1330,13 +1330,20 @@ class BookOps:
     # Booking (money moved) — creates the immutable verifikation
     # ==================================================================
 
-    def register_payment(self, transaktion_id: int, payment_date: str) -> dict:
+    def register_payment(self, transaktion_id: int, payment_date: str, *,
+                         extra_fee_ore: int = 0,
+                         extra_fee_category_id: Optional[int] = None) -> dict:
         """
         Book a pending transaktion: create the verifikation + balanced postings,
         assign the next verifikationsnummer, and mark the transaktion paid.
 
         For a RUT sale this books the CUSTOMER portion (bank gets inc − rut, the rut
         part becomes a receivable) and advances the claim to 'customer_paid'.
+
+        `extra_fee_ore` (+ `extra_fee_category_id`) books an extra MOMSFRI cost on the
+        SAME verifikation — e.g. a Klarna/Qliro delbetalnings-/fakturaavgift for paying
+        an inköp later. It debits the fee's expense konto and adds it to the bank outflow,
+        so the payment still nets to zero. Only valid for a pending inköp (direction 'in').
         """
         t = self.conn.execute(
             "SELECT * FROM transaktion WHERE id=?", (transaktion_id,)
@@ -1345,6 +1352,18 @@ class BookOps:
             raise KeyError(f"No transaktion {transaktion_id}")
         if t["status"] == "paid":
             raise InvalidState("Transaktion is already paid")
+
+        fee = int(extra_fee_ore or 0)
+        fee_konto = None
+        if fee:
+            if fee < 0:
+                raise ValueError("Avgiften kan inte vara negativ")
+            if t["direction"] != "in" or t["verifikation_id"] is not None:
+                raise InvalidState("Extra avgift kan bara läggas på ett obetalt inköp")
+            if not extra_fee_category_id:
+                raise ValueError("Välj ett konto (kategori) för avgiften")
+            self._check_category(int(extra_fee_category_id), "expense")
+            fee_konto = self._category_konto(int(extra_fee_category_id))
 
         ex, moms_by_rate, inc = self._sum_moms(transaktion_id)
         sum_moms = sum(moms_by_rate.values())
@@ -1389,11 +1408,15 @@ class BookOps:
                 postings.append((self._sys_account("account_ingaende_moms"), sum_moms, "ingående moms"))
             # Öresavrundning (supplier rounded to whole kronor): the bank pays the rounded
             # total; ex-moms + ingående moms stay exact and the öre diff goes to 3740.
+            # An extra momsfri betaltjänstavgift (Klarna/Qliro) is debited to its own konto
+            # and added to the bank outflow (the fee is exact, never rounded).
             round_inc = _round_to_krona(inc) if t["ores_rounding"] else inc
-            postings.append((self._sys_account("account_bank"), -round_inc, "betalning"))
+            postings.append((self._sys_account("account_bank"), -(round_inc + fee), "betalning"))
             if round_inc != inc:
                 postings.append((self._sys_account("account_ores_kronutjamning"),
                                  round_inc - inc, "öresavrundning"))
+            if fee:
+                postings.append((fee_konto, fee, "betaltjänstavgift (momsfri)"))
             text = "Utgift"
         elif rut:  # 'out' — RUT/ROT faktura: öresavrundning on the customer's summa att betala
             # Per avrundningslagen the customer pays whole kronor, but per Skatteverket's
@@ -1421,6 +1444,14 @@ class BookOps:
             text = "Försäljning"
 
         with self.conn:
+            # Persist the fee as a momsfri moms_line (its own category) so the result report
+            # picks it up as a cost; momsfri → nothing in the momsdeklaration. Atomic with
+            # the booking, so a period-lock refusal rolls the fee line back too.
+            if fee:
+                self.conn.execute(
+                    "INSERT INTO moms_line(transaktion_id, rate_code, category_id, ex_moms_ore, "
+                    "moms_ore, inc_moms_ore) VALUES (?, 'momsfri', ?, ?, 0, ?)",
+                    (transaktion_id, int(extra_fee_category_id), fee, fee))
             vid, number = self._post_verifikation(payment_date, payment_date, text, postings)
             self.conn.execute(
                 "UPDATE transaktion SET status='paid', payment_date=?, verifikation_id=? WHERE id=?",

@@ -512,7 +512,10 @@ class AppFacade:
 
     def h_register_payment(self, p, b, q):
         ops = self._ops(p["book_id"])
-        return ops.register_payment(int(p["transaktion_id"]), b["payment_date"])
+        return ops.register_payment(
+            int(p["transaktion_id"]), b["payment_date"],
+            extra_fee_ore=int(b.get("extra_fee_ore") or 0),
+            extra_fee_category_id=b.get("extra_fee_category_id"))
 
     def h_rut_skatteverket_payment(self, p, b, q):
         ops = self._ops(p["book_id"])

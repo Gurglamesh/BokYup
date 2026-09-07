@@ -604,7 +604,7 @@ const SECTION_RENDERERS = {
         : ""),
       el("td", { class: "num" }, el("span", { style: "display:inline-flex;gap:4px;justify-content:flex-end" },
         t.status === "pending"
-          ? el("button", { class: "btn small", onclick: () => guard(() => payFlow(t.id)) }, "Bokför betalning")
+          ? el("button", { class: "btn small", onclick: () => guard(() => payFlow(t.id, { allowFee: t.direction === "in" })) }, "Bokför betalning")
           : null,
         // Ombokning gäller bara fristående inkomster/utgifter — fakturor/RUT rättas med kreditfaktura.
         (t.verifikation_id && !t.corrected && !t.invoice_backed && !t.rut)
@@ -698,7 +698,7 @@ const SECTION_RENDERERS = {
             onclick: () => guard(() => softDeleteInkop(t.id)) }, "Ta bort")
         : null,
       t.status === "pending"
-        ? el("button", { class: "btn small", onclick: () => guard(() => payFlow(t.id)) }, "Bokför betalning")
+        ? el("button", { class: "btn small", onclick: () => guard(() => payFlow(t.id, { allowFee: true })) }, "Bokför betalning")
         : null);
     panel.appendChild(searchTable(
       "Sök inköp (leverantör, nr, datum, kategori)…",
@@ -2343,13 +2343,33 @@ async function receiptsFlow(txId, isPending) {
     el("div", { class: "modal-actions" }, el("button", { class: "btn", onclick: () => ui.close() }, "Stäng")));
 }
 
-async function payFlow(txId) {
-  const f = await modal("Bokför betalning", [
-    { name: "payment_date", label: "Betaldatum", type: "date", value: new Date().toISOString().slice(0, 10) },
-  ], "Bokför");
+async function payFlow(txId, opts = {}) {
+  // `opts.allowFee` (inköp) adds an optional MOMSFRI betaltjänstavgift (Klarna/Qliro) that
+  // is booked on the same verifikation, to a chosen kostnadskonto.
+  const today = new Date().toISOString().slice(0, 10);
+  const fields = [{ name: "payment_date", label: "Betaldatum", type: "date", value: today }];
+  let allCats = [];
+  if (opts.allowFee) {
+    allCats = await api("GET", `/books/${bid()}/categories`);
+    const feeCats = allCats.filter((c) => c.kind === "expense" && c.active !== 0);
+    fields.push({ name: "extra_fee",
+      label: "Extra avgift – momsfri (t.ex. Klarna/Qliro), kr – valfritt", value: "" });
+    if (feeCats.length) {
+      fields.push({ name: "extra_fee_category_id", label: "Avgiften bokförs på (kostnadskonto)",
+        type: "select", options: feeCats.map((c) => ({ value: String(c.id), label: categoryPath(allCats, c.id) })) });
+    }
+  }
+  const f = await modal("Bokför betalning", fields, "Bokför");
   if (!f) return;
-  await api("POST", `/books/${bid()}/transaktioner/${txId}/pay`, { payment_date: f.payment_date });
-  toast("Betalning bokförd");
+  const body = { payment_date: f.payment_date };
+  const feeOre = f.extra_fee ? toOre(f.extra_fee) : 0;
+  if (feeOre > 0) {
+    if (!f.extra_fee_category_id) { toast("Välj kostnadskonto för avgiften", true); return; }
+    body.extra_fee_ore = feeOre;
+    body.extra_fee_category_id = parseInt(f.extra_fee_category_id, 10);
+  }
+  await api("POST", `/books/${bid()}/transaktioner/${txId}/pay`, body);
+  toast(feeOre > 0 ? "Betalning + avgift bokförd" : "Betalning bokförd");
   renderWorkspace();
 }
 

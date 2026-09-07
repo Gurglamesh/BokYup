@@ -191,6 +191,9 @@ class RecordIncomeReq(BaseModel):
 
 class PaymentReq(BaseModel):
     payment_date: str
+    # Optional extra momsfri betaltjänstavgift (Klarna/Qliro) booked with the inköp payment.
+    extra_fee_ore: Optional[int] = None
+    extra_fee_category_id: Optional[int] = None
 
 
 class SkatteverketPaymentReq(BaseModel):

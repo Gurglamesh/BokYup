@@ -219,6 +219,44 @@ class TestBookkeeping:
         client.post(f"/books/{book}/transaktioner/{tid}/pay", json={"payment_date": "2026-03-20"})
         assert row()["status"] == "paid"
 
+    def test_pay_inkop_with_extra_momsfri_fee(self, client, book):
+        # Pay a pending inköp and add a momsfri Klarna/Qliro-avgift booked to its own konto.
+        goods = client.post(f"/books/{book}/categories",
+                            json={"name": "Varor", "kind": "expense", "bas_konto": 4010}).json()["id"]
+        feecat = client.post(f"/books/{book}/categories",
+                             json={"name": "Betaltjänstavgift", "kind": "expense",
+                                   "bas_konto": 6570}).json()["id"]
+        res = client.post(f"/books/{book}/expenses", json={
+            "category_id": goods, "trans_date": "2026-03-01",
+            "lines": [{"rate_code": "25", "amount_ore": 100000, "inclusive": False}]}).json()
+        tid = res["transaktion_id"]
+        r = client.post(f"/books/{book}/transaktioner/{tid}/pay", json={
+            "payment_date": "2026-03-20", "extra_fee_ore": 5000,
+            "extra_fee_category_id": feecat})
+        assert r.status_code == 200
+        hb = {a["bas_konto"]: a for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[6570]["saldo_ore"] == 5000          # fee debited to 6570
+        assert hb[1930]["saldo_ore"] == -(125000 + 5000)   # bank pays goods inc + fee
+        assert hb[4010]["saldo_ore"] == 100000        # goods ex moms
+        assert hb[2640]["saldo_ore"] == 25000         # ingående moms (unchanged by fee)
+        # the fee is momsfri → it does not touch any output/moms box beyond ingående above
+        # and the inköp total now includes the fee
+        row = [t for t in client.get(f"/books/{book}/transaktioner").json() if t["id"] == tid][0]
+        assert row["amount_ore"] == 125000 + 5000
+
+    def test_extra_fee_needs_expense_category(self, client, book):
+        goods = client.post(f"/books/{book}/categories",
+                            json={"name": "Varor", "kind": "expense", "bas_konto": 4010}).json()["id"]
+        inccat = client.post(f"/books/{book}/categories",
+                             json={"name": "Sälj", "kind": "income", "bas_konto": 3001}).json()["id"]
+        tid = client.post(f"/books/{book}/expenses", json={
+            "category_id": goods, "trans_date": "2026-03-01",
+            "lines": [{"rate_code": "25", "amount_ore": 100000, "inclusive": False}]}).json()["transaktion_id"]
+        # an income category for the fee is rejected
+        assert client.post(f"/books/{book}/transaktioner/{tid}/pay", json={
+            "payment_date": "2026-03-20", "extra_fee_ore": 5000,
+            "extra_fee_category_id": inccat}).status_code in (400, 409)
+
     def test_reverse_creates_rattelse(self, client, book):
         res = self._setup_income(client, book).json()
         vid = res["verifikation_id"]
