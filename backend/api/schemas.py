@@ -162,6 +162,7 @@ class RecordExpenseReq(BaseModel):
     ext_ref: Optional[str] = None                   # supplier's kvitto-/fakturanummer
     ores_rounding: bool = False                     # supplier rounded the total to whole krona
     paid_date: Optional[str] = None
+    paid_account: Optional[str] = None              # 'bank' (1930) | 'privat' (2018) when paid now
 
 
 class ExpenseMetaReq(BaseModel):
@@ -195,6 +196,7 @@ class PaymentReq(BaseModel):
     extra_fee_ore: Optional[int] = None
     extra_fee_category_id: Optional[int] = None
     note: Optional[str] = None         # reference/comment → verifikation text
+    paid_account: Optional[str] = None  # 'bank' (1930) | 'privat' (2018 Egna insättningar)
 
 
 class SkatteverketPaymentReq(BaseModel):

@@ -2357,6 +2357,12 @@ async function payFlow(txId, opts = {}) {
   ];
   let allCats = [];
   if (opts.allowFee) {
+    // Inköp: which account the money was drawn from — the company bank (1930) or private
+    // money (2018 Egna insättningar, when you paid a firma cost from your own pocket).
+    fields.push({ name: "paid_account", label: "Pengarna dras från", type: "select",
+      value: "bank", options: [
+        { value: "bank", label: "Företagskonto" },
+        { value: "privat", label: "Privat insättning (privat konto)" }] });
     allCats = await api("GET", `/books/${bid()}/categories`);
     const feeCats = allCats.filter((c) => c.kind === "expense" && c.active !== 0);
     fields.push({ name: "extra_fee",
@@ -2370,6 +2376,7 @@ async function payFlow(txId, opts = {}) {
   if (!f) return;
   const body = { payment_date: f.payment_date };
   if (f.note && f.note.trim()) body.note = f.note.trim();
+  if (f.paid_account) body.paid_account = f.paid_account;
   const feeOre = f.extra_fee ? toOre(f.extra_fee) : 0;
   if (feeOre > 0) {
     if (!f.extra_fee_category_id) { toast("Välj kostnadskonto för avgiften", true); return; }
@@ -3525,8 +3532,19 @@ async function purchaseForm(panel, draft, edit) {
   if (dp.paid === "no") paidNow.value = "no";
   const payDate = el("input", { type: "date", value: today });
   const payDateWrap = wrap("Betaldatum", payDate);
-  paidNow.onchange = () => { payDateWrap.style.display = paidNow.value === "yes" ? "" : "none"; };
-  payDateWrap.style.display = paidNow.value === "yes" ? "" : "none";
+  // Which account the money is drawn from (only when paid now): company bank or private.
+  const paidAccount = el("select", {},
+    el("option", { value: "bank" }, "Företagskonto"),
+    el("option", { value: "privat" }, "Privat insättning (privat konto)"));
+  if (dp.paid_account) paidAccount.value = dp.paid_account;
+  const paidAccountWrap = wrap("Pengarna dras från", paidAccount);
+  const syncPaid = () => {
+    const on = paidNow.value === "yes";
+    payDateWrap.style.display = on ? "" : "none";
+    paidAccountWrap.style.display = on ? "" : "none";
+  };
+  paidNow.onchange = syncPaid;
+  syncPaid();
   // Öresavrundning: only when the supplier rounds the total to whole kronor. Off by default.
   const ores = el("input", { type: "checkbox" });
   if (dp.ores_rounding) ores.checked = true;
@@ -3550,7 +3568,7 @@ async function purchaseForm(panel, draft, edit) {
     supplier_id: supplier.value ? parseInt(supplier.value, 10) : null,
     category_id: cat.value ? parseInt(cat.value, 10) : null,
     trans_date: date.value, ext_ref: extRef.value || null, paid: paidNow.value,
-    ores_rounding: ores.checked, items: items.get(),
+    paid_account: paidAccount.value, ores_rounding: ores.checked, items: items.get(),
   });
   async function saveDraft() {
     const payload = draftPayload();
@@ -3567,10 +3585,10 @@ async function purchaseForm(panel, draft, edit) {
     wrap("Kvitto-/fakturanummer", extRef)));
   // Editing an unbooked inköp never changes its booking status — it stays a pending
   // leverantörsfaktura; only the fields change. So hide the pay controls in edit mode.
-  if (editId) { paidNow.value = "no"; payDateWrap.style.display = "none"; }
+  if (editId) { paidNow.value = "no"; payDateWrap.style.display = "none"; paidAccountWrap.style.display = "none"; }
   panel.appendChild(editId
     ? el("div", { class: "row" }, wrap("Inköpsdatum", date))
-    : el("div", { class: "row" }, wrap("Inköpsdatum", date), wrap("Betald?", paidNow), payDateWrap));
+    : el("div", { class: "row" }, wrap("Inköpsdatum", date), wrap("Betald?", paidNow), payDateWrap, paidAccountWrap));
   panel.appendChild(el("div", { style: "margin-top:6px" }, oresWrap));
   panel.appendChild(el("div", { style: "margin-top:6px" },
     el("label", {}, "Artiklar (namnge en rad → den läggs i lager som en batch)"), items.element));
@@ -3617,7 +3635,7 @@ async function purchaseForm(panel, draft, edit) {
       supplier_id: parseInt(supplier.value, 10),
       category_id: parseInt(cat.value, 10), items: rows, trans_date: date.value,
       ext_ref: extRef.value || null, paid_date, receipt_original_format: fmt,
-      ores_rounding: ores.checked,
+      ores_rounding: ores.checked, paid_account: paid_date ? paidAccount.value : null,
     });
     const staged = receipt.getStaged();
     if (staged) {

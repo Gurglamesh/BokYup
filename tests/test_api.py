@@ -244,6 +244,31 @@ class TestBookkeeping:
         row = [t for t in client.get(f"/books/{book}/transaktioner").json() if t["id"] == tid][0]
         assert row["amount_ore"] == 125000 + 5000
 
+    def test_pay_inkop_from_private_account(self, client, book):
+        # Paying a firma cost with private money credits 2018 Egna insättningar, not 1930.
+        goods = client.post(f"/books/{book}/categories",
+                            json={"name": "Varor", "kind": "expense", "bas_konto": 4010}).json()["id"]
+        tid = client.post(f"/books/{book}/expenses", json={
+            "category_id": goods, "trans_date": "2026-03-01",
+            "lines": [{"rate_code": "25", "amount_ore": 100000, "inclusive": False}]}).json()["transaktion_id"]
+        r = client.post(f"/books/{book}/transaktioner/{tid}/pay",
+                        json={"payment_date": "2026-03-20", "paid_account": "privat"})
+        assert r.status_code == 200
+        hb = {a["bas_konto"]: a for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[2018]["saldo_ore"] == -125000        # funded from private money (egna insättningar)
+        assert 1930 not in hb                          # bank untouched
+        assert hb[4010]["saldo_ore"] == 100000 and hb[2640]["saldo_ore"] == 25000
+
+    def test_pay_inkop_from_bank_default(self, client, book):
+        goods = client.post(f"/books/{book}/categories",
+                            json={"name": "Varor", "kind": "expense", "bas_konto": 4010}).json()["id"]
+        tid = client.post(f"/books/{book}/expenses", json={
+            "category_id": goods, "trans_date": "2026-03-01",
+            "lines": [{"rate_code": "25", "amount_ore": 100000, "inclusive": False}]}).json()["transaktion_id"]
+        client.post(f"/books/{book}/transaktioner/{tid}/pay", json={"payment_date": "2026-03-20"})
+        hb = {a["bas_konto"]: a for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[1930]["saldo_ore"] == -125000 and 2018 not in hb
+
     def test_payment_note_in_verifikation_text(self, client, book):
         goods = client.post(f"/books/{book}/categories",
                             json={"name": "Varor", "kind": "expense", "bas_konto": 4010}).json()["id"]

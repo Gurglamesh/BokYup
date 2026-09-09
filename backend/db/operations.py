@@ -76,6 +76,7 @@ class InvalidState(OperationError):
 
 _SYS_ACCOUNT_NAMES = {
     "account_bank": "Företagskonto / bank",
+    "account_egna_insattningar": "Egna insättningar (privat)",
     "account_ingaende_moms": "Ingående moms",
     "account_utgaende_moms_25": "Utgående moms 25 %",
     "account_utgaende_moms_12": "Utgående moms 12 %",
@@ -1053,14 +1054,17 @@ class BookOps:
                        receipt_original_format: Optional[str] = None,
                        ext_ref: Optional[str] = None,
                        ores_rounding: bool = False,
-                       paid_date: Optional[str] = None) -> dict:
+                       paid_date: Optional[str] = None,
+                       paid_account: str = "bank") -> dict:
         """
         Record a purchase (ingående moms, deductible). `lines` is a list of
         {rate_code, amount_ore, inclusive} dicts. `ext_ref` is the supplier's
         kvitto-/fakturanummer. `ores_rounding` books the paid total to whole kronor
         (supplier öresavrundning) with the öre diff to 3740 (moms/underlag stay exact).
         If `paid_date` is given the transaktion is booked immediately (cash); otherwise
-        it stays pending (an incoming supplier invoice — mark it paid later).
+        it stays pending (an incoming supplier invoice — mark it paid later). `paid_account`
+        chooses the funding source at payment: 'bank' (1930) or 'privat' (2018 Egna
+        insättningar — paid from private money).
         """
         self._check_category(category_id, "expense")
         tid = self._insert_transaktion(
@@ -1075,7 +1079,7 @@ class BookOps:
                 self.conn.execute("UPDATE transaktion SET ores_rounding=1 WHERE id=?", (tid,))
         result = {"transaktion_id": tid}
         if paid_date:
-            result.update(self.register_payment(tid, paid_date))
+            result.update(self.register_payment(tid, paid_date, paid_account=paid_account))
         return result
 
     def update_expense_meta(self, transaktion_id: int, *,
@@ -1333,7 +1337,8 @@ class BookOps:
     def register_payment(self, transaktion_id: int, payment_date: str, *,
                          extra_fee_ore: int = 0,
                          extra_fee_category_id: Optional[int] = None,
-                         note: Optional[str] = None) -> dict:
+                         note: Optional[str] = None,
+                         paid_account: str = "bank") -> dict:
         """
         Book a pending transaktion: create the verifikation + balanced postings,
         assign the next verifikationsnummer, and mark the transaktion paid.
@@ -1370,6 +1375,16 @@ class BookOps:
                 raise ValueError("Välj ett konto (kategori) för avgiften")
             self._check_category(int(extra_fee_category_id), "expense")
             fee_konto = self._category_konto(int(extra_fee_category_id))
+
+        # Funding source for an inköp payment: the company bank account (1930) or private
+        # money (2018 Egna insättningar — you paid a firma cost from your own pocket).
+        if paid_account not in ("bank", "privat"):
+            raise ValueError("Okänt betalkonto")
+        if paid_account == "privat" and (t["direction"] != "in" or t["verifikation_id"] is not None):
+            raise InvalidState("Privat insättning kan bara väljas för ett obetalt inköp")
+        outflow_konto = self._sys_account(
+            "account_egna_insattningar" if paid_account == "privat" else "account_bank")
+        outflow_label = "betalning (privat insättning)" if paid_account == "privat" else "betalning"
 
         ex, moms_by_rate, inc = self._sum_moms(transaktion_id)
         sum_moms = sum(moms_by_rate.values())
@@ -1417,7 +1432,7 @@ class BookOps:
             # An extra momsfri betaltjänstavgift (Klarna/Qliro) is debited to its own konto
             # and added to the bank outflow (the fee is exact, never rounded).
             round_inc = _round_to_krona(inc) if t["ores_rounding"] else inc
-            postings.append((self._sys_account("account_bank"), -(round_inc + fee), "betalning"))
+            postings.append((outflow_konto, -(round_inc + fee), outflow_label))
             if round_inc != inc:
                 postings.append((self._sys_account("account_ores_kronutjamning"),
                                  round_inc - inc, "öresavrundning"))

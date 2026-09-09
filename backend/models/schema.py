@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -583,6 +583,7 @@ _DEFAULT_CONFIG = {
     # System BAS-konton used by the booking engine (Layer 4). Editable so a
     # revisor can map them to the entity's chart. Defaults follow standard BAS.
     "account_bank": "1930",                 # Företagskonto / bank
+    "account_egna_insattningar": "2018",    # Egna insättningar (paid with private money)
     "account_ingaende_moms": "2640",        # Ingående moms (deductible)
     "account_utgaende_moms_25": "2610",     # Utgående moms 25 %
     "account_utgaende_moms_12": "2620",     # Utgående moms 12 %
@@ -1025,6 +1026,9 @@ _MIGRATIONS: dict[int, str] = {
             reason          TEXT NOT NULL,
             created_at      TEXT NOT NULL
         );
+    """,
+    38: """
+        INSERT OR IGNORE INTO config(key, value) VALUES ('account_egna_insattningar', '2018');
     """,
 }
 

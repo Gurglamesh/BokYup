@@ -470,6 +470,17 @@ class TestMigration:
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert "stock_adjustment" in tables
 
+    def test_migrate_v38_seeds_egna_insattningar_account(self):
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        S.initialize_schema(db)
+        db.execute("DELETE FROM config WHERE key='account_egna_insattningar'")
+        db.execute("PRAGMA user_version = 37")
+        db.commit()
+        assert S.migrate(db) == S.SCHEMA_VERSION
+        v = db.execute("SELECT value FROM config WHERE key='account_egna_insattningar'").fetchone()
+        assert v is not None and v["value"] == "2018"
+
     def test_migrate_is_idempotent(self, conn):
         before = S.get_schema_version(conn)
         assert S.migrate(conn) == before     # already current -> no-op

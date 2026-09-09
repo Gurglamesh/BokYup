@@ -449,7 +449,7 @@ class AppFacade:
                 b["trans_date"], note=b.get("note"),
                 receipt_original_format=b.get("receipt_original_format"),
                 ext_ref=b.get("ext_ref"), ores_rounding=bool(b.get("ores_rounding")),
-                paid_date=b.get("paid_date"))
+                paid_date=b.get("paid_date"), paid_account=b.get("paid_account") or "bank")
             res["batches"] = self._apply_expense_batches(
                 ops, res["transaktion_id"], items, b["trans_date"], b.get("supplier_id"))
             return res
@@ -457,7 +457,7 @@ class AppFacade:
             b.get("supplier_id"), b["category_id"], b["lines"], b["trans_date"],
             note=b.get("note"), receipt_original_format=b.get("receipt_original_format"),
             ext_ref=b.get("ext_ref"), ores_rounding=bool(b.get("ores_rounding")),
-            paid_date=b.get("paid_date"),
+            paid_date=b.get("paid_date"), paid_account=b.get("paid_account") or "bank",
         )
 
     def h_update_expense(self, p, b, q):
@@ -516,7 +516,7 @@ class AppFacade:
             int(p["transaktion_id"]), b["payment_date"],
             extra_fee_ore=int(b.get("extra_fee_ore") or 0),
             extra_fee_category_id=b.get("extra_fee_category_id"),
-            note=b.get("note"))
+            note=b.get("note"), paid_account=b.get("paid_account") or "bank")
 
     def h_rut_skatteverket_payment(self, p, b, q):
         ops = self._ops(p["book_id"])
