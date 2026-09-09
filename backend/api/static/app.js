@@ -2347,7 +2347,10 @@ async function payFlow(txId, opts = {}) {
   // `opts.allowFee` (inköp) adds an optional MOMSFRI betaltjänstavgift (Klarna/Qliro) that
   // is booked on the same verifikation, to a chosen kostnadskonto.
   const today = new Date().toISOString().slice(0, 10);
-  const fields = [{ name: "payment_date", label: "Betaldatum", type: "date", value: today }];
+  const fields = [
+    { name: "payment_date", label: "Betaldatum", type: "date", value: today },
+    { name: "note", label: "Referens / kommentar (valfritt)", value: "" },
+  ];
   let allCats = [];
   if (opts.allowFee) {
     allCats = await api("GET", `/books/${bid()}/categories`);
@@ -2362,6 +2365,7 @@ async function payFlow(txId, opts = {}) {
   const f = await modal("Bokför betalning", fields, "Bokför");
   if (!f) return;
   const body = { payment_date: f.payment_date };
+  if (f.note && f.note.trim()) body.note = f.note.trim();
   const feeOre = f.extra_fee ? toOre(f.extra_fee) : 0;
   if (feeOre > 0) {
     if (!f.extra_fee_category_id) { toast("Välj kostnadskonto för avgiften", true); return; }
@@ -4606,10 +4610,12 @@ async function payInvoiceFlow(iv) {
   const f = await modal(`Betalning faktura ${iv.invoice_number}`, [
     { name: "amount", label: "Belopp (kr) — kvar att betala", value: toKr(iv.outstanding_ore) },
     { name: "date", label: "Betaldatum", type: "date", value: new Date().toISOString().slice(0, 10) },
+    { name: "note", label: "Referens / kommentar (valfritt)", value: "" },
   ], "Bokför betalning");
   if (!f) return;
   const body = { date: f.date || null };
   if (f.amount) body.amount_ore = toOre(f.amount);
+  if (f.note && f.note.trim()) body.note = f.note.trim();
   const res = await api("POST", `/books/${bid()}/invoices/${iv.id}/pay`, body);
   toast(res.outstanding_ore > 0
     ? `Delbetalning bokförd — ${toKr(res.outstanding_ore)} kr kvar`

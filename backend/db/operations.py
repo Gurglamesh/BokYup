@@ -1332,7 +1332,8 @@ class BookOps:
 
     def register_payment(self, transaktion_id: int, payment_date: str, *,
                          extra_fee_ore: int = 0,
-                         extra_fee_category_id: Optional[int] = None) -> dict:
+                         extra_fee_category_id: Optional[int] = None,
+                         note: Optional[str] = None) -> dict:
         """
         Book a pending transaktion: create the verifikation + balanced postings,
         assign the next verifikationsnummer, and mark the transaktion paid.
@@ -1344,6 +1345,9 @@ class BookOps:
         SAME verifikation — e.g. a Klarna/Qliro delbetalnings-/fakturaavgift for paying
         an inköp later. It debits the fee's expense konto and adds it to the bank outflow,
         so the payment still nets to zero. Only valid for a pending inköp (direction 'in').
+
+        `note` is a free reference/comment appended to the verifikation's text (e.g. an
+        OCR- or betalningsreferens), so it becomes part of the bookkeeping description.
         """
         t = self.conn.execute(
             "SELECT * FROM transaktion WHERE id=?", (transaktion_id,)
@@ -1352,6 +1356,8 @@ class BookOps:
             raise KeyError(f"No transaktion {transaktion_id}")
         if t["status"] == "paid":
             raise InvalidState("Transaktion is already paid")
+
+        note_suffix = f" – {note.strip()}" if note and note.strip() else ""
 
         fee = int(extra_fee_ore or 0)
         fee_konto = None
@@ -1391,7 +1397,7 @@ class BookOps:
                                      cust_exact - round_cust, "öresavrundning"))
             with self.conn:
                 vid, number = self._post_verifikation(
-                    payment_date, payment_date, "Betalning faktura", postings)
+                    payment_date, payment_date, "Betalning faktura" + note_suffix, postings)
                 self.conn.execute(
                     "UPDATE transaktion SET status='paid', payment_date=? WHERE id=?",
                     (payment_date, transaktion_id))
@@ -1417,7 +1423,7 @@ class BookOps:
                                  round_inc - inc, "öresavrundning"))
             if fee:
                 postings.append((fee_konto, fee, "betaltjänstavgift (momsfri)"))
-            text = "Utgift"
+            text = "Utgift" + note_suffix
         elif rut:  # 'out' — RUT/ROT faktura: öresavrundning on the customer's summa att betala
             # Per avrundningslagen the customer pays whole kronor, but per Skatteverket's
             # ställningstagande the avrundning may NOT touch the beskattningsunderlag or the
@@ -1434,14 +1440,14 @@ class BookOps:
             if round_cust != cust_exact:
                 postings.append((self._sys_account("account_ores_kronutjamning"),
                                  cust_exact - round_cust, "öresavrundning"))
-            text = "Försäljning"
+            text = "Försäljning" + note_suffix
         else:  # 'out' — plain sale (not a faktura): booked exact, no öresavrundning
             postings = [(self._sys_account("account_bank"), inc, "inbetalning")]
             postings.extend((k, -ex_k, "försäljning") for k, ex_k in income_splits)
             for rate_code, m in moms_by_rate.items():
                 if m and rate_code in _UTG_MOMS_KEY:
                     postings.append((self._sys_account(_UTG_MOMS_KEY[rate_code]), -m, f"utgående moms {rate_code}%"))
-            text = "Försäljning"
+            text = "Försäljning" + note_suffix
 
         with self.conn:
             # Persist the fee as a momsfri moms_line (its own category) so the result report
@@ -3169,16 +3175,18 @@ class BookOps:
     # ---- settlement subledger: partial payments / refunds / credits ----------
 
     def pay_invoice(self, invoice_id: int, amount_ore: Optional[int] = None,
-                    date: Optional[str] = None) -> dict:
+                    date: Optional[str] = None, note: Optional[str] = None) -> dict:
         """
         Register a customer payment against an invoice (partial or full). Books the
         cash and records an invoice_event; the invoice's outstanding balance + state
         follow from the events. `amount_ore` defaults to the full outstanding amount.
         RUT invoices use the full register_payment + Skatteverket flow instead.
+
+        `note` is a free reference/comment appended to the verifikation text.
         """
         inv, bal = self._require_open_invoice(invoice_id)
         if inv["husavdrag_shortfall_ore"]:
-            return self._pay_husavdrag_shortfall(inv, bal, amount_ore, date)
+            return self._pay_husavdrag_shortfall(inv, bal, amount_ore, date, note=note)
         if inv["rut_total_ore"] or inv["rot_total_ore"]:
             raise InvalidState("RUT/ROT invoices: use the full payment + Skatteverket flow")
         amount = bal["outstanding_ore"] if amount_ore is None else int(amount_ore)
@@ -3188,7 +3196,8 @@ class BookOps:
             raise InvalidState("Payment exceeds the outstanding amount")
         date = date or _now()[:10]
         tid = inv["transaktion_id"]
-        text = f"Betalning faktura {inv['invoice_number']}"
+        text = f"Betalning faktura {inv['invoice_number']}" + (
+            f" – {note.strip()}" if note and note.strip() else "")
         # Öresavrundning: when this payment settles the invoice in full, the customer pays
         # a whole-krona summa att betala. The öre difference (never the underlag/moms) is
         # shaved off the bank into 3740; a partly-paid invoice books exact until it closes.
@@ -3213,7 +3222,7 @@ class BookOps:
         return {"invoice_id": invoice_id, "verifikation_id": vid, "ver_number": num,
                 "amount_ore": amount, "outstanding_ore": self._invoice_balances(invoice_id)["outstanding_ore"]}
 
-    def _pay_husavdrag_shortfall(self, inv, bal, amount_ore, date) -> dict:
+    def _pay_husavdrag_shortfall(self, inv, bal, amount_ore, date, note=None) -> dict:
         """Settle a husavdrag follow-up invoice: pure receivable collection (bank ←
         1510), no income/moms recognition (already booked at the original sale)."""
         amount = bal["outstanding_ore"] if amount_ore is None else int(amount_ore)
@@ -3222,7 +3231,8 @@ class BookOps:
         if amount > bal["outstanding_ore"]:
             raise InvalidState("Payment exceeds the outstanding amount")
         date = date or _now()[:10]
-        text = f"Betalning faktura {inv['invoice_number']} (kvarstående husavdrag)"
+        text = f"Betalning faktura {inv['invoice_number']} (kvarstående husavdrag)" + (
+            f" – {note.strip()}" if note and note.strip() else "")
         postings = [(self._sys_account("account_bank"), amount, "inbetalning"),
                     (self._sys_account("account_kundfordran"), -amount, "kvitta kundfordran")]
         with self.conn:

@@ -244,6 +244,18 @@ class TestBookkeeping:
         row = [t for t in client.get(f"/books/{book}/transaktioner").json() if t["id"] == tid][0]
         assert row["amount_ore"] == 125000 + 5000
 
+    def test_payment_note_in_verifikation_text(self, client, book):
+        goods = client.post(f"/books/{book}/categories",
+                            json={"name": "Varor", "kind": "expense", "bas_konto": 4010}).json()["id"]
+        tid = client.post(f"/books/{book}/expenses", json={
+            "category_id": goods, "trans_date": "2026-03-01",
+            "lines": [{"rate_code": "25", "amount_ore": 100000, "inclusive": False}]}).json()["transaktion_id"]
+        client.post(f"/books/{book}/transaktioner/{tid}/pay",
+                    json={"payment_date": "2026-03-20", "note": "OCR 4567 Klarna"})
+        vers = client.get(f"/books/{book}/verifikationer-full").json()
+        texts = " ".join(v.get("text", "") for v in vers)
+        assert "OCR 4567 Klarna" in texts and "Utgift – OCR 4567 Klarna" in texts
+
     def test_extra_fee_needs_expense_category(self, client, book):
         goods = client.post(f"/books/{book}/categories",
                             json={"name": "Varor", "kind": "expense", "bas_konto": 4010}).json()["id"]

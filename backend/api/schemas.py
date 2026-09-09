@@ -194,6 +194,7 @@ class PaymentReq(BaseModel):
     # Optional extra momsfri betaltjänstavgift (Klarna/Qliro) booked with the inköp payment.
     extra_fee_ore: Optional[int] = None
     extra_fee_category_id: Optional[int] = None
+    note: Optional[str] = None         # reference/comment → verifikation text
 
 
 class SkatteverketPaymentReq(BaseModel):
@@ -389,6 +390,7 @@ class DeliveryAddressReq(BaseModel):
 class PayInvoiceReq(BaseModel):
     amount_ore: Optional[int] = None   # None = full outstanding
     date: Optional[str] = None
+    note: Optional[str] = None         # reference/comment → verifikation text
 
 
 class RefundInvoiceReq(BaseModel):
