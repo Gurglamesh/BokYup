@@ -603,6 +603,7 @@ _DEFAULT_CONFIG = {
     "kommunal_skattesats_pct_centi": "3237",     # kommunalskatt (SET YOUR KOMMUN)
     "begravningsavgift_pct_centi": "0",          # begravningsavgift (set your församling, t.ex. 7 = 0,07 %)
     "egenavgift_pct_centi": "2897",              # egenavgifter 28,97 %
+    "egenavgift_schablon_pct_centi": "2500",     # schablonavdrag för egenavgifter 25 %
     "egenavgift_nedsattning_pct_centi": "750",   # generell nedsättning 7,5 %
     "egenavgift_nedsattning_max_ore": "1500000", #   … max 15 000 kr/år
     "egenavgift_nedsattning_threshold_ore": "4000000",  # kräver överskott > 40 000 kr

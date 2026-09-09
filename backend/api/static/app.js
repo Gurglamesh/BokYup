@@ -1295,6 +1295,7 @@ const SECTION_RENDERERS = {
     ["kommunal_skattesats_pct_centi", "pct", "Kommunalskatt %"],
     ["begravningsavgift_pct_centi", "pct", "Begravningsavgift %"],
     ["egenavgift_pct_centi", "pct", "Egenavgifter %"],
+    ["egenavgift_schablon_pct_centi", "pct", "Schablonavdrag egenavg. %"],
     ["egenavgift_nedsattning_pct_centi", "pct", "Nedsättning egenavg. %"],
     ["egenavgift_nedsattning_max_ore", "ore", "Nedsättning max (kr)"],
     ["public_service_pct_centi", "pct", "Public service %"],
@@ -1398,7 +1399,10 @@ const SECTION_RENDERERS = {
       out.appendChild(el("div", { class: "box", style: "margin-top:14px" },
         el("div", { class: "row" },
           kv("Firmans överskott", r.overskott_ore),
-          kv("Att sätta undan (firman)", r.firma_total_ore, true))));
+          kv("Att sätta undan (firman)", r.firma_total_ore, true)),
+        el("p", { class: "muted", style: "margin:6px 0 0;font-size:12px" },
+          `− schablonavdrag egenavgifter ${toKr(r.schablonavdrag_ore || 0)} kr `
+          + `= avgiftsunderlag ${toKr(r.avgiftsunderlag_ore || 0)} kr (bas för egenavgifter + inkomstskatt)`)));
       out.appendChild(el("table", { style: "width:100%;margin-top:14px" },
         el("thead", {}, el("tr", {}, el("th", {}, "Firmans skatt"), el("th", { class: "num" }, "Belopp"), el("th", {}, ""))),
         el("tbody", {}, r.lines.map((l) => row(l.label, l.amount_ore, l.note)),

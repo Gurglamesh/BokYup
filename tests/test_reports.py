@@ -181,32 +181,48 @@ class TestTaxEstimate:
         ops.record_income(kid, cat, [{"rate_code": "25", "amount_ore": overskott_kr * 100,
                                       "inclusive": False}], "2026-03-01", paid_date="2026-03-01")
 
-    def test_egenavgifter_and_firma_only_matches_skatteverket(self, ops):
+    def test_egenavgifter_uses_schablonavdrag_and_avgiftsunderlag(self, ops):
         from backend.reports import tax as tax_mod
         self._firma(ops, 100000)                        # firma 100 000, no salary
         est = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
         assert est["overskott_ore"] == 10000000
-        assert est["egenavgifter"]["netto_ore"] == 2147000     # 28 970 − 7 500 = 21 470 kr
-        # SKV "beräknad skatt" 30 616 kr (egenavgifter + inkomstskatt) — exact (Beräkningskonventioner 2026)
-        assert abs(est["overview"]["total_skatt_ore"] - 3061600) <= 200
+        # Schablonavdrag för egenavgifter 25 % -> avgiftsunderlag 75 000; BOTH the egenavgift %
+        # and the 7,5 % nedsättning apply to that underlag (not the gross överskott).
+        assert est["schablonavdrag_ore"] == 2500000
+        assert est["avgiftsunderlag_ore"] == 7500000
+        assert est["egenavgifter"]["netto_ore"] == 1610300     # (28,97 − 7,5) % × 75 000 = 16 103 kr
+        # income tax is computed on the reduced (post-schablon) näringsinkomst — the whole
+        # estimate then set-aside (verify against SKV "Räkna ut din skatt" / revisor).
+        assert abs(est["overview"]["total_skatt_ore"] - 2050600) <= 300
+
+    def test_egenavgifter_matches_hand_calc_for_odd_overskott(self, ops):
+        # The user's real case: 85 273 -> schablon 21 318 -> avgiftsunderlag 63 955 ->
+        # (28,97 − 7,5) % × 63 955 = 13 731 kr.
+        from backend.reports import tax as tax_mod
+        self._firma(ops, 85273)
+        est = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
+        assert est["avgiftsunderlag_ore"] == 6395475          # 85 273 − 25 % = 63 954,75 kr
+        assert est["egenavgifter"]["netto_ore"] == 1373100    # (28,97 − 7,5) % × underlag = 13 731 kr
 
     def test_salary_shifts_firma_into_marginal_bracket(self, ops):
         from backend.reports import tax as tax_mod
         self._firma(ops, 100000, salary_ore=46200000)   # + lön 462 000 kr
         est = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
-        # SKV: total (562k) 138 481; lön only 87 628; firma marginal 50 853 (excl moms) — exact
-        assert abs(est["overview"]["total_skatt_ore"] - 13848100) <= 200
+        # income-tax formula still matches SKV for the salary alone (schablonavdrag never
+        # touches employment income): lön 462 000 -> 87 628 kr.
         assert abs(est["overview"]["salary_skatt_ore"] - 8762800) <= 200
-        assert abs(est["firma_tax_ore"] - 5085300) <= 200
-        # the firma's marginal income tax is much higher than firma-alone (salary used the
-        # grundavdrag + low brackets already)
-        assert est["firma_income_tax_ore"] > 2500000
+        # firma set-aside is now on the post-schablon base (egenavgifter 16 103 + marginal
+        # income tax on the reduced näringsinkomst).
+        assert abs(est["firma_tax_ore"] - 3783200) <= 300
+        # the firma's marginal income tax is still much higher than firma-alone (salary used
+        # the grundavdrag + low brackets already)
+        assert est["firma_income_tax_ore"] > 2000000
 
     def test_egenavgifter_only_on_firma_not_salary(self, ops):
         from backend.reports import tax as tax_mod
         self._firma(ops, 100000, salary_ore=46200000)
         est = tax_mod.tax_estimate(ops.conn, "2026-01-01", "2026-12-31")
-        assert est["egenavgifter"]["netto_ore"] == 2147000     # unchanged by salary
+        assert est["egenavgifter"]["netto_ore"] == 1610300     # unchanged by salary
 
     def test_jobbskatteavdrag_coefficients_are_config_driven(self, ops):
         from backend.reports import tax as tax_mod

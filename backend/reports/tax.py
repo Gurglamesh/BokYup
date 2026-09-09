@@ -41,6 +41,7 @@ CONFIG_FIELDS = [
     ("kommunal_skattesats_pct_centi", "pct", "Kommunalskatt %"),
     ("begravningsavgift_pct_centi", "pct", "Begravningsavgift %"),
     ("egenavgift_pct_centi", "pct", "Egenavgifter %"),
+    ("egenavgift_schablon_pct_centi", "pct", "Schablonavdrag egenavgifter %"),
     ("egenavgift_nedsattning_pct_centi", "pct", "Nedsättning egenavgifter %"),
     ("egenavgift_nedsattning_max_ore", "ore", "Nedsättning max"),
     ("egenavgift_nedsattning_threshold_ore", "ore", "Nedsättning kräver överskott >"),
@@ -149,14 +150,16 @@ def _income_tax(fi_ore: int, c: dict) -> dict:
             "tax_ore": tax * 100}
 
 
-def _egenavgifter(overskott_ore: int, c: dict) -> dict:
-    """Egenavgifter (net of the general nedsättning) on the firma's överskott, in öre."""
-    if overskott_ore <= 0:
+def _egenavgifter(avgiftsunderlag_ore: int, c: dict) -> dict:
+    """Egenavgifter (net of the general nedsättning) on the AVGIFTSUNDERLAG — i.e. the
+    firma's överskott AFTER the schablonavdrag för egenavgifter (see tax_estimate). Both
+    the % and the 7,5 % nedsättning apply to this underlag, not the gross överskott."""
+    if avgiftsunderlag_ore <= 0:
         return {"brutto_ore": 0, "nedsattning_ore": 0, "netto_ore": 0}
-    P = overskott_ore / 100.0
+    P = avgiftsunderlag_ore / 100.0
     brutto = round(c["egenavgift_pct_centi"] / 10000.0 * P)
     neds = 0
-    if overskott_ore > c["egenavgift_nedsattning_threshold_ore"]:
+    if avgiftsunderlag_ore > c["egenavgift_nedsattning_threshold_ore"]:
         neds = min(round(c["egenavgift_nedsattning_pct_centi"] / 10000.0 * P),
                    c["egenavgift_nedsattning_max_ore"] // 100)
     return {"brutto_ore": brutto * 100, "nedsattning_ore": neds * 100,
@@ -170,9 +173,18 @@ def tax_estimate(conn: sqlite3.Connection, fy_start: str, fy_end: str) -> dict:
     overskott = arsbokslut.forenklat_arsbokslut(conn, fy_start, fy_end)["arets_resultat_ore"]
     salary = c["ovrig_forvarvsinkomst_ore"]
 
-    ea = _egenavgifter(overskott, c)
-    it_firma_only = _income_tax(max(0, overskott), c)          # firma income alone
-    it_total = _income_tax(max(0, overskott) + salary, c)      # firma + salary
+    # Schablonavdrag för egenavgifter: before egenavgifter AND income tax are computed, the
+    # firma deducts a schablon (25 %; 10 % on the reduced/age rate) as a reserve for the not-
+    # yet-known egenavgifter. Egenavgifterna beräknas på det som återstår (avgiftsunderlaget),
+    # and the SAME reduced amount is the taxable näringsinkomst. Without this both were
+    # computed on the gross överskott — the single biggest source of over-estimation.
+    schablon_frac = c.get("egenavgift_schablon_pct_centi", 2500) / 10000.0
+    schablonavdrag = round(schablon_frac * max(0, overskott))
+    avgiftsunderlag = max(0, overskott) - schablonavdrag       # = näringsinkomst efter schablon
+
+    ea = _egenavgifter(avgiftsunderlag, c)
+    it_firma_only = _income_tax(avgiftsunderlag, c)            # firma income alone
+    it_total = _income_tax(avgiftsunderlag + salary, c)        # firma + salary
     it_salary = _income_tax(salary, c)                          # salary alone (employer-withheld)
 
     # The firma's own income-tax liability is the marginal amount its income adds on top
@@ -187,7 +199,8 @@ def tax_estimate(conn: sqlite3.Connection, fy_start: str, fy_end: str) -> dict:
         {"key": "moms", "label": "Moms (utgående − ingående)", "amount_ore": moms_net,
          "note": "Redovisas löpande per momsperiod"},
         {"key": "egenavgifter", "label": "Egenavgifter (netto)", "amount_ore": ea["netto_ore"],
-         "note": f"28,97 % − nedsättning {_kr(ea['nedsattning_ore'])} kr"},
+         "note": (f"{c['egenavgift_pct_centi'] / 100:.2f} % på avgiftsunderlaget "
+                  f"{_kr(avgiftsunderlag)} kr − nedsättning {_kr(ea['nedsattning_ore'])} kr")},
         {"key": "kommunalskatt", "label": "Kommunal inkomstskatt (firmans del)",
          "amount_ore": _marg("kommunal_ore"), "note": "marginellt ovanpå lönen"},
         {"key": "statlig", "label": "Statlig inkomstskatt (firmans del)",
@@ -202,6 +215,8 @@ def tax_estimate(conn: sqlite3.Connection, fy_start: str, fy_end: str) -> dict:
     return {
         "fiscal_year_start": fy_start, "fiscal_year_end": fy_end,
         "overskott_ore": overskott, "ovrig_forvarvsinkomst_ore": salary,
+        "schablonavdrag_ore": schablonavdrag,     # 25 % reserve for egenavgifter
+        "avgiftsunderlag_ore": avgiftsunderlag,   # överskott − schablonavdrag (tax + avgift base)
         "moms_ore": moms_net,
         "egenavgifter": ea,
         "firma_income_tax_ore": firma_income_tax,
