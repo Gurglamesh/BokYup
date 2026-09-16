@@ -280,6 +280,10 @@ class PaymentMethodReorderReq(BaseModel):
     ordered_ids: list[int]        # payment-method ids in the desired display order
 
 
+class PayMethodsReq(BaseModel):
+    methods: list[str]            # the user's own inköp betalsätt (Qliro, Klarna, kort …)
+
+
 class PaymentMethodUpdateReq(BaseModel):
     label: Optional[str] = None
     value: Optional[str] = None

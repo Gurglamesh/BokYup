@@ -609,6 +609,14 @@ def _build_router():
     def reorder_payment_methods(book_id: str, body: sc.PaymentMethodReorderReq, request: Request):
         return fac(request).h_reorder_payment_methods({"book_id": book_id}, body.model_dump(), {})
 
+    @r.get("/books/{book_id}/inkop-pay-methods")
+    def get_pay_methods(book_id: str, request: Request):
+        return fac(request).h_get_pay_methods({"book_id": book_id}, {}, {})
+
+    @r.put("/books/{book_id}/inkop-pay-methods")
+    def set_pay_methods(book_id: str, body: sc.PayMethodsReq, request: Request):
+        return fac(request).h_set_pay_methods({"book_id": book_id}, body.model_dump(), {})
+
     @r.patch("/books/{book_id}/payment-methods/{payment_method_id}")
     def update_payment_method(book_id: str, payment_method_id: int,
                               body: sc.PaymentMethodUpdateReq, request: Request):

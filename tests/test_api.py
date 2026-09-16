@@ -733,6 +733,17 @@ class TestInvoices:
         order2 = [m["label"] for m in client.get(f"/books/{book}/payment-methods").json()]
         assert order2 == ["IBAN", "Swish", "Bankgiro"]
 
+    def test_inkop_pay_methods_editable_list(self, client, book):
+        # defaults present until edited
+        d = client.get(f"/books/{book}/inkop-pay-methods").json()["methods"]
+        assert "Qliro" in d and "Klarna delbetalning" in d
+        # set a custom list (trimmed + de-duplicated, order preserved)
+        r = client.put(f"/books/{book}/inkop-pay-methods",
+                       json={"methods": [" Qliro ", "Mitt Amex", "Qliro", ""]})
+        assert r.status_code == 200
+        assert r.json()["methods"] == ["Qliro", "Mitt Amex"]
+        assert client.get(f"/books/{book}/inkop-pay-methods").json()["methods"] == ["Qliro", "Mitt Amex"]
+
     def test_unpaid_invoice_uses_live_payment_methods(self, client, book):
         cat, kid = self._setup(client, book)              # seeds a "Swish" method
         inv = client.post(f"/books/{book}/invoices", json={

@@ -1675,6 +1675,25 @@ const SECTION_RENDERERS = {
     panel.appendChild(el("div", { style: "margin:6px 0 22px" },
       el("button", { class: "btn small", onclick: () => guard(addPaymentMethod) }, "+ Nytt betalsätt")));
 
+    // Mina betalningssätt (inköp): the editable list that fills the betalsätt-väljaren when
+    // you book an inköp-payment (Qliro, Klarna, kort …). Separate from the faktura betalsätt
+    // above (which is how customers pay YOU). One per line.
+    const payMethods = await api("GET", `/books/${bid()}/inkop-pay-methods`);
+    panel.appendChild(el("h3", {}, "Mina betalningssätt (inköp)"));
+    panel.appendChild(el("p", { class: "muted" },
+      "Betalsätten du använder för att betala inköp (t.ex. Qliro, Klarna, kort, Swish). "
+      + "Ett per rad — de föreslås när du bokför en inköpsbetalning."));
+    const pmText = el("textarea", { rows: "6", style: "width:100%;max-width:420px" },
+      (payMethods.methods || []).join("\n"));
+    panel.appendChild(pmText);
+    panel.appendChild(el("div", { style: "margin:6px 0 22px" },
+      el("button", { class: "btn small", onclick: () => guard(async () => {
+        const list = pmText.value.split("\n").map((s) => s.trim()).filter(Boolean);
+        const res = await api("PUT", `/books/${bid()}/inkop-pay-methods`, { methods: list });
+        pmText.value = (res.methods || []).join("\n");
+        toast("Betalningssätt sparade");
+      }) }, "Spara betalningssätt")));
+
     async function saveCompany() {
       await api("PUT", `/books/${bid()}/company`, {
         name: cName.value || null, org_nr: cOrg.value || null, vat_nr: cVat.value || null,
@@ -2362,9 +2381,15 @@ async function payFlow(txId, opts = {}) {
   // `opts.allowFee` (inköp) adds an optional MOMSFRI betaltjänstavgift (Klarna/Qliro) that
   // is booked on the same verifikation, to a chosen kostnadskonto.
   const today = new Date().toISOString().slice(0, 10);
+  // Inköp: use the user's own editable betalsätt-list (Inställningar); sales use the presets.
+  let buyMethods = PAY_METHODS_BUY;
+  if (opts.allowFee) {
+    try { buyMethods = (await api("GET", `/books/${bid()}/inkop-pay-methods`)).methods || PAY_METHODS_BUY; }
+    catch (e) { /* fall back to presets */ }
+  }
   const fields = [
     { name: "payment_date", label: "Betaldatum", type: "date", value: today },
-    payMethodField(opts.allowFee ? PAY_METHODS_BUY : PAY_METHODS_SELL),
+    payMethodField(opts.allowFee ? buyMethods : PAY_METHODS_SELL),
     { name: "note", label: "Referens / kommentar (valfritt)", value: "" },
   ];
   let allCats = [];

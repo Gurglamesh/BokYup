@@ -87,6 +87,9 @@ _SYS_ACCOUNT_NAMES = {
     "account_ores_kronutjamning": "Öres- och kronutjämning",
 }
 
+_DEFAULT_PAY_METHODS = ["Företagskonto", "Kort", "Swish", "Klarna delbetalning",
+                        "Klarna faktura", "Qliro", "Leverantörsfaktura", "Autogiro", "Kontant"]
+
 _UTG_MOMS_KEY = {
     "25": "account_utgaende_moms_25",
     "12": "account_utgaende_moms_12",
@@ -2076,6 +2079,36 @@ class BookOps:
         """Estimate the year's tax owed to Skatteverket, broken down per tax."""
         from backend.reports import tax as tax_report
         return tax_report.tax_estimate(self.conn, fy_start, fy_end)
+
+    def get_pay_methods(self) -> list:
+        """The user's own list of betalningssätt for inköp (Qliro, Klarna, kort …), used to
+        fill the betalsätt-väljaren. Stored as a JSON config list; a fresh book gets sensible
+        defaults until the user edits them."""
+        row = self.conn.execute(
+            "SELECT value FROM config WHERE key='inkop_pay_methods'").fetchone()
+        if row is not None:
+            try:
+                v = json.loads(row[0])
+                if isinstance(v, list):
+                    return [str(x) for x in v]
+            except (ValueError, TypeError):
+                pass
+        return list(_DEFAULT_PAY_METHODS)
+
+    def set_pay_methods(self, methods: list) -> list:
+        """Replace the inköp betalsätt list (trimmed, de-duplicated, order preserved)."""
+        clean: list[str] = []
+        for m in methods or []:
+            s = str(m).strip()[:60]
+            if s and s not in clean:
+                clean.append(s)
+            if len(clean) >= 40:
+                break
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO config(key, value) VALUES ('inkop_pay_methods', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(clean),))
+        return clean
 
     def get_tax_config(self) -> dict:
         """The editable tax rates used by the estimate (config, integer öre / centi-%)."""
