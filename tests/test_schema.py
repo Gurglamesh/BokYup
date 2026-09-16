@@ -308,7 +308,11 @@ class TestMigration:
             CREATE TABLE category (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, kind TEXT,
                 bas_konto INTEGER, default_rate_code TEXT, active INTEGER DEFAULT 1, created_at TEXT);
             CREATE TABLE supplier (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);
-            CREATE TABLE transaktion (id INTEGER PRIMARY KEY AUTOINCREMENT);
+            CREATE TABLE transaktion (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category_id INTEGER, verifikation_id INTEGER);
+            CREATE TABLE moms_line (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transaktion_id INTEGER NOT NULL, rate_code TEXT, category_id INTEGER,
+                ex_moms_ore INTEGER, moms_ore INTEGER, inc_moms_ore INTEGER);
             CREATE TABLE article (id INTEGER PRIMARY KEY AUTOINCREMENT, article_number TEXT,
                 description TEXT, created_at TEXT, updated_at TEXT);
             CREATE TABLE stock_batch (id INTEGER PRIMARY KEY AUTOINCREMENT,

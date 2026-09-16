@@ -241,6 +241,14 @@ def _build_router():
     def list_accounts(book_id: str, request: Request):
         return fac(request).h_list_accounts({"book_id": book_id}, {}, {})
 
+    @r.get("/books/{book_id}/bas-katalog")
+    def bas_catalog(book_id: str, request: Request):
+        return fac(request).h_bas_catalog({"book_id": book_id}, {}, {})
+
+    @r.post("/books/{book_id}/bas-katalog/add", status_code=201)
+    def add_catalog_accounts(book_id: str, body: sc.BasCatalogAddReq, request: Request):
+        return fac(request).h_add_catalog_accounts({"book_id": book_id}, body.model_dump(), {})
+
     # ---- article catalog ----
     @r.get("/books/{book_id}/articles")
     def list_articles(book_id: str, request: Request):

@@ -66,6 +66,12 @@ class CategoryReq(BaseModel):
     parent_id: Optional[int] = None   # makes this a subcategory of parent_id
 
 
+class BasCatalogAddReq(BaseModel):
+    """BAS-konton to add from the preset kontoplan (income/expense become categories,
+    balance-sheet konton are added to the chart only)."""
+    konton: list[int] = []
+
+
 class CategoryUpdateReq(BaseModel):
     name: Optional[str] = None
     bas_konto: Optional[int] = None

@@ -1905,3 +1905,70 @@ class TestServerMode:
         # env takes priority over the file
         assert read_token({"BOKYUP_API_TOKEN": "envtok", "BOKYUP_API_TOKEN_FILE": str(tf)}) == "envtok"
         assert read_token({}) == ""                                  # nothing set -> refuse
+
+
+class TestBasCatalogAndKontoEdit:
+    """Preset BAS-konton + editing a konto that has already been booked on."""
+
+    def test_catalog_lists_and_adds_categories_and_balance_konton(self, client, book):
+        cat = client.get(f"/books/{book}/bas-katalog").json()
+        by = {e["bas_konto"]: e for e in cat}
+        assert by[3041]["kind"] == "income" and by[3041]["rate_code"] == "25"
+        assert by[5410]["kind"] == "expense"
+        assert by[2018]["kind"] == "equity"          # balanskonto, not a category
+        # system konton are created lazily, so a fresh book has not got 1930 in the
+        # chart yet; adding it from the catalog is idempotent either way
+        assert by[1930]["added"] is False
+
+        r = client.post(f"/books/{book}/bas-katalog/add",
+                        json={"konton": [3041, 5410, 2018]})
+        assert r.status_code == 201
+        created = {c["bas_konto"]: c for c in r.json()["created"]}
+        assert created[3041]["category_id"] and created[5410]["category_id"]
+        assert created[2018]["category_id"] is None  # chart only
+
+        cats = {c["bas_konto"]: c for c in client.get(f"/books/{book}/categories").json()}
+        assert cats[3041]["kind"] == "income" and cats[3041]["default_rate_code"] == "25"
+        assert 2018 not in cats
+        assert 2018 in {a["bas_konto"] for a in client.get(f"/books/{book}/accounts").json()}
+
+        # re-running is safe: already-present konton are skipped, not duplicated
+        again = client.post(f"/books/{book}/bas-katalog/add",
+                            json={"konton": [3041, 2018]}).json()
+        assert again["created"] == [] and set(again["skipped"]) == {3041, 2018}
+        assert client.post(f"/books/{book}/bas-katalog/add",
+                           json={"konton": [9999]}).status_code == 400
+
+    def test_editing_a_used_kontos_bas_number_does_not_rewrite_history(self, client, book):
+        cid = client.post(f"/books/{book}/categories",
+                          json={"name": "Förbrukning", "kind": "expense",
+                                "bas_konto": 5410}).json()["id"]
+        client.post(f"/books/{book}/expenses",
+                    json={"category_id": cid,
+                          "lines": [{"rate_code": "25", "amount_ore": 1250}],
+                          "trans_date": "2026-02-01", "paid_date": "2026-02-01"})
+
+        # the konto is in use, and may STILL be edited
+        assert [c for c in client.get(f"/books/{book}/categories").json()
+                if c["id"] == cid][0]["used"] == 1
+        assert client.patch(f"/books/{book}/categories/{cid}",
+                            json={"bas_konto": 5460}).status_code == 200
+
+        # history is untouched: huvudbok (postings) and the result report both keep the
+        # already-booked cost on 5410 — the new konto only applies from the next booking.
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb.get(5410) == 1000 and 5460 not in hb
+        res = client.get(f"/books/{book}/reports/result",
+                         params={"start": "2026-01-01", "end": "2026-12-31"}).json()
+        konton = {r["bas_konto"]: r["amount_ore"] for r in res["by_category"]}
+        assert konton.get(5410) == 1000 and 5460 not in konton
+
+        # a NEW purchase on the same category books to the new konto
+        client.post(f"/books/{book}/expenses",
+                    json={"category_id": cid,
+                          "lines": [{"rate_code": "25", "amount_ore": 2500}],
+                          "trans_date": "2026-03-01", "paid_date": "2026-03-01"})
+        res2 = client.get(f"/books/{book}/reports/result",
+                          params={"start": "2026-01-01", "end": "2026-12-31"}).json()
+        konton2 = {r["bas_konto"]: r["amount_ore"] for r in res2["by_category"]}
+        assert konton2.get(5410) == 1000 and konton2.get(5460) == 2000

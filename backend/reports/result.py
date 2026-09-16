@@ -24,21 +24,28 @@ def result_report(conn: sqlite3.Connection, period_start: str, period_end: str) 
     # Income/expense is attributed to each moms_line's own category when set (so a
     # multi-category invoice splits across BAS-konton), falling back to the
     # transaktion's category for plain entries.
+    #
+    # The BAS-konto is the one FROZEN on the line when it was booked (moms_line.bas_konto),
+    # not the category's current konto: reference data may be edited afterwards, and an
+    # already-posted period must never be rewritten by such an edit. The category is only
+    # the label. A category whose konto was corrected therefore shows one row per konto
+    # it has been booked to. (Pre-freeze rows fall back to the category's konto.)
     rows = conn.execute(
         """
-        SELECT t.direction         AS direction,
-               c.id                AS category_id,
-               c.name              AS category_name,
-               c.kind              AS kind,
-               c.bas_konto         AS bas_konto,
-               SUM(m.ex_moms_ore)  AS ex
+        SELECT t.direction                            AS direction,
+               c.id                                   AS category_id,
+               c.name                                 AS category_name,
+               c.kind                                 AS kind,
+               COALESCE(m.bas_konto, c.bas_konto)     AS bas_konto,
+               SUM(m.ex_moms_ore)                     AS ex
         FROM moms_line m
         JOIN transaktion t  ON t.id = m.transaktion_id
         JOIN verifikation v ON v.id = t.verifikation_id
         LEFT JOIN category c ON c.id = COALESCE(m.category_id, t.category_id)
         WHERE v.posted = 1 AND v.ver_date BETWEEN ? AND ?
-        GROUP BY t.direction, COALESCE(m.category_id, t.category_id)
-        ORDER BY c.bas_konto
+        GROUP BY t.direction, COALESCE(m.category_id, t.category_id),
+                 COALESCE(m.bas_konto, c.bas_konto)
+        ORDER BY bas_konto
         """,
         (period_start, period_end),
     ).fetchall()

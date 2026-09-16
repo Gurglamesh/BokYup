@@ -48,6 +48,7 @@ from typing import Optional
 
 from backend.db.manager import BookSession
 from backend.models import schema as S
+from backend.models.bas_catalog import BAS_CATALOG, CATEGORY_KINDS, catalog_entry
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +295,14 @@ class BookOps:
                         default_rate_code: Optional[str] = None,
                         prefix: Optional[str] = None,
                         parent_id: Optional[int] = None) -> None:
-        """Edit reference data freely. Does not touch already-booked verifikationer.
+        """Edit reference data freely — including the BAS-konto of a category that has
+        ALREADY been booked on. Nothing historical moves: a posting carries its konto as
+        a frozen number, and every booked moms_line carries the konto it was booked to
+        (`_freeze_line_konton`), so huvudbok, SIE, årsbokslut and the result report all
+        keep showing the old konto for the old entries. The new konto applies from the
+        next booking onwards. (A rättelse of an already-booked entry is the way to move
+        history — see `rebook_transaktion`.)
+
         Changing the prefix only affects future article numbers (issued ones are frozen).
         `parent_id` reparents (0/negative → make top-level); a cycle is refused."""
         if bas_konto is not None:
@@ -361,6 +369,59 @@ class BookOps:
                 self.conn.execute("DELETE FROM account WHERE bas_konto=?", (konto,))
                 account_removed = True
         return {"deleted": True, "bas_konto": konto, "account_removed": account_removed}
+
+    # ---------------- preset BAS-konton (the BAS-kontoplan picker) ------------
+
+    def bas_catalog(self) -> list[dict]:
+        """The preset BAS-kontoplan, each entry flagged with whether this book already
+        has it (`added` = a category on that konto, `in_chart` = the konto exists)."""
+        cat_konton = {r["bas_konto"] for r in self.conn.execute(
+            "SELECT DISTINCT bas_konto FROM category")}
+        chart = {r["bas_konto"] for r in self.conn.execute("SELECT bas_konto FROM account")}
+        out = []
+        for e in BAS_CATALOG:
+            out.append({**e,
+                        "added": e["bas_konto"] in cat_konton,
+                        "in_chart": e["bas_konto"] in chart})
+        return out
+
+    def add_catalog_accounts(self, konton: list) -> dict:
+        """
+        Add preset BAS-konton to this book.
+
+        An income/expense konto becomes an ordinary **category** (freely editable
+        afterwards — name, number and default moms). A balance-sheet konto (tillgång/
+        skuld/eget kapital) is only added to the chart of accounts, so it can be picked
+        in a manual verifikation; it is never a category, since a category is always
+        income or expense.
+
+        Konton the book already has are skipped, so the picker is safe to re-run.
+        """
+        created, skipped = [], []
+        for raw in konton or []:
+            entry = catalog_entry(raw)
+            if entry is None:
+                raise ValueError(f"{raw} finns inte i den förinställda BAS-kontoplanen")
+            konto = entry["bas_konto"]
+            if entry["kind"] in CATEGORY_KINDS:
+                if self.conn.execute("SELECT 1 FROM category WHERE bas_konto=?",
+                                     (konto,)).fetchone():
+                    skipped.append(konto)
+                    continue
+                cid = self.create_category(entry["name"], entry["kind"], konto,
+                                           account_name=entry["name"],
+                                           default_rate_code=entry["rate_code"])
+                created.append({"bas_konto": konto, "category_id": cid,
+                                "name": entry["name"], "kind": entry["kind"]})
+            else:
+                if self.conn.execute("SELECT 1 FROM account WHERE bas_konto=?",
+                                     (konto,)).fetchone():
+                    skipped.append(konto)
+                    continue
+                self.ensure_account(konto, entry["name"])
+                created.append({"bas_konto": konto, "category_id": None,
+                                "name": entry["name"], "kind": entry["kind"]})
+        return {"created": created, "skipped": skipped}
 
     # ==================================================================
     # Article catalog (reusable invoice line items)
@@ -1474,8 +1535,8 @@ class BookOps:
             if fee:
                 self.conn.execute(
                     "INSERT INTO moms_line(transaktion_id, rate_code, category_id, ex_moms_ore, "
-                    "moms_ore, inc_moms_ore) VALUES (?, 'momsfri', ?, ?, 0, ?)",
-                    (transaktion_id, int(extra_fee_category_id), fee, fee))
+                    "moms_ore, inc_moms_ore, bas_konto) VALUES (?, 'momsfri', ?, ?, 0, ?, ?)",
+                    (transaktion_id, int(extra_fee_category_id), fee, fee, fee_konto))
             vid, number = self._post_verifikation(payment_date, payment_date, text, postings)
             self.conn.execute(
                 "UPDATE transaktion SET status='paid', payment_date=?, verifikation_id=? WHERE id=?",
@@ -1836,8 +1897,8 @@ class BookOps:
         inc_agg: dict[int, int] = {}
         for cl in corrected:
             cat = cl["category_id"] if cl["category_id"] is not None else fb
-            konto = self._category_konto(cat)
-            inc_agg[konto] = inc_agg.get(konto, 0) + cl["ex"]
+            cl["bas_konto"] = self._category_konto(cat)
+            inc_agg[cl["bas_konto"]] = inc_agg.get(cl["bas_konto"], 0) + cl["ex"]
         postings = list(keep)
         for konto, ex in sorted(inc_agg.items()):
             postings.append((konto, op * ex, "omkontering"))
@@ -1871,8 +1932,9 @@ class BookOps:
             for cl in corrected:
                 self.conn.execute(
                     "INSERT INTO moms_line(transaktion_id, rate_code, category_id, ex_moms_ore, "
-                    "moms_ore, inc_moms_ore) VALUES (?,?,?,?,?,?)",
-                    (rid, cl["rate_code"], cl["category_id"], cl["ex"], cl["moms"], cl["inc"]))
+                    "moms_ore, inc_moms_ore, bas_konto) VALUES (?,?,?,?,?,?,?)",
+                    (rid, cl["rate_code"], cl["category_id"], cl["ex"], cl["moms"], cl["inc"],
+                     cl["bas_konto"]))
         return {"verifikation_id": new_vid, "ver_number": new_num}
 
     def verifikationer_full(self, start: Optional[str] = None,
@@ -3462,42 +3524,46 @@ class BookOps:
         using cumulative rounding so a sequence of partials reconciles exactly to the
         öre. One entry per moms_line (an invoice carries one line per category×rate)."""
         before, after = recognized_before, recognized_before + amount
+        # Freeze the konton on the first recognition so every later partial (and any
+        # credit) lands on the same konto even if the category is edited in between.
+        self._freeze_line_konton(transaktion_id)
         out = []
         for ln in self.conn.execute(
-                "SELECT category_id, rate_code, ex_moms_ore, moms_ore FROM moms_line "
+                "SELECT category_id, rate_code, ex_moms_ore, moms_ore, bas_konto FROM moms_line "
                 "WHERE transaktion_id=?", (transaktion_id,)):
             ex_s = (round(ln["ex_moms_ore"] * after / total_inc)
                     - round(ln["ex_moms_ore"] * before / total_inc))
             moms_s = (round(ln["moms_ore"] * after / total_inc)
                       - round(ln["moms_ore"] * before / total_inc))
             out.append({"category_id": ln["category_id"], "rate_code": ln["rate_code"],
-                        "ex_s": ex_s, "moms_s": moms_s})
+                        "bas_konto": ln["bas_konto"], "ex_s": ex_s, "moms_s": moms_s})
         return out
 
     def _income_splits(self, transaktion_id) -> list:
         """[(bas_konto, sum_ex), …] — the full ex-moms of a transaktion grouped by each
         moms_line's category konto (fallback the transaktion category). Used when
-        booking the whole amount at once (cash sale/purchase, fakturametod issue)."""
-        fb = self.conn.execute("SELECT category_id FROM transaktion WHERE id=?",
-                               (transaktion_id,)).fetchone()["category_id"]
+        booking the whole amount at once (cash sale/purchase, fakturametod issue).
+        Freezes the konto on the lines, so this booking is what the reports keep showing."""
+        self._freeze_line_konton(transaktion_id)
         agg: dict[int, int] = {}
         for ln in self.conn.execute(
-                "SELECT category_id, ex_moms_ore FROM moms_line WHERE transaktion_id=?",
+                "SELECT bas_konto, ex_moms_ore FROM moms_line WHERE transaktion_id=?",
                 (transaktion_id,)):
-            cat = ln["category_id"] if ln["category_id"] is not None else fb
-            konto = self._category_konto(cat)
+            konto = ln["bas_konto"]
             agg[konto] = agg.get(konto, 0) + ln["ex_moms_ore"]
         return sorted(agg.items())
 
     def _group_income(self, transaktion_id, slices) -> dict:
-        """{bas_konto: sum_ex} — slice ex grouped by each line's category konto, falling
-        back to the transaktion's category when a line carries none (plain income)."""
+        """{bas_konto: sum_ex} — slice ex grouped by each line's frozen konto (resolved in
+        `_recognition_slice`, falling back to the transaktion's category)."""
         fb = self.conn.execute("SELECT category_id FROM transaktion WHERE id=?",
                                (transaktion_id,)).fetchone()["category_id"]
         agg: dict[int, int] = {}
         for s in slices:
-            cat = s["category_id"] if s["category_id"] is not None else fb
-            konto = self._category_konto(cat)
+            konto = s.get("bas_konto")
+            if konto is None:
+                cat = s["category_id"] if s["category_id"] is not None else fb
+                konto = self._category_konto(cat)
             agg[konto] = agg.get(konto, 0) + s["ex_s"]
         return agg
 
@@ -3527,9 +3593,9 @@ class BookOps:
             if s["ex_s"] or s["moms_s"]:
                 self.conn.execute(
                     "INSERT INTO moms_line(transaktion_id, rate_code, category_id, ex_moms_ore, "
-                    "moms_ore, inc_moms_ore) VALUES (?,?,?,?,?,?)",
+                    "moms_ore, inc_moms_ore, bas_konto) VALUES (?,?,?,?,?,?,?)",
                     (rid, s["rate_code"], s["category_id"], sign * s["ex_s"],
-                     sign * s["moms_s"], sign * (s["ex_s"] + s["moms_s"])))
+                     sign * s["moms_s"], sign * (s["ex_s"] + s["moms_s"]), s.get("bas_konto")))
 
     def _book_kontant_recognition(self, transaktion_id, recognized_before, amount, total_inc,
                                   date, sign, text, ores_ore=0) -> tuple[int, int]:
@@ -3705,6 +3771,29 @@ class BookOps:
             raise KeyError(f"No category {category_id}")
         return row["bas_konto"]
 
+    def _freeze_line_konton(self, transaktion_id: int) -> None:
+        """
+        Stamp every not-yet-frozen moms_line of `transaktion_id` with the BAS-konto it is
+        being booked to (the line's category, falling back to the transaktion's).
+
+        Reference data is editable: a category's BAS-konto may be corrected afterwards.
+        The postings already carry the konto as a frozen number, so huvudbok/SIE/årsbokslut
+        are immune — but the result report resolves the category. Freezing the konto on
+        the moms_line at booking makes that report immune too: a later edit only affects
+        what is booked from then on. MUST run inside a `with self.conn` block.
+        """
+        fb_row = self.conn.execute(
+            "SELECT category_id FROM transaktion WHERE id=?", (transaktion_id,)).fetchone()
+        fb = fb_row["category_id"] if fb_row else None
+        for ln in self.conn.execute(
+                "SELECT id, category_id FROM moms_line "
+                "WHERE transaktion_id=? AND bas_konto IS NULL", (transaktion_id,)).fetchall():
+            cat = ln["category_id"] if ln["category_id"] is not None else fb
+            if cat is None:
+                continue
+            self.conn.execute("UPDATE moms_line SET bas_konto=? WHERE id=?",
+                              (self._category_konto(cat), ln["id"]))
+
     def _clone_transaktion_for_report(self, src_transaktion_id: int, new_ver_id: int,
                                       ver_date: str, sign: int, note: str) -> Optional[int]:
         """
@@ -3716,9 +3805,13 @@ class BookOps:
             "SELECT direction, category_id, supplier_id, customer_id FROM transaktion WHERE id=?",
             (src_transaktion_id,),
         ).fetchone()
+        # The clone mirrors an already-booked entry, so it must carry the SAME frozen
+        # konto — otherwise a rättelse/återföring would not net out in the result report
+        # if the category's konto has been edited in the meantime.
+        self._freeze_line_konton(src_transaktion_id)
         lines = self.conn.execute(
-            "SELECT rate_code, category_id, ex_moms_ore, moms_ore, inc_moms_ore FROM moms_line "
-            "WHERE transaktion_id=?", (src_transaktion_id,),
+            "SELECT rate_code, category_id, ex_moms_ore, moms_ore, inc_moms_ore, bas_konto "
+            "FROM moms_line WHERE transaktion_id=?", (src_transaktion_id,),
         ).fetchall()
         if src is None or not lines:
             return None
@@ -3733,9 +3826,9 @@ class BookOps:
         for ln in lines:
             self.conn.execute(
                 "INSERT INTO moms_line(transaktion_id, rate_code, category_id, ex_moms_ore, "
-                "moms_ore, inc_moms_ore) VALUES (?,?,?,?,?,?)",
+                "moms_ore, inc_moms_ore, bas_konto) VALUES (?,?,?,?,?,?,?)",
                 (rid, ln["rate_code"], ln["category_id"], sign * ln["ex_moms_ore"],
-                 sign * ln["moms_ore"], sign * ln["inc_moms_ore"]),
+                 sign * ln["moms_ore"], sign * ln["inc_moms_ore"], ln["bas_konto"]),
             )
         return rid
 

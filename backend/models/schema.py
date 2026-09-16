@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 39
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -206,7 +206,12 @@ CREATE TABLE moms_line (
                                                      -- (NULL = transaktion.category_id)
     ex_moms_ore    INTEGER NOT NULL,    -- beskattningsunderlag
     moms_ore       INTEGER NOT NULL,    -- ingående (purchase) / utgående (sale)
-    inc_moms_ore   INTEGER NOT NULL     -- total
+    inc_moms_ore   INTEGER NOT NULL,    -- total
+    bas_konto      INTEGER              -- konto FROZEN at booking (NULL = not booked yet).
+                                        -- Reference data may be edited freely, so a
+                                        -- category's BAS-konto can change later; the
+                                        -- reports must keep attributing an already-posted
+                                        -- line to the konto it was actually booked to.
 );
 
 -- ----- RUT lifecycle (private-customer income only) -----------------------
@@ -1029,6 +1034,23 @@ _MIGRATIONS: dict[int, str] = {
     """,
     38: """
         INSERT OR IGNORE INTO config(key, value) VALUES ('account_egna_insattningar', '2018');
+    """,
+    # v39: freeze each booked moms_line's BAS-konto so editing a category's konto later
+    # never rewrites history. Backfill from the category's current konto — exact, because
+    # until now a used category's konto could not be changed.
+    39: """
+        ALTER TABLE moms_line ADD COLUMN bas_konto INTEGER;
+
+        UPDATE moms_line
+           SET bas_konto = (
+               SELECT c.bas_konto FROM category c
+                WHERE c.id = COALESCE(
+                    moms_line.category_id,
+                    (SELECT t.category_id FROM transaktion t WHERE t.id = moms_line.transaktion_id)))
+         WHERE bas_konto IS NULL
+           AND EXISTS (SELECT 1 FROM transaktion t
+                        WHERE t.id = moms_line.transaktion_id
+                          AND t.verifikation_id IS NOT NULL);
     """,
 }
 

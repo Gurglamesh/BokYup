@@ -1015,7 +1015,10 @@ const SECTION_RENDERERS = {
       api("GET", `/books/${bid()}/categories`),
       api("GET", `/books/${bid()}/accounts`),
     ]);
-    panel.appendChild(headerWithAdd("BAS-konton", "+ Ny kategori", () => guard(addCategoryFlow)));
+    const head = headerWithAdd("BAS-konton", "+ Ny kategori", () => guard(addCategoryFlow));
+    head.appendChild(el("button", { class: "btn ghost",
+      onclick: () => guard(basCatalogFlow) }, "📖 Hämta från BAS-kontoplanen"));
+    panel.appendChild(head);
 
     // User categories (each a name + BAS-konto + default moms).
     panel.appendChild(el("h3", { style: "margin-top:8px" }, "Kategorier"));
@@ -3272,11 +3275,13 @@ async function editCategoryFlow(c) {
     api("GET", `/books/${bid()}/accounts`),
     api("GET", `/books/${bid()}/categories`),
   ]);
-  // A used BAS-konto must not have its number changed (it would retroactively remap
-  // already-booked entries in the reports); only name + default moms stay editable.
-  const fields = [{ name: "name", label: "Namn", value: c.name }];
-  if (!c.used) fields.push({ name: "bas_konto", label: "BAS-konto", type: "datalist",
-    value: String(c.bas_konto), options: accountOptions(accounts) });
+  // Everything is editable, also on a konto that has already been booked on: each
+  // posting and each booked moms_line carries its BAS-konto as a frozen number, so
+  // gamla verifikationer och rapporter ligger kvar på det gamla kontot. A new number
+  // takes effect from the next bokföring.
+  const fields = [{ name: "name", label: "Namn", value: c.name },
+    { name: "bas_konto", label: c.used ? "BAS-konto (gäller från nästa bokföring)" : "BAS-konto",
+      type: "datalist", value: String(c.bas_konto), options: accountOptions(accounts) }];
   const parentOpts = [{ value: "0", label: "— Ingen (toppnivå) —" },
     ...cats.filter((x) => x.id !== c.id).map((x) => ({ value: String(x.id), label: categoryPath(cats, x.id) }))];
   fields.push({ name: "parent_id", label: "Förälder (underkategori av)", type: "select",
@@ -3288,7 +3293,15 @@ async function editCategoryFlow(c) {
   if (!f || !f.name) return;
   const body = { name: f.name, default_rate_code: f.default_rate_code || null,
     parent_id: f.parent_id ? parseInt(f.parent_id, 10) : 0 };
-  if (!c.used && f.bas_konto) body.bas_konto = parseInt(f.bas_konto, 10);
+  if (f.bas_konto) body.bas_konto = parseInt(f.bas_konto, 10);
+  if (c.used && body.bas_konto && body.bas_konto !== c.bas_konto) {
+    const ok = await modal(
+      `Byta BAS-konto från ${c.bas_konto} till ${body.bas_konto}? `
+      + `Redan bokförda verifikationer ligger kvar på ${c.bas_konto} och påverkas inte — `
+      + `det nya kontot används från nästa bokföring. För att flytta en redan bokförd `
+      + `post använder du "Rätta baskonto" på transaktionen.`, [], "Byt konto");
+    if (!ok) return;
+  }
   await api("PATCH", `/books/${bid()}/categories/${c.id}`, body);
   toast("Kategori uppdaterad");
   renderWorkspace();
@@ -4141,6 +4154,96 @@ function articlePickerModal(cats, articles) {
     render();
 
     $("#modal-ok").style.display = "none";        // pick by clicking an article; Avbryt cancels
+    $("#modal-cancel").textContent = "Avbryt";
+    $("#modal-cancel").onclick = () => finish(null);
+    $("#modal-backdrop").classList.remove("hidden");
+    search.focus();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// BAS-kontoplanen: pick preset konton instead of typing numbers from memory.
+// Everything created here is an ordinary, fully editable kategori/konto.
+// ---------------------------------------------------------------------------
+const CATALOG_KIND_LABEL = { income: "Intäkt", expense: "Kostnad", asset: "Tillgång",
+  debt: "Skuld", equity: "Eget kapital" };
+
+async function basCatalogFlow() {
+  const entries = await api("GET", `/books/${bid()}/bas-katalog`);
+  const picked = await basCatalogModal(entries);
+  if (!picked || !picked.length) return;
+  const res = await api("POST", `/books/${bid()}/bas-katalog/add`, { konton: picked });
+  const n = (res.created || []).length;
+  toast(n ? `${n} BAS-konto${n === 1 ? "" : "n"} tillagda` : "Inget nytt tillagt");
+  renderWorkspace();
+}
+
+function basCatalogModal(entries) {
+  return new Promise((resolve) => {
+    $("#modal-title").textContent = "Hämta konton från BAS-kontoplanen";
+    const body = $("#modal-body");
+    body.innerHTML = "";
+    const chosen = new Set();
+    const note = el("p", { class: "muted", style: "margin:0 0 8px" },
+      "Bocka i de konton du vill lägga upp. Intäkts- och kostnadskonton blir kategorier "
+      + "du kan bokföra på; balanskonton läggs bara till i kontoplanen så att de går att "
+      + "välja i ett manuellt verifikat. Allt går att ändra efteråt. Listan är ett urval "
+      + "ur BAS-kontoplanen — stäm av mot BAS/Skatteverket för din verksamhet.");
+    const search = el("input", { type: "search", placeholder: "Sök konto (nummer, namn, beskrivning)…",
+      style: "width:100%;margin-bottom:8px" });
+    const tree = el("div", { style: "max-height:52vh;overflow:auto;border:1px solid var(--border,#ddd);border-radius:6px;padding:4px" });
+    const count = el("div", { class: "muted", style: "margin-top:6px" }, "0 valda");
+    body.appendChild(note); body.appendChild(search); body.appendChild(tree); body.appendChild(count);
+
+    const refreshCount = () => { count.textContent = `${chosen.size} valda`; };
+
+    const entryRow = (e) => {
+      const cb = el("input", { type: "checkbox" });
+      cb.checked = chosen.has(e.bas_konto);
+      cb.disabled = !!(e.added || (e.kind !== "income" && e.kind !== "expense" && e.in_chart));
+      cb.onchange = () => {
+        if (cb.checked) chosen.add(e.bas_konto); else chosen.delete(e.bas_konto);
+        refreshCount();
+      };
+      const label = el("label", { style: "display:flex;gap:8px;align-items:flex-start;padding:5px 6px;cursor:pointer" },
+        cb,
+        el("span", {},
+          el("strong", {}, String(e.bas_konto)), " " + e.name,
+          el("span", { class: "pill", style: "margin-left:6px;font-size:10px" },
+            CATALOG_KIND_LABEL[e.kind] || e.kind),
+          cb.disabled ? el("span", { class: "muted", style: "margin-left:6px;font-size:11px" },
+            "redan upplagt") : null,
+          el("div", { class: "muted", style: "font-size:11px" }, e.description || "")));
+      return label;
+    };
+
+    const render = () => {
+      tree.innerHTML = "";
+      const q = search.value.trim().toLowerCase();
+      const hits = entries.filter((e) =>
+        !q || `${e.bas_konto} ${e.name} ${e.description || ""} ${e.group}`.toLowerCase().includes(q));
+      if (!hits.length) { tree.appendChild(el("p", { class: "muted" }, "Inga träffar.")); return; }
+      let group = null;
+      for (const e of hits) {
+        if (e.group !== group) {
+          group = e.group;
+          tree.appendChild(el("div", { style: "padding:6px;font-weight:600;border-top:1px solid var(--border,#eee)" }, group));
+        }
+        tree.appendChild(entryRow(e));
+      }
+    };
+    search.oninput = render;
+    render();
+    refreshCount();
+
+    const finish = (val) => {
+      $("#modal-backdrop").classList.add("hidden");
+      $("#modal-ok").onclick = null; $("#modal-cancel").onclick = null;
+      resolve(val);
+    };
+    $("#modal-ok").textContent = "Lägg till valda";
+    $("#modal-ok").style.display = "";
+    $("#modal-ok").onclick = () => finish([...chosen]);
     $("#modal-cancel").textContent = "Avbryt";
     $("#modal-cancel").onclick = () => finish(null);
     $("#modal-backdrop").classList.remove("hidden");

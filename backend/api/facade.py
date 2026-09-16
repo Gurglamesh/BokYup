@@ -265,6 +265,13 @@ class AppFacade:
         ops = self._ops(p["book_id"])
         return ops.delete_category(int(p["category_id"]))
 
+    def h_bas_catalog(self, p, b, q):
+        """The preset BAS-kontoplan to pick konton from (each flagged if already added)."""
+        return self._ops(p["book_id"]).bas_catalog()
+
+    def h_add_catalog_accounts(self, p, b, q):
+        return self._ops(p["book_id"]).add_catalog_accounts(b.get("konton") or [])
+
     # ---- article catalog ----
     def h_list_articles(self, p, b, q):
         return self._ops(p["book_id"]).list_articles()
@@ -924,6 +931,8 @@ _route("POST", "/books/{book_id}/recovery-key", "h_add_recovery_key", 201)
 
 _route("GET", "/books/{book_id}/categories", "h_list_categories")
 _route("GET", "/books/{book_id}/categories/next-prefix", "h_next_prefix")
+_route("GET", "/books/{book_id}/bas-katalog", "h_bas_catalog")
+_route("POST", "/books/{book_id}/bas-katalog/add", "h_add_catalog_accounts", 201)
 _route("GET", "/books/{book_id}/accounts", "h_list_accounts")
 _route("GET", "/books/{book_id}/articles", "h_list_articles")
 _route("POST", "/books/{book_id}/articles", "h_create_article", 201)
