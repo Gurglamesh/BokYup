@@ -2347,12 +2347,24 @@ async function receiptsFlow(txId, isPending) {
     el("div", { class: "modal-actions" }, el("button", { class: "btn", onclick: () => ui.close() }, "Stäng")));
 }
 
+// Betalsätt-förslag: hur betalningen gjordes (skrivs som kommentar i verifikatet). Fri text
+// via datalist, så du kan skriva vad som helst utöver förslagen.
+const PAY_METHODS_BUY = ["Företagskonto", "Kort", "Swish", "Klarna delbetalning",
+  "Klarna faktura", "Leverantörsfaktura", "Autogiro", "Kontant"];
+const PAY_METHODS_SELL = ["Swish", "Banköverföring", "Bankgiro", "Kort", "Klarna", "Kontant"];
+const payMethodField = (presets) => ({ name: "betalsatt", label: "Betalsätt (valfritt)",
+  type: "datalist", value: "", options: presets.map((m) => ({ value: m, label: m })) });
+// Combine betalsätt + free comment into the single verifikation note.
+const combineNote = (betalsatt, comment) =>
+  [betalsatt, comment].map((s) => (s || "").trim()).filter(Boolean).join(" · ");
+
 async function payFlow(txId, opts = {}) {
   // `opts.allowFee` (inköp) adds an optional MOMSFRI betaltjänstavgift (Klarna/Qliro) that
   // is booked on the same verifikation, to a chosen kostnadskonto.
   const today = new Date().toISOString().slice(0, 10);
   const fields = [
     { name: "payment_date", label: "Betaldatum", type: "date", value: today },
+    payMethodField(opts.allowFee ? PAY_METHODS_BUY : PAY_METHODS_SELL),
     { name: "note", label: "Referens / kommentar (valfritt)", value: "" },
   ];
   let allCats = [];
@@ -2375,7 +2387,8 @@ async function payFlow(txId, opts = {}) {
   const f = await modal("Bokför betalning", fields, "Bokför");
   if (!f) return;
   const body = { payment_date: f.payment_date };
-  if (f.note && f.note.trim()) body.note = f.note.trim();
+  const note = combineNote(f.betalsatt, f.note);
+  if (note) body.note = note;
   if (f.paid_account) body.paid_account = f.paid_account;
   const feeOre = f.extra_fee ? toOre(f.extra_fee) : 0;
   if (feeOre > 0) {
@@ -4632,12 +4645,14 @@ async function payInvoiceFlow(iv) {
   const f = await modal(`Betalning faktura ${iv.invoice_number}`, [
     { name: "amount", label: "Belopp (kr) — kvar att betala", value: toKr(iv.outstanding_ore) },
     { name: "date", label: "Betaldatum", type: "date", value: new Date().toISOString().slice(0, 10) },
+    payMethodField(PAY_METHODS_SELL),
     { name: "note", label: "Referens / kommentar (valfritt)", value: "" },
   ], "Bokför betalning");
   if (!f) return;
   const body = { date: f.date || null };
   if (f.amount) body.amount_ore = toOre(f.amount);
-  if (f.note && f.note.trim()) body.note = f.note.trim();
+  const note = combineNote(f.betalsatt, f.note);
+  if (note) body.note = note;
   const res = await api("POST", `/books/${bid()}/invoices/${iv.id}/pay`, body);
   toast(res.outstanding_ore > 0
     ? `Delbetalning bokförd — ${toKr(res.outstanding_ore)} kr kvar`
