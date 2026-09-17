@@ -892,6 +892,28 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       **Inköp → Återkommande** sub-tab (att bekräfta / serier / historik).
       Tests pass; browser-smoke-tested end to end (EU-tjänst 420,75 kr → 5420/2645/2614/1930
       balanced, ruta 21 + 30 + 48, serien flyttad till nästa månad).
+- [x] **Privat tillgång in i verksamheten + egenupprättad verifikation (schema v41,
+      2026-09).** An enskild näringsidkare and the firma are the same legal person, so
+      bringing privately-owned property into the business is a **tillskott**, not a
+      purchase: the asset/cost konto is debited against **2018 Egna insättningar**, with
+      **no moms** (the acquisition was private → no avdragsrätt arose, and it does not
+      arise afterwards) and no money moving. `book_private_asset_contribution` +
+      `private_asset_preview` (classify without booking): the amount vs **halva
+      prisbasbeloppet** (from the `prisbasbelopp_ore` config, so it follows the yearly
+      update) decides **direktavdrag** (5410, config `account_forbrukningsinventarier`)
+      vs **aktivering** (1220, `account_inventarier`, + a note that avskrivning must be
+      booked separately at bokslutet); `mode` lets the user override, `business_pct_centi`
+      books only the business share. `verifikation` gained **`egenupprattad` +
+      `motivering`** (BFL 5 kap.): there is no external document, so the motivation IS the
+      underlag — it is required when the flag is set, and composed from the stated facts
+      (what, bought privately when/for how much, taken into use when, assessed market
+      value, business share) when the user does not write their own.
+      `add_manual_verifikation` takes the same two fields; the grundbok shows an
+      "egenupprättad" pill + the motivation. API `GET /private-asset/preview`,
+      `POST /private-asset`. UI: a "💻 Privat tillgång in i verksamheten"-knapp on
+      **Bokföring → Bokför** with a live preview of konto/treatment/threshold.
+      Tests pass (458); browser-smoke-tested (18 500 kr dator → 5410/2018 balanced,
+      egenupprättad, ingen moms).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

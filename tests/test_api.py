@@ -2154,3 +2154,99 @@ class TestRecurring:
         bad["lines"] = [{"rate_code": "25", "amount_ore": 100}]
         bad["interval_unit"] = "vecka"
         assert client.post(f"/books/{book}/recurring", json=bad).status_code == 400
+
+
+class TestPrivateAssetContribution:
+    """Privat tillgång in i verksamheten (tillskott) — debited against 2018, no moms."""
+
+    def test_books_the_users_computer_case(self, client, book):
+        # Bought privately in December, taken into full business use 1 January.
+        res = client.post(f"/books/{book}/private-asset", json={
+            "description": "MacBook Pro 14, serienr ABC123",
+            "amount_ore": 1850000, "date": "2026-01-01",
+            "acquired_date": "2025-12-18", "acquired_amount_ore": 1850000})
+        assert res.status_code == 201
+        out = res.json()
+        assert out["treatment"] == "direktavdrag" and out["bas_konto"] == 5410
+
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[5410] == 1850000 and hb[2018] == -1850000
+        assert sum(hb.values()) == 0
+
+        ver = client.get(f"/books/{book}/verifikationer-full").json()[0]
+        assert ver["ver_date"] == "2026-01-01"
+        assert "MacBook Pro 14" in ver["text"]
+        # It is an egenupprättad verifikation and the motivation IS the underlag.
+        assert ver["egenupprattad"] == 1
+        for must in ("2025-12-18", "2026-01-01", "18 500,00 kr", "uteslutande"):
+            assert must in ver["motivering"], ver["motivering"]
+
+        # No moms anywhere — the private acquisition carried no avdragsrätt.
+        boxes = client.get(f"/books/{book}/reports/momsdeklaration",
+                           params={"start": "2026-01-01", "end": "2026-03-31"}).json()["boxes"]
+        assert boxes["48"] == 0 and boxes["49"] == 0
+
+    def test_over_half_a_prisbasbelopp_is_capitalised(self, client, book):
+        # 2026 prisbasbelopp 59 200 -> threshold 29 600 kr.
+        prev = client.get(f"/books/{book}/private-asset/preview",
+                          params={"amount_ore": 4000000}).json()
+        assert prev["threshold_ore"] == 2960000
+        assert prev["suggested"] == "aktivera" and prev["bas_konto"] == 1220
+        assert any("skrivas av" in n for n in prev["notes"])
+
+        client.post(f"/books/{book}/private-asset", json={
+            "description": "Serverskåp", "amount_ore": 4000000, "date": "2026-02-01"})
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[1220] == 4000000 and hb[2018] == -4000000
+
+    def test_mode_overrides_the_suggestion(self, client, book):
+        out = client.post(f"/books/{book}/private-asset", json={
+            "description": "Skrivare", "amount_ore": 500000, "date": "2026-02-01",
+            "mode": "aktivera"}).json()
+        assert out["treatment"] == "aktivera" and out["bas_konto"] == 1220
+        assert any("direktavdrag hade" in n for n in out["notes"])
+
+    def test_partial_business_use_books_only_that_share(self, client, book):
+        out = client.post(f"/books/{book}/private-asset", json={
+            "description": "Kamera", "amount_ore": 1000000, "date": "2026-03-01",
+            "business_pct_centi": 6000}).json()
+        assert out["booked_ore"] == 600000
+        assert "60 %" in out["motivering"]
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[5410] == 600000 and hb[2018] == -600000
+
+    def test_own_motivation_is_kept_and_konto_can_be_chosen(self, client, book):
+        out = client.post(f"/books/{book}/private-asset", json={
+            "description": "Dator", "amount_ore": 900000, "date": "2026-01-01",
+            "konto": 1250, "motivering": "Egen text om värderingen"}).json()
+        assert out["bas_konto"] == 1250 and out["motivering"] == "Egen text om värderingen"
+
+    def test_validation(self, client, book):
+        base = {"description": "X", "amount_ore": 100000, "date": "2026-01-01"}
+        assert client.post(f"/books/{book}/private-asset",
+                           json={**base, "description": "  "}).status_code == 400
+        assert client.post(f"/books/{book}/private-asset",
+                           json={**base, "amount_ore": 0}).status_code == 400
+        assert client.post(f"/books/{book}/private-asset",
+                           json={**base, "business_pct_centi": 0}).status_code == 400
+        assert client.post(f"/books/{book}/private-asset",
+                           json={**base, "mode": "hittepa"}).status_code == 400
+
+    def test_period_lock_is_respected(self, client, book):
+        client.post(f"/books/{book}/period-locks",
+                    json={"period_start": "2026-01-01", "period_end": "2026-03-31"})
+        assert client.post(f"/books/{book}/private-asset", json={
+            "description": "Dator", "amount_ore": 900000,
+            "date": "2026-02-01"}).status_code == 409
+
+    def test_manual_verifikation_can_be_marked_egenupprattad(self, client, book):
+        body = {"ver_date": "2026-01-01", "text": "Eget uttag",
+                "postings": [{"bas_konto": 2013, "debit_ore": 50000, "credit_ore": 0},
+                             {"bas_konto": 1930, "debit_ore": 0, "credit_ore": 50000}],
+                "egenupprattad": True}
+        # the flag without a motivation is refused — the motivation IS the underlag
+        assert client.post(f"/books/{book}/verifikationer/manual", json=body).status_code == 400
+        body["motivering"] = "Privat uttag ur kassan, styrkt av kontoutdrag."
+        assert client.post(f"/books/{book}/verifikationer/manual", json=body).status_code == 201
+        ver = client.get(f"/books/{book}/verifikationer-full").json()[0]
+        assert ver["egenupprattad"] == 1 and "kontoutdrag" in ver["motivering"]

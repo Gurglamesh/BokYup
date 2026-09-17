@@ -311,6 +311,28 @@ class AppFacade:
     def h_recurring_history(self, p, b, q):
         return self._ops(p["book_id"]).recurring_history(int(p["recurring_id"]))
 
+    # ---- privat tillgång in i verksamheten ----
+    @staticmethod
+    def _pct_centi(value):
+        """Business share, defaulting to 100 %. NOT `value or 10000` — 0 is a real (and
+        invalid) input that must reach the validation, not be silently read as 100 %."""
+        return 10000 if value in (None, "") else int(value)
+
+    def h_private_asset_preview(self, p, b, q):
+        return self._ops(p["book_id"]).private_asset_preview(
+            int(q.get("amount_ore") or 0), mode=q.get("mode") or "auto",
+            business_pct_centi=self._pct_centi(q.get("business_pct_centi")),
+            konto=int(q["konto"]) if q.get("konto") else None)
+
+    def h_book_private_asset(self, p, b, q):
+        return self._ops(p["book_id"]).book_private_asset_contribution(
+            b.get("description"), int(b.get("amount_ore") or 0), b["date"],
+            mode=b.get("mode") or "auto",
+            business_pct_centi=self._pct_centi(b.get("business_pct_centi")),
+            konto=b.get("konto"), acquired_date=b.get("acquired_date"),
+            acquired_amount_ore=b.get("acquired_amount_ore"),
+            motivering=b.get("motivering"))
+
     def h_reverse_charge_kinds(self, p, b, q):
         """The omvänd-betalningsskyldighet options + which momsdeklaration box each fills."""
         from backend.models.schema import REVERSE_CHARGE_BOXES, REVERSE_CHARGE_RATES
@@ -659,7 +681,9 @@ class AppFacade:
                   "amount_ore": int(ln.get("debit_ore") or 0) - int(ln.get("credit_ore") or 0),
                   "account_name": ln.get("account_name"), "text": ln.get("text")}
                  for ln in b["postings"]]
-        return ops.add_manual_verifikation(b["ver_date"], b["text"], lines, b.get("reg_date"))
+        return ops.add_manual_verifikation(
+            b["ver_date"], b["text"], lines, b.get("reg_date"),
+            egenupprattad=bool(b.get("egenupprattad")), motivering=b.get("motivering"))
 
     def h_list_transaktioner(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -980,6 +1004,8 @@ _route("GET", "/books/{book_id}/categories", "h_list_categories")
 _route("GET", "/books/{book_id}/categories/next-prefix", "h_next_prefix")
 _route("GET", "/books/{book_id}/bas-katalog", "h_bas_catalog")
 _route("GET", "/books/{book_id}/reverse-charge-kinds", "h_reverse_charge_kinds")
+_route("GET", "/books/{book_id}/private-asset/preview", "h_private_asset_preview")
+_route("POST", "/books/{book_id}/private-asset", "h_book_private_asset", 201)
 _route("GET", "/books/{book_id}/recurring", "h_list_recurring")
 _route("GET", "/books/{book_id}/recurring/due", "h_due_recurring")
 _route("POST", "/books/{book_id}/recurring", "h_create_recurring", 201)

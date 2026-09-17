@@ -726,7 +726,13 @@ const SECTION_RENDERERS = {
       api("GET", `/books/${bid()}/customers`),
       api("GET", `/books/${bid()}/suppliers`),
     ]);
-    panel.appendChild(el("h2", {}, "Bokför"));
+    const recHead = el("div", { style: "display:flex;align-items:center;justify-content:space-between" },
+      el("h2", { style: "margin:0" }, "Bokför"),
+      el("button", { class: "btn ghost", title:
+        "Egendom du äger privat och börjar använda i firman — bokförs mot eget kapital, "
+        + "ingen moms och inga pengar rör sig",
+        onclick: () => guard(privateAssetFlow) }, "💻 Privat tillgång in i verksamheten"));
+    panel.appendChild(recHead);
 
     const kind = el("select", {},
       el("option", { value: "income" }, "Inkomst (försäljning)"),
@@ -1329,7 +1335,15 @@ const SECTION_RENDERERS = {
           out.appendChild(el("h3", { style: "margin-top:18px" },
             `${v.series}${v.ver_number} `,
             el("span", { class: "muted", style: "font-weight:400" }, `${v.ver_date} — ${v.text || ""}`),
-            v.rattelse_of ? el("span", { class: "pill", style: "margin-left:6px" }, "rättelse") : null));
+            v.rattelse_of ? el("span", { class: "pill", style: "margin-left:6px" }, "rättelse") : null,
+            v.egenupprattad ? el("span", { class: "pill", style: "margin-left:6px",
+              title: "Egenupprättad verifikation (BFL 5 kap.) — motiveringen är underlaget" },
+              "egenupprättad") : null));
+          // The motivation IS the legal underlag when no external document exists, so it
+          // belongs in the grundbok view, not hidden behind a click.
+          if (v.motivering) {
+            out.appendChild(el("p", { class: "muted", style: "margin:4px 0 0" }, v.motivering));
+          }
           out.appendChild(el("table", {},
             el("thead", {}, el("tr", {},
               el("th", {}, "Konto"), el("th", {}, "Text"),
@@ -5256,4 +5270,98 @@ async function recurringHistoryFlow(r) {
     };
     $("#modal-backdrop").classList.remove("hidden");
   });
+}
+
+// ---------------------------------------------------------------------------
+// Privat tillgång in i verksamheten (tillskott)
+// ---------------------------------------------------------------------------
+// You and your enskilda firma are the same legal person, so this is not a purchase:
+// the asset is debited and eget kapital (2018) credited. No moms (the acquisition was
+// private, so no avdragsrätt arose) and no money moves. There is no external document,
+// which makes it an EGENUPPRÄTTAD verifikation — the motivation IS the underlag.
+async function privateAssetFlow() {
+  const desc = el("input", { type: "text",
+    placeholder: "t.ex. MacBook Pro 14, serienr ABC123" });
+  const amount = el("input", { type: "text", value: "", style: "width:140px" });
+  const date = el("input", { type: "date", value: new Date().toISOString().slice(0, 10) });
+  const acqDate = el("input", { type: "date", value: "" });
+  const acqAmount = el("input", { type: "text", value: "", style: "width:140px" });
+  const pct = el("input", { type: "number", min: "1", max: "100", value: "100",
+    style: "width:80px" });
+  const mode = el("select", {},
+    el("option", { value: "auto" }, "Låt programmet avgöra"),
+    el("option", { value: "direktavdrag" }, "Direktavdrag (kostnad)"),
+    el("option", { value: "aktivera" }, "Aktivera som inventarie"));
+  const motiv = el("textarea", { rows: "3", style: "width:100%",
+    placeholder: "Lämna tomt så skrivs en motivering utifrån uppgifterna ovan" });
+  const verdict = el("div", { class: "muted", style: "margin-top:6px" });
+
+  // Live preview: which konto, and why. The backend owns the rule (halva
+  // prisbasbeloppet, from config) — we never duplicate the threshold here.
+  let plan = null;
+  const refresh = async () => {
+    const ore = toOre(amount.value);
+    if (!ore) { verdict.textContent = ""; plan = null; return; }
+    try {
+      plan = await api("GET", `/books/${bid()}/private-asset/preview`
+        + `?amount_ore=${ore}&mode=${mode.value}`
+        + `&business_pct_centi=${Math.round(parseFloat(pct.value || "100") * 100)}`);
+      verdict.innerHTML = "";
+      const summary = ` — bokförs ${toKr(plan.booked_ore)} kr på ${plan.bas_konto} `
+        + `${plan.konto_namn || ""} mot ${plan.motkonto} Egna insättningar. `
+        + `Gräns för direktavdrag: ${toKr(plan.threshold_ore)} kr (halva prisbasbeloppet).`;
+      verdict.appendChild(el("div", {},
+        el("strong", {}, plan.treatment === "direktavdrag"
+          ? "Direktavdrag" : "Aktiveras som inventarie"),
+        summary));
+      for (const n of plan.notes) verdict.appendChild(el("div", { style: "margin-top:4px" }, n));
+    } catch (e) {
+      verdict.textContent = String(e.message || e);
+      plan = null;
+    }
+  };
+  amount.oninput = refresh; pct.oninput = refresh; mode.onchange = refresh;
+
+  const body = $("#modal-body");
+  $("#modal-title").textContent = "Privat tillgång in i verksamheten";
+  body.innerHTML = "";
+  body.appendChild(el("p", { class: "muted", style: "margin:0 0 8px" },
+    "Egendom du äger privat och börjar använda i firman. Den bokförs mot eget kapital "
+    + "(2018 Egna insättningar) — ingen moms, inga pengar rör sig. Värdet ska vara det "
+    + "lägsta av vad du betalade privat och marknadsvärdet den dag den tas i bruk i "
+    + "verksamheten."));
+  body.appendChild(wrap("Vad är det? (modell, serienummer)", desc));
+  body.appendChild(el("div", { class: "row", style: "gap:10px;flex-wrap:wrap" },
+    wrap("Värde vid överföringen (kr)", amount),
+    wrap("Tas i bruk i verksamheten", date),
+    wrap("Andel i verksamheten (%)", pct)));
+  body.appendChild(el("div", { class: "row", style: "gap:10px;flex-wrap:wrap" },
+    wrap("Köpt privat (datum)", acqDate),
+    wrap("Vad du betalade då (kr)", acqAmount),
+    wrap("Behandling", mode)));
+  body.appendChild(verdict);
+  body.appendChild(el("label", { style: "margin-top:10px;display:block" },
+    "Motivering (underlaget — BFL 5 kap.)"));
+  body.appendChild(motiv);
+
+  const ok = await openModalPromise("Bokför");
+  if (!ok) return;
+  if (!desc.value.trim()) { toast("Beskriv tillgången", true); return; }
+  if (!toOre(amount.value)) { toast("Ange tillgångens värde vid överföringen", true); return; }
+
+  const res = await api("POST", `/books/${bid()}/private-asset`, {
+    description: desc.value.trim(),
+    amount_ore: toOre(amount.value),
+    date: date.value,
+    mode: mode.value,
+    business_pct_centi: Math.round(parseFloat(pct.value || "100") * 100),
+    acquired_date: acqDate.value || null,
+    acquired_amount_ore: toOre(acqAmount.value) || null,
+    motivering: motiv.value.trim() || null,
+  });
+  toast(`Bokfört som verifikat A${res.ver_number} — `
+    + (res.treatment === "direktavdrag"
+      ? `direktavdrag på ${res.bas_konto}`
+      : `aktiverat på ${res.bas_konto}, glöm inte avskrivningen vid bokslutet`));
+  renderWorkspace();
 }

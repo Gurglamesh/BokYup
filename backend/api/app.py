@@ -246,6 +246,19 @@ def _build_router():
     def reverse_charge_kinds(book_id: str, request: Request):
         return fac(request).h_reverse_charge_kinds({"book_id": book_id}, {}, {})
 
+    @r.get("/books/{book_id}/private-asset/preview")
+    def private_asset_preview(book_id: str, request: Request, amount_ore: int = 0,
+                              mode: str = "auto", business_pct_centi: int = 10000,
+                              konto: int | None = None):
+        return fac(request).h_private_asset_preview(
+            {"book_id": book_id}, {},
+            {"amount_ore": amount_ore, "mode": mode,
+             "business_pct_centi": business_pct_centi, "konto": konto})
+
+    @r.post("/books/{book_id}/private-asset", status_code=201)
+    def book_private_asset(book_id: str, body: sc.PrivateAssetReq, request: Request):
+        return fac(request).h_book_private_asset({"book_id": book_id}, body.model_dump(), {})
+
     @r.get("/books/{book_id}/recurring")
     def list_recurring(book_id: str, request: Request, active_only: bool = False):
         return fac(request).h_list_recurring({"book_id": book_id}, {},

@@ -86,6 +86,12 @@ _SYS_ACCOUNT_NAMES = {
     "account_kundfordran": "Kundfordringar",
     "account_leverantorsskuld": "Leverantörsskulder",
     "account_ores_kronutjamning": "Öres- och kronutjämning",
+    "account_utg_moms_omvand_25": "Utgående moms omvänd skattskyldighet 25 %",
+    "account_utg_moms_omvand_12": "Utgående moms omvänd skattskyldighet 12 %",
+    "account_utg_moms_omvand_6": "Utgående moms omvänd skattskyldighet 6 %",
+    "account_ing_moms_utland": "Beräknad ingående moms på förvärv från utlandet",
+    "account_forbrukningsinventarier": "Förbrukningsinventarier",
+    "account_inventarier": "Inventarier och verktyg",
 }
 
 _DEFAULT_PAY_METHODS = ["Företagskonto", "Kort", "Swish", "Klarna delbetalning",
@@ -2235,7 +2241,8 @@ class BookOps:
         clause = (" WHERE " + " AND ".join(where)) if where else ""
         vers = [dict(r) for r in self.conn.execute(
             "SELECT id, series, ver_number, ver_date, registration_date, text, posted, "
-            "rattelse_of FROM verifikation" + clause + " ORDER BY ver_number", args)]
+            "rattelse_of, egenupprattad, motivering FROM verifikation" + clause
+            + " ORDER BY ver_number", args)]
         for v in vers:
             v["postings"] = [dict(r) for r in self.conn.execute(
                 "SELECT p.bas_konto, a.name AS konto_namn, p.amount_ore, p.text "
@@ -2281,7 +2288,9 @@ class BookOps:
         return [accounts[k] for k in sorted(accounts)]
 
     def add_manual_verifikation(self, ver_date: str, text: str, lines: list[dict],
-                                reg_date: Optional[str] = None) -> dict:
+                                reg_date: Optional[str] = None,
+                                egenupprattad: bool = False,
+                                motivering: Optional[str] = None) -> dict:
         """
         Post a MANUAL verifikation (a hand-entered journal entry, independent of
         invoices/transaktioner) — for corrections that the automated flows can't make,
@@ -2309,10 +2318,163 @@ class BookOps:
             raise ValueError("En verifikation behöver minst två konteringsrader med belopp")
         if total != 0:
             raise ValueError(f"Debet och kredit balanserar inte (differens {total} öre)")
+        if egenupprattad and not (motivering or "").strip():
+            raise ValueError(
+                "En egenupprättad verifikation behöver en motivering — den ÄR underlaget "
+                "(BFL 5 kap.): vad den avser och hur beloppet är bestämt")
         with self.conn:
             vid, number = self._post_verifikation(
-                ver_date, reg_date or ver_date, text.strip(), postings)
+                ver_date, reg_date or ver_date, text.strip(), postings,
+                egenupprattad=egenupprattad, motivering=motivering)
         return {"verifikation_id": vid, "ver_number": number}
+
+    # ------------------------------------------------------------------
+    # Privat tillgång in i verksamheten (tillskott)
+    # ------------------------------------------------------------------
+    #
+    # An enskild näringsidkare and their firma are the same legal person, so bringing
+    # privately-owned property into the business is not a purchase — it is a TILLSKOTT:
+    # the asset is debited and eget kapital (2018 Egna insättningar) is credited. No money
+    # moves and there is NO moms: the acquisition was private, so no avdragsrätt arose,
+    # and it does not arise afterwards.
+    #
+    # Two things decide the booking:
+    #   * the VALUE — the lower of what it cost privately and its market value on the day
+    #     it starts being used in the business (we never invent it; the user states it and
+    #     the motivation records how they arrived at it);
+    #   * the AMOUNT vs halva prisbasbeloppet — under it the asset may be expensed
+    #     directly (5410), over it it is capitalised (1220/1250) and depreciated.
+    #
+    # There is no external document behind the entry, so it is an EGENUPPRÄTTAD
+    # VERIFIKATION (BFL 5 kap.) and the motivation is the underlag.
+
+    @staticmethod
+    def _kr(ore: int) -> str:
+        """Swedish money for human-readable text: 1850000 -> '18 500,00 kr'."""
+        return f"{ore / 100:,.2f}".replace(",", " ").replace(".", ",") + " kr"
+
+    def _halva_prisbasbeloppet_ore(self) -> int:
+        """The direktavdrag threshold: half a prisbasbelopp (config, updated yearly)."""
+        return int(self._config("prisbasbelopp_ore")) // 2
+
+    def private_asset_preview(self, amount_ore: int, *, mode: str = "auto",
+                              business_pct_centi: int = 10000,
+                              konto: Optional[int] = None) -> dict:
+        """
+        Work out how a private asset would be booked WITHOUT booking it, so the UI can
+        explain the treatment (and why) before the user commits.
+        """
+        amount_ore = int(amount_ore)
+        if amount_ore <= 0:
+            raise ValueError("Ange tillgångens värde vid överföringen")
+        pct = int(business_pct_centi)
+        if not 0 < pct <= 10000:
+            raise ValueError("Verksamhetsandelen måste vara mellan 0 och 100 %")
+        if mode not in ("auto", "direktavdrag", "aktivera"):
+            raise ValueError("mode måste vara auto, direktavdrag eller aktivera")
+
+        booked = round(amount_ore * pct / 10000)
+        threshold = self._halva_prisbasbeloppet_ore()
+        suggested = "direktavdrag" if booked <= threshold else "aktivera"
+        chosen = suggested if mode == "auto" else mode
+        default_konto = self._sys_account(
+            "account_forbrukningsinventarier" if chosen == "direktavdrag"
+            else "account_inventarier")
+        konto = int(konto) if konto else default_konto
+        entry = catalog_entry(konto)
+        konto_namn = self._account_name(konto) or (entry["name"] if entry else None)
+
+        notes = []
+        if chosen == "aktivera":
+            notes.append(
+                "Tillgången aktiveras som inventarie och ska skrivas av över sin "
+                "nyttjandeperiod — bokför avskrivningen separat vid bokslutet "
+                "(7832 mot ackumulerade avskrivningar).")
+        if chosen == "direktavdrag" and booked > threshold:
+            notes.append(
+                f"OBS: beloppet överstiger halva prisbasbeloppet ({self._kr(threshold)}) — "
+                "direktavdrag är normalt inte tillåtet.")
+        if chosen == "aktivera" and booked <= threshold:
+            notes.append(
+                "Beloppet ligger under halva prisbasbeloppet, så direktavdrag hade "
+                "också varit möjligt. Att aktivera är tillåtet.")
+        if pct < 10000:
+            notes.append(
+                f"Endast verksamhetsandelen ({pct / 100:g} %) bokförs. Motivera "
+                "fördelningen i underlaget.")
+        return {
+            "amount_ore": amount_ore,
+            "business_pct_centi": pct,
+            "booked_ore": booked,
+            "threshold_ore": threshold,
+            "suggested": suggested,
+            "treatment": chosen,
+            "bas_konto": konto,
+            "konto_namn": konto_namn,
+            "motkonto": self._sys_account("account_egna_insattningar"),
+            "notes": notes,
+        }
+
+    def book_private_asset_contribution(self, description: str, amount_ore: int, date: str, *,
+                                        mode: str = "auto",
+                                        business_pct_centi: int = 10000,
+                                        konto: Optional[int] = None,
+                                        acquired_date: Optional[str] = None,
+                                        acquired_amount_ore: Optional[int] = None,
+                                        motivering: Optional[str] = None) -> dict:
+        """
+        Book a privately-owned asset being brought into the business on `date` (the day it
+        starts being used in the verksamhet). Debits the asset/cost konto and credits 2018
+        Egna insättningar — no moms, no money.
+
+        The result is an EGENUPPRÄTTAD verifikation: `motivering` is the legal underlag, so
+        it is required. When the caller does not supply one a complete default is composed
+        from the facts given (description, dates, the private cost, the market value and
+        the business share) — which is exactly what BFL 5 kap. asks the underlag to state.
+        """
+        description = (description or "").strip()
+        if not description:
+            raise ValueError("Beskriv tillgången (t.ex. modell och serienummer)")
+        plan = self.private_asset_preview(amount_ore, mode=mode,
+                                          business_pct_centi=business_pct_centi, konto=konto)
+        booked = plan["booked_ore"]
+        if booked <= 0:
+            raise ValueError("Det bokförda beloppet blir noll")
+
+        if not (motivering or "").strip():
+            bits = [f"{description}."]
+            if acquired_date:
+                bits.append(f"Förvärvad privat {acquired_date}"
+                            + (f" för {self._kr(acquired_amount_ore)}." if acquired_amount_ore
+                               else "."))
+            bits.append(f"Tas i bruk i verksamheten {date}.")
+            bits.append("Marknadsvärde vid överföringen bedöms till "
+                        f"{self._kr(plan['amount_ore'])}.")
+            if plan["business_pct_centi"] < 10000:
+                bits.append(f"Används till {plan['business_pct_centi'] / 100:g} % i "
+                            f"verksamheten; bokfört värde {self._kr(booked)}.")
+            else:
+                bits.append("Används uteslutande i verksamheten.")
+            motivering = " ".join(bits)
+
+        # The private acquisition carried no avdragsrätt, so there is no moms leg — and
+        # no moms_line either: this never belongs in the momsdeklaration.
+        postings = [
+            (plan["bas_konto"], booked, description),
+            (plan["motkonto"], -booked, "egen insättning"),
+        ]
+        self.ensure_account(plan["bas_konto"],
+                            plan["konto_namn"] or f"Konto {plan['bas_konto']}")
+        self.ensure_account(plan["motkonto"],
+                            self._account_name(plan["motkonto"]) or "Egna insättningar")
+        with self.conn:
+            vid, number = self._post_verifikation(
+                date, _now()[:10],
+                f"Överföring privat tillgång till verksamheten: {description}",
+                postings, egenupprattad=True, motivering=motivering)
+        return {"verifikation_id": vid, "ver_number": number, "motivering": motivering,
+                **{k: plan[k] for k in ("treatment", "bas_konto", "konto_namn",
+                                        "booked_ore", "threshold_ore", "notes")}}
 
     def _account_name(self, bas_konto: int) -> Optional[str]:
         row = self.conn.execute(
@@ -4191,7 +4353,9 @@ class BookOps:
     def _post_verifikation(self, ver_date: str, reg_date: str, text: str,
                            postings: list[tuple[int, int, str | None]],
                            series: str = "A",
-                           rattelse_of: Optional[int] = None) -> tuple[int, int]:
+                           rattelse_of: Optional[int] = None,
+                           egenupprattad: bool = False,
+                           motivering: Optional[str] = None) -> tuple[int, int]:
         """
         Insert a posted verifikation with balanced postings. Asserts the postings
         sum to zero and the period is open. MUST be called inside a `with self.conn`.
@@ -4206,8 +4370,10 @@ class BookOps:
         number = self._next_ver_number(series)
         cur = self.conn.execute(
             "INSERT INTO verifikation(series, ver_number, ver_date, registration_date, "
-            "text, posted, rattelse_of, created_at) VALUES (?,?,?,?,?,1,?,?)",
-            (series, number, ver_date, reg_date, text, rattelse_of, _now()),
+            "text, posted, rattelse_of, egenupprattad, motivering, created_at) "
+            "VALUES (?,?,?,?,?,1,?,?,?,?)",
+            (series, number, ver_date, reg_date, text, rattelse_of,
+             int(bool(egenupprattad)), (motivering or None), _now()),
         )
         vid = cur.lastrowid
         for konto, amount, ptext in postings:

@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 40
+SCHEMA_VERSION = 41
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -177,6 +177,11 @@ CREATE TABLE verifikation (
     text              TEXT NOT NULL,
     posted            INTEGER NOT NULL DEFAULT 0,
     rattelse_of       INTEGER REFERENCES verifikation(id),  -- correcting entry -> original
+    -- Egenupprättad verifikation (BFL 5 kap.): there is no external document behind this
+    -- entry (e.g. a private asset brought into the business), so the motivation IS the
+    -- underlag and must say what it concerns and how the amount was arrived at.
+    egenupprattad     INTEGER NOT NULL DEFAULT 0,
+    motivering        TEXT,
     created_at        TEXT NOT NULL,
     UNIQUE (series, ver_number)         -- unbroken sequence guard (NULLs allowed)
 );
@@ -663,6 +668,9 @@ _DEFAULT_CONFIG = {
     "account_utg_moms_omvand_12": "2624",   # Utgående moms omvänd skattskyldighet, 12 %
     "account_utg_moms_omvand_6": "2634",    # Utgående moms omvänd skattskyldighet, 6 %
     "account_ing_moms_utland": "2645",      # Beräknad ingående moms på förvärv från utlandet
+    # Privat tillgång som förs in i verksamheten books to one of these against 2018.
+    "account_forbrukningsinventarier": "5410",  # direktavdrag (under halva prisbasbeloppet)
+    "account_inventarier": "1220",          # aktiveras + skrivs av (över halva prisbasbeloppet)
     # When Skatteverket's husavdrag payout differs from the claimed amount by no more
     # than this many ören, treat it as pure rounding and book the diff to 3740. A
     # larger underpayment is a partial payout (a follow-up receivable on the customer).
@@ -1157,6 +1165,16 @@ _MIGRATIONS: dict[int, str] = {
             created_at     TEXT NOT NULL,
             UNIQUE (recurring_id, due_date)
         );
+    """,
+    # v41: egenupprättad verifikation (BFL 5 kap.) — a flag + the motivation that IS the
+    # underlag when no external document exists, plus the konton a private asset brought
+    # into the business books to.
+    41: """
+        ALTER TABLE verifikation ADD COLUMN egenupprattad INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE verifikation ADD COLUMN motivering TEXT;
+
+        INSERT OR IGNORE INTO config(key, value) VALUES ('account_forbrukningsinventarier', '5410');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('account_inventarier', '1220');
     """,
 }
 

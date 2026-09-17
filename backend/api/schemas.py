@@ -291,6 +291,24 @@ class ManualVerifikationReq(BaseModel):
     text: str
     reg_date: Optional[str] = None
     postings: list[ManualPostingReq]
+    # Egenupprättad verifikation (BFL 5 kap.): no external document exists, so the
+    # motivation IS the underlag and is required when the flag is set.
+    egenupprattad: bool = False
+    motivering: Optional[str] = None
+
+
+class PrivateAssetReq(BaseModel):
+    """A privately-owned asset brought into the business (tillskott): debited to the
+    cost/asset konto against 2018 Egna insättningar. No moms, no money."""
+    description: str                       # e.g. "MacBook Pro 14, serienr XYZ"
+    amount_ore: int                        # value at the transfer (market value)
+    date: str                              # the day it starts being used in the business
+    mode: str = "auto"                     # auto | direktavdrag | aktivera
+    business_pct_centi: int = 10000        # share used in the business (100 % = 10000)
+    konto: Optional[int] = None            # override the suggested konto
+    acquired_date: Optional[str] = None    # when it was bought privately
+    acquired_amount_ore: Optional[int] = None
+    motivering: Optional[str] = None       # composed from the facts when omitted
 
 
 class PeriodLockReq(BaseModel):
