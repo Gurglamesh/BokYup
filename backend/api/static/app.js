@@ -488,7 +488,8 @@ const GROUPS = [
     sections: [["invoices", "Fakturor", "fakturor"], ["invoices", "Offerter", "offerter"],
                ["invoices", "Utkast", "utkast"], ["rut", "RUT/ROT"]] },
   { id: "purchase", icon: "🛒", label: "Inköp", color: "#2f8f6b",
-    sections: [["purchases", "Inköp"], ["suppliers", "Leverantörer"]] },
+    sections: [["purchases", "Inköp"], ["recurring", "Återkommande"],
+               ["suppliers", "Leverantörer"]] },
   { id: "inventory", icon: "📦", label: "Lager", color: "#b7791f",
     sections: [["articles", "Artiklar"], ["stock", "Lagersaldo"]] },
   { id: "customers", icon: "👥", label: "Kunder", color: "#7a5bb0",
@@ -996,6 +997,60 @@ const SECTION_RENDERERS = {
       ? "Sök företag (namn, org.nr, momsreg.nr, e-post, adress)…"
       : "Sök privatperson (namn, nr, e-post, telefon, adress)…";
     panel.appendChild(searchTable(placeholder, headers, all, match, rowFn));
+  },
+
+  // ----- återkommande betalningar -----
+  // The template books nothing; each occurrence is CONFIRMED here (and can be adjusted
+  // for that one time). Editing the template changes the whole series going forward.
+  async recurring(panel) {
+    const list = await api("GET", `/books/${bid()}/recurring`);
+    const head = headerWithAdd("Återkommande betalningar", "+ Ny serie",
+      () => guard(() => recurringFlow(null)));
+    panel.appendChild(head);
+
+    const due = list.filter((r) => r.due);
+    if (due.length) {
+      panel.appendChild(el("h3", { style: "margin-top:12px" },
+        `Att bekräfta (${due.length})`));
+      panel.appendChild(el("p", { class: "muted" },
+        "Inget är bokfört förrän du bekräftar. Du kan justera beloppet för just den "
+        + "här gången utan att serien ändras."));
+      panel.appendChild(simpleTable(
+        ["Namn", "Förfaller", "Belopp", ""],
+        due.map((r) => [r.name, r.next_date, toKr(r.total_ore) + " kr",
+          el("span", { style: "display:inline-flex;gap:4px;flex-wrap:wrap" },
+            el("button", { class: "btn small",
+              onclick: () => guard(() => confirmRecurringFlow(r)) }, "Bekräfta"),
+            el("button", { class: "btn small ghost",
+              onclick: () => guard(() => skipRecurringFlow(r)) }, "Hoppa över"))])));
+    }
+
+    panel.appendChild(el("h3", { style: "margin-top:22px" }, "Serier"));
+    if (!list.length) {
+      panel.appendChild(el("p", { class: "muted" },
+        "Inga återkommande betalningar ännu. Lägg upp t.ex. ett abonnemang, en hyra "
+        + "eller en försäkring — så dyker den upp här när den förfaller."));
+      return;
+    }
+    panel.appendChild(simpleTable(
+      ["Namn", "Typ", "Intervall", "Nästa", "Belopp", "Bokförda", "Status", ""],
+      list.map((r) => [
+        r.name,
+        r.kind === "expense" ? "Inköp" : "Inkomst",
+        recurringIntervalLabel(r),
+        r.next_date,
+        toKr(r.total_ore) + " kr",
+        String(r.booked_count),
+        el("span", { class: "pill " + (r.active ? "paid" : "") }, r.active ? "Aktiv" : "Pausad"),
+        el("span", { style: "display:inline-flex;gap:4px;flex-wrap:wrap" },
+          editBtn(() => guard(() => recurringFlow(r))),
+          el("button", { class: "btn small ghost",
+            onclick: () => guard(() => toggleRecurringActive(r)) },
+            r.active ? "Pausa" : "Återuppta"),
+          el("button", { class: "btn small ghost",
+            onclick: () => guard(() => recurringHistoryFlow(r)) }, "Historik"),
+          el("button", { class: "btn small ghost danger",
+            onclick: () => guard(() => deleteRecurringFlow(r)) }, "Ta bort"))])));
   },
 
   // ----- suppliers -----
@@ -2042,6 +2097,21 @@ const SECTION_RENDERERS = {
 // Moms-lines editor — one row per momssats (a receipt can mix 6/12/25 %)
 // ---------------------------------------------------------------------------
 const RATE_OPTIONS = ["25", "12", "6", "0", "momsfri", "ej_avdragsgill"];
+// Omvänd betalningsskyldighet på ett INKÖP: säljaren fakturerar utan moms och du
+// redovisar båda sidorna själv. Värdet styr vilken ruta underlaget hamnar i.
+const REVERSE_CHARGE_OPTIONS = [
+  { value: "", label: "Nej (vanlig moms)" },
+  { value: "eu_tjanst", label: "EU-tjänst, huvudregeln (ruta 21)" },
+  { value: "eu_vara", label: "EU-vara (ruta 20)" },
+  { value: "utanfor_eu", label: "Tjänst utanför EU (ruta 22)" },
+  { value: "sv_vara", label: "Vara i Sverige, omvänd (ruta 23)" },
+  { value: "sv_tjanst", label: "Tjänst i Sverige, omvänd (ruta 24)" },
+];
+const REVERSE_CHARGE_LABEL = Object.fromEntries(
+  REVERSE_CHARGE_OPTIONS.filter((o) => o.value).map((o) => [o.value, o.label]));
+// A reverse-charge line's amount is ALWAYS the beskattningsunderlag (the seller charged
+// no moms), so the "inkl. moms"-tolkning never applies to it.
+const rcRateOk = (r) => r === "25" || r === "12" || r === "6";
 const RATE_PCT = { "25": 0.25, "12": 0.12, "6": 0.06 };   // 0/momsfri/ej_avdragsgill -> 0
 function rateLabel(r) {
   if (!r) return "—";
@@ -3469,6 +3539,18 @@ function purchaseItemsEditor(incomeCats, articles, onChange, initialItems) {
     const cost = el("input", { type: "text", value: costVal, style: "width:96px", oninput: fire });
     const rate = el("select", { onchange: fire }, ...RATE_OPTIONS.map((r) => el("option", { value: r }, rateLabel(r))));
     if (v.rate_code) rate.value = v.rate_code;
+    const rc = el("select", { style: "min-width:190px" },
+      ...REVERSE_CHARGE_OPTIONS.map((o) => el("option", { value: o.value }, o.label)));
+    if (v.reverse_charge) rc.value = v.reverse_charge;
+    const syncRc = () => {
+      // Omvänd moms kräver en momssats att räkna på (25/12/6).
+      const ok = rcRateOk(rate.value);
+      rc.disabled = !ok;
+      if (!ok) rc.value = "";
+      rc._wrap.style.opacity = ok ? "" : "0.5";
+    };
+    rc.onchange = fire;
+    rate.addEventListener("change", () => { syncRc(); fire(); });
     pick.onchange = () => {
       const a = arts.find((x) => String(x.id) === pick.value);
       if (!a) return;
@@ -3478,15 +3560,19 @@ function purchaseItemsEditor(incomeCats, articles, onChange, initialItems) {
       fire();
     };
     name.addEventListener("input", () => { pick.value = ""; });
+    const rcWrap = wrap("Omvänd moms", rc);
+    rc._wrap = rcWrap;
+    syncRc();
     const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end;flex-wrap:wrap" },
       wrap("Befintlig", pick), wrap("Artikelnamn", name), wrap("Produktkategori", cat),
-      wrap("Antal", qty), wrap("À-pris ex moms", cost), wrap("Moms", rate),
+      wrap("Antal", qty), wrap("À-pris ex moms", cost), wrap("Moms", rate), rcWrap,
       el("button", { class: "btn small ghost", onclick: (e) => { e.target.closest(".row").remove(); fire(); } }, "✕"));
     row._get = () => ({
       description: name.value.trim() || null,
       category_id: cat.value ? parseInt(cat.value, 10) : null,
       quantity_centi: Math.round(parseFloat((qty.value || "0").replace(",", ".")) * 100),
       unit_cost_ore: toOre(cost.value), rate_code: rate.value, to_stock: true,
+      reverse_charge: rc.value || null,
     });
     rowsBox.appendChild(row);
   }
@@ -3603,12 +3689,19 @@ async function purchaseForm(panel, draft, edit) {
     ores, el("span", {}, "Leverantören öresavrundar totalen (diff bokförs på 3740)"));
   const totalsBox = el("p", { class: "muted", style: "margin-top:6px" });
   const updateTotals = () => {
-    let ex = 0, moms = 0;
+    let ex = 0, moms = 0, rcMoms = 0;
     for (const it of items.get()) {
       const lineEx = Math.round(it.quantity_centi * it.unit_cost_ore / 100);
-      ex += lineEx; moms += Math.round(lineEx * (RATE_PCT[it.rate_code] || 0));
+      const lineMoms = Math.round(lineEx * (RATE_PCT[it.rate_code] || 0));
+      ex += lineEx; moms += lineMoms;
+      if (it.reverse_charge) rcMoms += lineMoms;   // reported both ways, never paid out
     }
-    totalsBox.textContent = `Summa: ${toKr(ex)} kr ex moms + ${toKr(moms)} kr moms = ${toKr(ex + moms)} kr`;
+    totalsBox.textContent =
+      `Summa: ${toKr(ex)} kr ex moms + ${toKr(moms)} kr moms = ${toKr(ex + moms)} kr`
+      + (rcMoms
+        ? ` · varav ${toKr(rcMoms)} kr omvänd moms (redovisas både som utgående och `
+          + `ingående — du betalar ${toKr(ex + moms - rcMoms)} kr till leverantören)`
+        : "");
   };
   const items = purchaseItemsEditor(incomeCats, articles, updateTotals, dp.items);
   // On a create the kvittoformat is required; on an edit the inköp already has one, so a
@@ -4917,3 +5010,250 @@ async function afterConnect() {
     renderConnectionChooser();
   }
 })();
+
+// ---------------------------------------------------------------------------
+// Återkommande betalningar
+// ---------------------------------------------------------------------------
+function recurringIntervalLabel(r) {
+  const n = r.interval_count || 1;
+  if (r.interval_unit === "year") return n === 1 ? "Varje år" : `Var ${n}:e år`;
+  return n === 1 ? "Varje månad" : `Var ${n}:e månad`;
+}
+
+// One moms line of a recurring template: belopp + momssats + omvänd moms.
+function recurringLinesEditor(initial, kind) {
+  const rowsBox = el("div", {});
+  function addRow(v) {
+    v = v || {};
+    const amount = el("input", { type: "text", style: "width:120px",
+      value: v.amount_ore != null ? toKr(v.amount_ore) : "" });
+    const rate = el("select", {}, ...RATE_OPTIONS.map((r) => el("option", { value: r }, rateLabel(r))));
+    if (v.rate_code) rate.value = v.rate_code;
+    const incl = el("select", {},
+      el("option", { value: "1" }, "Inkl. moms"), el("option", { value: "0" }, "Ex moms"));
+    incl.value = v.inclusive === false ? "0" : "1";
+    const rc = el("select", { style: "min-width:190px" },
+      ...REVERSE_CHARGE_OPTIONS.map((o) => el("option", { value: o.value }, o.label)));
+    if (v.reverse_charge) rc.value = v.reverse_charge;
+    const inclWrap = wrap("Beloppet är", incl);
+    const rcWrap = wrap("Omvänd moms", rc);
+    if (kind !== "expense") rcWrap.style.display = "none";
+    const sync = () => {
+      const ok = rcRateOk(rate.value) && kind === "expense";
+      rc.disabled = !ok;
+      if (!ok) rc.value = "";
+      // Omvänd moms: beloppet är alltid underlaget, så inkl/ex-valet blir meningslöst.
+      inclWrap.style.display = rc.value ? "none" : "";
+      rcWrap.style.opacity = ok ? "" : "0.5";
+    };
+    rate.onchange = sync;
+    rc.onchange = sync;
+    sync();
+    const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end;flex-wrap:wrap" },
+      wrap("Belopp", amount), wrap("Moms", rate), inclWrap, rcWrap,
+      el("button", { class: "btn small ghost",
+        onclick: (e) => { e.target.closest(".row").remove(); } }, "✕"));
+    row._get = () => ({
+      amount_ore: toOre(amount.value), rate_code: rate.value,
+      inclusive: incl.value === "1", reverse_charge: rc.value || null,
+    });
+    rowsBox.appendChild(row);
+  }
+  if (initial && initial.length) initial.forEach(addRow); else addRow();
+  const element = el("div", {}, rowsBox,
+    el("button", { class: "btn small ghost", onclick: () => addRow() }, "+ Rad"));
+  return { element, get: () => [...rowsBox.children].map((r) => r._get()).filter((l) => l.amount_ore > 0) };
+}
+
+// Create or edit a series. Editing applies to every occurrence not yet confirmed.
+async function recurringFlow(existing) {
+  const [cats, suppliers, customers] = await Promise.all([
+    api("GET", `/books/${bid()}/categories`),
+    api("GET", `/books/${bid()}/suppliers`),
+    api("GET", `/books/${bid()}/customers`),
+  ]);
+  const kind = existing ? existing.kind : await pickRecurringKind();
+  if (!kind) return;
+  const pool = cats.filter((c) => c.kind === (kind === "expense" ? "expense" : "income")
+    && (c.active !== 0 || (existing && c.id === existing.category_id)));
+  if (!pool.length) { toast("Lägg till ett BAS-konto för den här typen först", true); return; }
+
+  const name = el("input", { type: "text", value: existing ? existing.name : "",
+    placeholder: "t.ex. Claude-abonnemang" });
+  const cat = el("select", {}, ...pool.map((c) => el("option", { value: c.id }, categoryPath(cats, c.id))));
+  if (existing) cat.value = String(existing.category_id);
+  const lines = recurringLinesEditor(existing ? existing.lines : null, kind);
+  const unit = el("select", {}, el("option", { value: "month" }, "Månad"),
+    el("option", { value: "year" }, "År"));
+  if (existing) unit.value = existing.interval_unit;
+  const count = el("input", { type: "number", min: "1", style: "width:70px",
+    value: existing ? String(existing.interval_count) : "1" });
+  const next = el("input", { type: "date",
+    value: existing ? existing.next_date : new Date().toISOString().slice(0, 10) });
+  const end = el("input", { type: "date", value: existing && existing.end_date ? existing.end_date : "" });
+  const counterparty = el("select", {}, el("option", { value: "" }, "(ingen)"),
+    ...(kind === "expense"
+      ? suppliers.map((x) => el("option", { value: x.id }, x.name))
+      : customers.map((x) => el("option", { value: x.kundnummer },
+          x.company_name || `${x.first_name || ""} ${x.last_name || ""}`.trim()
+            || ("Kund " + x.kundnummer)))));
+  if (existing) counterparty.value = String(
+    (kind === "expense" ? existing.supplier_id : existing.customer_id) || "");
+  const paidAccount = el("select", {},
+    el("option", { value: "bank" }, "Företagskonto"),
+    el("option", { value: "privat" }, "Privat insättning (privat konto)"));
+  if (existing) paidAccount.value = existing.paid_account;
+  const note = el("input", { type: "text", value: existing && existing.note ? existing.note : "",
+    placeholder: "Hamnar i verifikationstexten" });
+
+  const body = $("#modal-body");
+  $("#modal-title").textContent = existing
+    ? `Ändra "${existing.name}" — gäller hela serien framåt`
+    : (kind === "expense" ? "Ny återkommande betalning" : "Ny återkommande inkomst");
+  body.innerHTML = "";
+  body.appendChild(el("p", { class: "muted", style: "margin:0 0 8px" },
+    existing
+      ? "Ändringen gäller varje kommande betalning i serien, även den som ligger och "
+        + "väntar på att bekräftas. Redan bokförda betalningar rörs inte — de är "
+        + "verifikationer och rättas i så fall med en rättelse."
+      : "Serien bokför ingenting av sig själv. När ett datum infaller dyker den upp "
+        + "under \"Att bekräfta\" och du godkänner den (eller ändrar beloppet den gången)."));
+  body.appendChild(wrap("Namn", name));
+  body.appendChild(wrap("BAS-konto", cat));
+  body.appendChild(el("label", {}, "Rader"));
+  body.appendChild(lines.element);
+  body.appendChild(el("div", { class: "row", style: "gap:8px;flex-wrap:wrap" },
+    wrap("Var", count), wrap("Enhet", unit), wrap("Nästa betalning", next),
+    wrap("Slutar (valfritt)", end)));
+  body.appendChild(wrap(kind === "expense" ? "Leverantör" : "Kund", counterparty));
+  if (kind === "expense") body.appendChild(wrap("Pengarna dras från", paidAccount));
+  body.appendChild(wrap("Notering", note));
+
+  const ok = await openModalPromise(existing ? "Spara" : "Skapa serie");
+  if (!ok) return;
+  const rows = lines.get();
+  if (!name.value.trim()) { toast("Ge serien ett namn", true); return; }
+  if (!rows.length) { toast("Lägg till minst en rad med belopp", true); return; }
+  const payload = {
+    name: name.value.trim(), category_id: parseInt(cat.value, 10), lines: rows,
+    interval_unit: unit.value, interval_count: parseInt(count.value, 10) || 1,
+    note: note.value.trim() || null, paid_account: paidAccount.value,
+    end_date: end.value || null,
+    [kind === "expense" ? "supplier_id" : "customer_id"]:
+      counterparty.value ? parseInt(counterparty.value, 10) : null,
+  };
+  if (existing) {
+    payload.next_date = next.value;
+    await api("PATCH", `/books/${bid()}/recurring/${existing.id}`, payload);
+    toast("Serien uppdaterad — gäller framåt");
+  } else {
+    await api("POST", `/books/${bid()}/recurring`, { ...payload, kind, start_date: next.value });
+    toast("Serie skapad");
+  }
+  renderWorkspace();
+}
+
+async function pickRecurringKind() {
+  const f = await modal("Vad är det som återkommer?", [{ name: "kind", label: "Typ",
+    type: "select", value: "expense", options: [
+      { value: "expense", label: "En betalning jag gör (abonnemang, hyra, försäkring)" },
+      { value: "income", label: "En intäkt jag får varje period" }] }], "Fortsätt");
+  return f ? f.kind : null;
+}
+
+// Minimal promise wrapper for the hand-built modals above (body already filled in).
+function openModalPromise(okLabel) {
+  return new Promise((resolve) => {
+    const close = (v) => {
+      $("#modal-backdrop").classList.add("hidden");
+      $("#modal-ok").onclick = null; $("#modal-cancel").onclick = null;
+      resolve(v);
+    };
+    $("#modal-ok").textContent = okLabel;
+    $("#modal-ok").style.display = "";
+    $("#modal-ok").onclick = () => close(true);
+    $("#modal-cancel").textContent = "Avbryt";
+    $("#modal-cancel").onclick = () => close(false);
+    $("#modal-backdrop").classList.remove("hidden");
+  });
+}
+
+async function confirmRecurringFlow(r) {
+  const f = await modal(`Bekräfta "${r.name}" (${r.next_date})`, [
+    { name: "amount", label: "Belopp den här gången (kr)", value: toKr(r.total_ore) },
+    { name: "paid", label: "Är den betald?", type: "select", value: "yes", options: [
+      { value: "yes", label: "Ja, bokför betalningen nu" },
+      { value: "no", label: "Nej, bokför som obetald (leverantörsfaktura)" }] },
+    { name: "paid_date", label: "Betaldatum", type: "date", value: r.next_date },
+    { name: "note", label: "Referens/kommentar (valfritt)", value: r.note || "" },
+  ], "Bekräfta");
+  if (!f) return;
+  const body = { date: r.next_date, note: f.note.trim() || null };
+  if (f.paid === "yes") body.paid_date = f.paid_date || r.next_date;
+  // Only send a lines override when the amount was actually changed, so the template's
+  // own rate/omvänd-moms setup is reused untouched in the normal case.
+  const typed = toOre(f.amount);
+  if (typed && typed !== r.total_ore) {
+    if (r.lines.length > 1) {
+      toast("Serien har flera rader — ändra beloppen på serien istället", true);
+      return;
+    }
+    body.lines = [{ ...r.lines[0], amount_ore: typed,
+      inclusive: r.lines[0].reverse_charge ? false : true }];
+  }
+  await api("POST", `/books/${bid()}/recurring/${r.id}/confirm`, body);
+  toast(f.paid === "yes" ? "Bokförd" : "Registrerad som obetald");
+  renderWorkspace();
+}
+
+async function skipRecurringFlow(r) {
+  const ok = await modal(
+    `Hoppa över ${r.next_date} för "${r.name}"? Ingenting bokförs och serien går vidare `
+    + "till nästa datum.", [], "Hoppa över");
+  if (!ok) return;
+  await api("POST", `/books/${bid()}/recurring/${r.id}/skip`, { date: r.next_date });
+  toast("Överhoppad");
+  renderWorkspace();
+}
+
+async function toggleRecurringActive(r) {
+  await api("PATCH", `/books/${bid()}/recurring/${r.id}`, { active: !r.active });
+  toast(r.active ? "Serien pausad" : "Serien återupptagen");
+  renderWorkspace();
+}
+
+async function deleteRecurringFlow(r) {
+  const ok = await modal(
+    r.booked_count
+      ? `"${r.name}" har ${r.booked_count} bokförda betalningar och kan inte tas bort — `
+        + "pausa den istället så finns historiken kvar."
+      : `Ta bort serien "${r.name}"? Inget är bokfört på den.`,
+    [], r.booked_count ? "OK" : "Ta bort");
+  if (!ok || r.booked_count) return;
+  await api("DELETE", `/books/${bid()}/recurring/${r.id}`);
+  toast("Serien borttagen");
+  renderWorkspace();
+}
+
+async function recurringHistoryFlow(r) {
+  const hist = await api("GET", `/books/${bid()}/recurring/${r.id}/history`);
+  const body = $("#modal-body");
+  $("#modal-title").textContent = `Historik — ${r.name}`;
+  body.innerHTML = "";
+  body.appendChild(hist.length
+    ? simpleTable(["Datum", "Status", "Verifikat"], hist.map((h) => [
+      h.due_date,
+      h.status === "booked" ? "Bokförd" : "Överhoppad",
+      h.ver_number ? "A" + h.ver_number : "—"]))
+    : el("p", { class: "muted" }, "Inget hanterat ännu."));
+  $("#modal-ok").style.display = "none";
+  await new Promise((res) => {
+    $("#modal-cancel").textContent = "Stäng";
+    $("#modal-cancel").onclick = () => {
+      $("#modal-backdrop").classList.add("hidden");
+      $("#modal-ok").style.display = "";
+      res();
+    };
+    $("#modal-backdrop").classList.remove("hidden");
+  });
+}

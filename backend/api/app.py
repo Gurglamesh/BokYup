@@ -241,6 +241,52 @@ def _build_router():
     def list_accounts(book_id: str, request: Request):
         return fac(request).h_list_accounts({"book_id": book_id}, {}, {})
 
+    # ---- återkommande betalningar ----
+    @r.get("/books/{book_id}/reverse-charge-kinds")
+    def reverse_charge_kinds(book_id: str, request: Request):
+        return fac(request).h_reverse_charge_kinds({"book_id": book_id}, {}, {})
+
+    @r.get("/books/{book_id}/recurring")
+    def list_recurring(book_id: str, request: Request, active_only: bool = False):
+        return fac(request).h_list_recurring({"book_id": book_id}, {},
+                                             {"active_only": str(active_only)})
+
+    @r.get("/books/{book_id}/recurring/due")
+    def due_recurring(book_id: str, request: Request, as_of: str | None = None):
+        return fac(request).h_due_recurring({"book_id": book_id}, {}, {"as_of": as_of})
+
+    @r.post("/books/{book_id}/recurring", status_code=201)
+    def create_recurring(book_id: str, body: sc.RecurringReq, request: Request):
+        return fac(request).h_create_recurring({"book_id": book_id}, body.model_dump(), {})
+
+    @r.patch("/books/{book_id}/recurring/{recurring_id}")
+    def update_recurring(book_id: str, recurring_id: int, body: sc.RecurringUpdateReq,
+                         request: Request):
+        return fac(request).h_update_recurring(
+            {"book_id": book_id, "recurring_id": recurring_id}, body.model_dump(), {})
+
+    @r.delete("/books/{book_id}/recurring/{recurring_id}")
+    def delete_recurring(book_id: str, recurring_id: int, request: Request):
+        return fac(request).h_delete_recurring(
+            {"book_id": book_id, "recurring_id": recurring_id}, {}, {})
+
+    @r.post("/books/{book_id}/recurring/{recurring_id}/confirm", status_code=201)
+    def confirm_recurring(book_id: str, recurring_id: int, body: sc.RecurringConfirmReq,
+                          request: Request):
+        return fac(request).h_confirm_recurring(
+            {"book_id": book_id, "recurring_id": recurring_id}, body.model_dump(), {})
+
+    @r.post("/books/{book_id}/recurring/{recurring_id}/skip", status_code=201)
+    def skip_recurring(book_id: str, recurring_id: int, body: sc.RecurringSkipReq,
+                       request: Request):
+        return fac(request).h_skip_recurring(
+            {"book_id": book_id, "recurring_id": recurring_id}, body.model_dump(), {})
+
+    @r.get("/books/{book_id}/recurring/{recurring_id}/history")
+    def recurring_history(book_id: str, recurring_id: int, request: Request):
+        return fac(request).h_recurring_history(
+            {"book_id": book_id, "recurring_id": recurring_id}, {}, {})
+
     @r.get("/books/{book_id}/bas-katalog")
     def bas_catalog(book_id: str, request: Request):
         return fac(request).h_bas_catalog({"book_id": book_id}, {}, {})

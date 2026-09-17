@@ -1972,3 +1972,185 @@ class TestBasCatalogAndKontoEdit:
                           params={"start": "2026-01-01", "end": "2026-12-31"}).json()
         konton2 = {r["bas_konto"]: r["amount_ore"] for r in res2["by_category"]}
         assert konton2.get(5410) == 1000 and konton2.get(5460) == 2000
+
+
+class TestReverseCharge:
+    """Omvänd betalningsskyldighet: the buyer reports both sides of the moms."""
+
+    def _konto(self, client, book, name, kind, bas):
+        return client.post(f"/books/{book}/categories",
+                           json={"name": name, "kind": kind, "bas_konto": bas}).json()["id"]
+
+    def test_eu_service_books_both_sides_and_nets_to_zero(self, client, book):
+        cid = self._konto(client, book, "Programvaror", "expense", 5420)
+        # An Anthropic-style EU service receipt: 420,75 kr, no moms charged by the seller.
+        res = client.post(f"/books/{book}/expenses", json={
+            "category_id": cid, "trans_date": "2026-06-30", "paid_date": "2026-06-30",
+            "lines": [{"rate_code": "25", "amount_ore": 42075, "inclusive": False,
+                       "reverse_charge": "eu_tjanst"}]}).json()
+        assert "verifikation_id" in res
+
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[5420] == 42075          # cost = the full ex-moms amount
+        assert hb[2645] == 10519          # beräknad ingående moms (25 %)
+        assert hb[2614] == -10519         # utgående moms omvänd skattskyldighet
+        assert hb[1930] == -42075         # only the ex-moms amount actually leaves the bank
+        assert 2640 not in hb             # normal ingående moms is untouched
+        assert sum(hb.values()) == 0      # the verifikation balances
+
+    def test_momsdeklaration_boxes_21_30_48(self, client, book):
+        cid = self._konto(client, book, "IT-tjänster", "expense", 6540)
+        client.post(f"/books/{book}/expenses", json={
+            "category_id": cid, "trans_date": "2026-06-30", "paid_date": "2026-06-30",
+            "lines": [{"rate_code": "25", "amount_ore": 42075, "inclusive": False,
+                       "reverse_charge": "eu_tjanst"}]})
+        rep = client.get(f"/books/{book}/reports/momsdeklaration",
+                         params={"start": "2026-04-01", "end": "2026-06-30"}).json()
+        b = rep["boxes"]
+        assert b["21"] == 42075           # underlag: EU-tjänst enligt huvudregeln
+        assert b["30"] == 10519           # utgående moms 25 % på förvärvet
+        assert b["48"] == 10519           # samma belopp som ingående moms
+        assert b["49"] == 0               # nets to zero with full avdragsrätt
+        assert b["05"] == 0               # never counted as sales
+
+    def test_each_kind_lands_in_its_own_box(self, client, book):
+        cid = self._konto(client, book, "Varor", "expense", 4010)
+        for kind, box in [("eu_vara", "20"), ("utanfor_eu", "22"),
+                          ("sv_vara", "23"), ("sv_tjanst", "24")]:
+            client.post(f"/books/{book}/expenses", json={
+                "category_id": cid, "trans_date": "2026-05-01", "paid_date": "2026-05-01",
+                "lines": [{"rate_code": "25", "amount_ore": 10000, "inclusive": False,
+                           "reverse_charge": kind}]})
+        b = client.get(f"/books/{book}/reports/momsdeklaration",
+                       params={"start": "2026-05-01", "end": "2026-05-31"}).json()["boxes"]
+        assert b["20"] == b["22"] == b["23"] == b["24"] == 10000
+        assert b["30"] == 10000           # 4 × 2500 öre utgående moms
+
+    def test_reverse_charge_rejected_on_momsfri_rate(self, client, book):
+        cid = self._konto(client, book, "Övrigt", "expense", 6991)
+        r = client.post(f"/books/{book}/expenses", json={
+            "category_id": cid, "trans_date": "2026-05-01",
+            "lines": [{"rate_code": "momsfri", "amount_ore": 10000,
+                       "reverse_charge": "eu_tjanst"}]})
+        assert r.status_code == 400 and "moms" in r.json()["detail"].lower()
+        assert client.post(f"/books/{book}/expenses", json={
+            "category_id": cid, "trans_date": "2026-05-01",
+            "lines": [{"rate_code": "25", "amount_ore": 10000,
+                       "reverse_charge": "nonsens"}]}).status_code == 400
+
+    def test_kinds_endpoint(self, client, book):
+        k = client.get(f"/books/{book}/reverse-charge-kinds").json()
+        assert {x["value"]: x["box"] for x in k["kinds"]}["eu_tjanst"] == "21"
+        assert k["rates"] == ["25", "12", "6"]
+
+
+class TestRecurring:
+    """Återkommande betalningar: confirm each occurrence; edits hit the series forward."""
+
+    def _series(self, client, book, **over):
+        cid = client.post(f"/books/{book}/categories",
+                          json={"name": "Programvaror", "kind": "expense",
+                                "bas_konto": 5420}).json()["id"]
+        body = {"kind": "expense", "name": "Molnabonnemang", "category_id": cid,
+                "start_date": "2026-01-15", "interval_unit": "month", "interval_count": 1,
+                "lines": [{"rate_code": "25", "amount_ore": 12500}]}
+        body.update(over)
+        return cid, client.post(f"/books/{book}/recurring", json=body)
+
+    def test_create_and_confirm_advances_the_series(self, client, book):
+        _, r = self._series(client, book)
+        assert r.status_code == 201
+        rid = r.json()["id"]
+
+        rec = client.get(f"/books/{book}/recurring").json()[0]
+        assert rec["next_date"] == "2026-01-15" and rec["total_ore"] == 12500
+        assert rec["booked_count"] == 0
+
+        due = client.get(f"/books/{book}/recurring/due",
+                         params={"as_of": "2026-01-20"}).json()
+        assert [d["id"] for d in due] == [rid]
+
+        res = client.post(f"/books/{book}/recurring/{rid}/confirm",
+                          json={"paid_date": "2026-01-15"})
+        assert res.status_code == 201 and res.json()["due_date"] == "2026-01-15"
+
+        rec = client.get(f"/books/{book}/recurring").json()[0]
+        assert rec["next_date"] == "2026-02-15" and rec["booked_count"] == 1
+        # the confirmed occurrence is a perfectly ordinary booked transaktion
+        tx = client.get(f"/books/{book}/transaktioner").json()
+        assert len(tx) == 1 and "Molnabonnemang (2026-01-15)" in tx[0]["note"]
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[5420] == 10000 and hb[2640] == 2500 and hb[1930] == -12500
+
+    def test_confirming_twice_is_refused(self, client, book):
+        _, r = self._series(client, book)
+        rid = r.json()["id"]
+        client.post(f"/books/{book}/recurring/{rid}/confirm", json={"paid_date": "2026-01-15"})
+        again = client.post(f"/books/{book}/recurring/{rid}/confirm",
+                            json={"date": "2026-01-15", "paid_date": "2026-01-15"})
+        assert again.status_code == 409
+
+    def test_edit_changes_the_whole_series_forward_but_not_history(self, client, book):
+        _, r = self._series(client, book)
+        rid = r.json()["id"]
+        client.post(f"/books/{book}/recurring/{rid}/confirm", json={"paid_date": "2026-01-15"})
+
+        # raise the price: every future occurrence follows, the booked one does not
+        assert client.patch(f"/books/{book}/recurring/{rid}", json={
+            "lines": [{"rate_code": "25", "amount_ore": 25000}]}).status_code == 200
+        client.post(f"/books/{book}/recurring/{rid}/confirm", json={"paid_date": "2026-02-15"})
+
+        amounts = sorted(t["amount_ore"] for t in client.get(f"/books/{book}/transaktioner").json())
+        assert amounts == [12500, 25000]          # january untouched, february at the new price
+
+    def test_one_off_amount_override_leaves_the_template_alone(self, client, book):
+        _, r = self._series(client, book)
+        rid = r.json()["id"]
+        client.post(f"/books/{book}/recurring/{rid}/confirm",
+                    json={"paid_date": "2026-01-15",
+                          "lines": [{"rate_code": "25", "amount_ore": 40000}]})
+        assert client.get(f"/books/{book}/transaktioner").json()[0]["amount_ore"] == 40000
+        assert client.get(f"/books/{book}/recurring").json()[0]["total_ore"] == 12500
+
+    def test_skip_advances_without_booking(self, client, book):
+        _, r = self._series(client, book)
+        rid = r.json()["id"]
+        assert client.post(f"/books/{book}/recurring/{rid}/skip", json={}).status_code == 201
+        assert client.get(f"/books/{book}/transaktioner").json() == []
+        assert client.get(f"/books/{book}/recurring").json()[0]["next_date"] == "2026-02-15"
+        hist = client.get(f"/books/{book}/recurring/{rid}/history").json()
+        assert len(hist) == 1 and hist[0]["status"] == "skipped"
+
+    def test_yearly_interval_and_end_date_closes_the_series(self, client, book):
+        _, r = self._series(client, book, interval_unit="year", end_date="2026-12-31")
+        rid = r.json()["id"]
+        client.post(f"/books/{book}/recurring/{rid}/confirm", json={"paid_date": "2026-01-15"})
+        rec = client.get(f"/books/{book}/recurring").json()[0]
+        assert rec["next_date"] == "2027-01-15" and rec["active"] == 0
+
+    def test_delete_refused_once_booked_but_allowed_while_untouched(self, client, book):
+        _, r = self._series(client, book)
+        rid = r.json()["id"]
+        assert client.delete(f"/books/{book}/recurring/{rid}").status_code == 200
+        _, r2 = self._series(client, book, name="Annat")
+        rid2 = r2.json()["id"]
+        client.post(f"/books/{book}/recurring/{rid2}/confirm", json={"paid_date": "2026-01-15"})
+        assert client.delete(f"/books/{book}/recurring/{rid2}").status_code == 409
+
+    def test_recurring_carries_reverse_charge_into_the_booking(self, client, book):
+        _, r = self._series(client, book, name="Claude", lines=[
+            {"rate_code": "25", "amount_ore": 42075, "reverse_charge": "eu_tjanst"}])
+        rid = r.json()["id"]
+        client.post(f"/books/{book}/recurring/{rid}/confirm", json={"paid_date": "2026-01-15"})
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[2645] == 10519 and hb[2614] == -10519 and hb[1930] == -42075
+
+    def test_bad_template_is_rejected_at_save_time(self, client, book):
+        cid = client.post(f"/books/{book}/categories",
+                          json={"name": "K", "kind": "expense", "bas_konto": 5420}).json()["id"]
+        bad = {"kind": "expense", "name": "X", "category_id": cid, "start_date": "2026-01-15",
+               "lines": [{"rate_code": "25", "amount_ore": 0}]}
+        assert client.post(f"/books/{book}/recurring", json=bad).status_code == 400
+        bad["lines"] = [{"rate_code": "25", "amount_ore": 100}]
+        bad["interval_unit"] = "vecka"
+        assert client.post(f"/books/{book}/recurring", json=bad).status_code == 400

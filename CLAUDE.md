@@ -847,6 +847,51 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       Kvarstår (avsiktligt, nästa steg): "byt baskonto" på **manuella** verifikat (rå
       konto-remap + kryssa ur rad, måste balansera) samt ombokning direkt från order-/faktura-
       raden (fakturor via kreditfaktura idag).
+- [x] **Förinställda BAS-konton + redigerbara använda konton (schema v39, 2026-09).**
+      `backend/models/bas_catalog.py` is a curated subset of the standard BAS-kontoplan
+      (~90 konton, each with a plain-Swedish description). Income/expense entries become
+      ordinary editable categories; balance-sheet konton are added to the chart only (a
+      category is always income or expense) so they can be picked in a manual verifikat.
+      `bas_catalog()` flags what the book already has and `add_catalog_accounts()` skips
+      it, so the picker is re-runnable. API `GET /bas-katalog` + `POST /bas-katalog/add`;
+      a grouped, searchable multi-select behind "Hämta från BAS-kontoplanen".
+      **A category whose konto has already been booked on may now have its BAS number
+      changed** — the new konto applies from the next bokföring and nothing historical
+      moves. That required freezing the attribution: postings already carried the konto
+      as a number, but the result report resolved the category's CURRENT konto.
+      `moms_line.bas_konto` is stamped at booking (`_freeze_line_konton`) and the result
+      report reads `COALESCE(moms_line.bas_konto, category.bas_konto)`. Report clones
+      (rättelse/återföring/fakturabetalning/kreditering) inherit the source's frozen konto
+      so a reversal still nets to zero; the ombokförings-clone carries the corrected one.
+      Migration 39 backfills from the category (exact — the edit was blocked until now).
+- [x] **Omvänd betalningsskyldighet + återkommande betalningar (schema v40, 2026-09).**
+      (1) **Omvänd moms** on a purchase: `moms_line.reverse_charge` marks the line
+      `eu_vara`/`eu_tjanst`/`utanfor_eu`/`sv_vara`/`sv_tjanst` (canonical map
+      `schema.REVERSE_CHARGE_BOXES`). The seller invoiced without moms, so the amount is
+      ALWAYS the beskattningsunderlag (`inclusive` forced False) and the buyer books both
+      sides: cost + **2645** beräknad ingående moms (debit) against **2614/2624/2634**
+      utgående moms omvänd skattskyldighet (credit), with only the ex-moms amount leaving
+      the bank (`cash_exact = inc − rc_total`, öresavrundning applied to the cash).
+      Konton are config. The momsdeklaration gained boxes **20/21/22/23/24** (underlag per
+      kind), **30/31/32** (utgående moms on them, added into box 49) — box 48 already
+      covered the deduction, so a normal EU-tjänst nets to zero. Only rates 25/12/6 accept
+      it (momsfri/0 rejected). Sales-side EU boxes (35–41) still out of scope.
+      (2) **Återkommande betalningar**: `recurring` (template: kind, category, moms lines
+      as JSON incl. reverse_charge, month/year interval, next_date, end_date, paid_account)
+      + `recurring_occurrence` (booked|skipped, UNIQUE per due date). The template books
+      NOTHING — `due_recurring()` lists what has fallen due, `confirm_recurring()` creates
+      the ordinary transaktion (booking it when a paid_date is given) and advances the
+      series, `skip_recurring()` advances without booking. **Editing a template changes the
+      whole series going forward** (including the occurrence waiting to be confirmed);
+      already-confirmed ones are verifikationer and never move. `lines` on confirm
+      overrides THAT occurrence only. Delete is refused once the series has booked
+      occurrences (pause instead, keeping the history). API `GET/POST /recurring`,
+      `/recurring/due`, `PATCH|DELETE /recurring/{id}`, `POST …/confirm|skip`,
+      `GET …/history`, `GET /reverse-charge-kinds`. UI: "Omvänd moms" per row in the Inköp
+      line editor (with a live "du betalar X till leverantören" note) and a new
+      **Inköp → Återkommande** sub-tab (att bekräfta / serier / historik).
+      Tests pass; browser-smoke-tested end to end (EU-tjänst 420,75 kr → 5420/2645/2614/1930
+      balanced, ruta 21 + 30 + 48, serien flyttad till nästa månad).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

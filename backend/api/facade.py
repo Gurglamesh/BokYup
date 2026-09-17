@@ -272,6 +272,52 @@ class AppFacade:
     def h_add_catalog_accounts(self, p, b, q):
         return self._ops(p["book_id"]).add_catalog_accounts(b.get("konton") or [])
 
+    # ---- återkommande betalningar (recurring templates) ----
+    def h_list_recurring(self, p, b, q):
+        return self._ops(p["book_id"]).list_recurring(
+            active_only=str(q.get("active_only", "")).lower() in ("1", "true"))
+
+    def h_due_recurring(self, p, b, q):
+        return self._ops(p["book_id"]).due_recurring(q.get("as_of"))
+
+    def h_create_recurring(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        rid = ops.create_recurring(
+            b.get("kind") or "expense", b["name"], b["category_id"], b["lines"],
+            b["start_date"], b.get("interval_unit") or "month",
+            int(b.get("interval_count") or 1),
+            supplier_id=b.get("supplier_id"), customer_id=b.get("customer_id"),
+            note=b.get("note"), ext_ref=b.get("ext_ref"),
+            paid_account=b.get("paid_account") or "bank", end_date=b.get("end_date"))
+        return {"id": rid}
+
+    def h_update_recurring(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        ops.update_recurring(int(p["recurring_id"]), **_clean(b))
+        return {"id": int(p["recurring_id"])}
+
+    def h_delete_recurring(self, p, b, q):
+        return self._ops(p["book_id"]).delete_recurring(int(p["recurring_id"]))
+
+    def h_confirm_recurring(self, p, b, q):
+        return self._ops(p["book_id"]).confirm_recurring(
+            int(p["recurring_id"]), date=b.get("date"), lines=b.get("lines"),
+            paid_date=b.get("paid_date"), note=b.get("note"), ext_ref=b.get("ext_ref"),
+            paid_account=b.get("paid_account"))
+
+    def h_skip_recurring(self, p, b, q):
+        return self._ops(p["book_id"]).skip_recurring(int(p["recurring_id"]), b.get("date"))
+
+    def h_recurring_history(self, p, b, q):
+        return self._ops(p["book_id"]).recurring_history(int(p["recurring_id"]))
+
+    def h_reverse_charge_kinds(self, p, b, q):
+        """The omvänd-betalningsskyldighet options + which momsdeklaration box each fills."""
+        from backend.models.schema import REVERSE_CHARGE_BOXES, REVERSE_CHARGE_RATES
+        return {"kinds": [{"value": k, "box": box, "label": label}
+                          for k, (box, label) in REVERSE_CHARGE_BOXES.items()],
+                "rates": list(REVERSE_CHARGE_RATES)}
+
     # ---- article catalog ----
     def h_list_articles(self, p, b, q):
         return self._ops(p["book_id"]).list_articles()
@@ -419,7 +465,8 @@ class AppFacade:
             ex = round(int(it["quantity_centi"]) * int(it["unit_cost_ore"]) / 100)
             if ex > 0:
                 moms_lines.append({"rate_code": it["rate_code"], "amount_ore": ex,
-                                   "inclusive": False})
+                                   "inclusive": False,
+                                   "reverse_charge": it.get("reverse_charge")})
         if not moms_lines:
             raise ValueError("Inköpet behöver minst en rad med belopp")
         return moms_lines
@@ -932,6 +979,15 @@ _route("POST", "/books/{book_id}/recovery-key", "h_add_recovery_key", 201)
 _route("GET", "/books/{book_id}/categories", "h_list_categories")
 _route("GET", "/books/{book_id}/categories/next-prefix", "h_next_prefix")
 _route("GET", "/books/{book_id}/bas-katalog", "h_bas_catalog")
+_route("GET", "/books/{book_id}/reverse-charge-kinds", "h_reverse_charge_kinds")
+_route("GET", "/books/{book_id}/recurring", "h_list_recurring")
+_route("GET", "/books/{book_id}/recurring/due", "h_due_recurring")
+_route("POST", "/books/{book_id}/recurring", "h_create_recurring", 201)
+_route("PATCH", "/books/{book_id}/recurring/{recurring_id}", "h_update_recurring")
+_route("DELETE", "/books/{book_id}/recurring/{recurring_id}", "h_delete_recurring")
+_route("POST", "/books/{book_id}/recurring/{recurring_id}/confirm", "h_confirm_recurring", 201)
+_route("POST", "/books/{book_id}/recurring/{recurring_id}/skip", "h_skip_recurring", 201)
+_route("GET", "/books/{book_id}/recurring/{recurring_id}/history", "h_recurring_history")
 _route("POST", "/books/{book_id}/bas-katalog/add", "h_add_catalog_accounts", 201)
 _route("GET", "/books/{book_id}/accounts", "h_list_accounts")
 _route("GET", "/books/{book_id}/articles", "h_list_articles")

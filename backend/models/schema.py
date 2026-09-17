@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 40
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -61,6 +61,21 @@ MOMS_RATES: dict[str, Decimal | None] = {
     "momsfri": None,            # outside the VAT system
     "ej_avdragsgill": None,     # moms exists but is not deductible (e.g. representation)
 }
+
+# Omvänd betalningsskyldighet (reverse charge) on a PURCHASE: the seller invoices
+# without moms and the BUYER reports both the utgående and the ingående moms. The value
+# picks which momsdeklaration box the beskattningsunderlag goes in; the moms itself lands
+# in box 30/31/32 (utgående) and box 48 (ingående), netting to zero with full avdragsrätt.
+REVERSE_CHARGE_BOXES: dict[str, tuple[str, str]] = {
+    "eu_vara": ("20", "Inköp av varor från ett annat EU-land"),
+    "eu_tjanst": ("21", "Inköp av tjänster från ett annat EU-land enligt huvudregeln"),
+    "utanfor_eu": ("22", "Inköp av tjänster från ett land utanför EU"),
+    "sv_vara": ("23", "Inköp av varor i Sverige (omvänd betalningsskyldighet)"),
+    "sv_tjanst": ("24", "Övriga inköp av tjänster (omvänd betalningsskyldighet)"),
+}
+
+# Reverse charge only exists for the rates that actually carry moms.
+REVERSE_CHARGE_RATES = ("25", "12", "6")
 
 CUSTOMER_TYPES = ("private", "business")
 DIRECTIONS = ("in", "out")               # in = purchase/ingående, out = sale/utgående
@@ -207,6 +222,11 @@ CREATE TABLE moms_line (
     ex_moms_ore    INTEGER NOT NULL,    -- beskattningsunderlag
     moms_ore       INTEGER NOT NULL,    -- ingående (purchase) / utgående (sale)
     inc_moms_ore   INTEGER NOT NULL,    -- total
+    reverse_charge TEXT,                -- omvänd betalningsskyldighet: NULL = normal.
+                                        -- 'eu_vara'/'eu_tjanst'/'utanfor_eu'/'sv_vara'/
+                                        -- 'sv_tjanst' — the SELLER charged no moms and the
+                                        -- BUYER reports both utgående and ingående moms.
+                                        -- Picks the momsdeklaration box (20/21/22/23/24).
     bas_konto      INTEGER              -- konto FROZEN at booking (NULL = not booked yet).
                                         -- Reference data may be edited freely, so a
                                         -- category's BAS-konto can change later; the
@@ -435,6 +455,45 @@ CREATE TABLE stock_adjustment (
     created_at      TEXT NOT NULL
 );
 
+-- ----- Återkommande betalningar (recurring templates) ------------------------
+-- A subscription/rent/insurance you pay on a schedule. The template books NOTHING on
+-- its own: when an occurrence falls due the user CONFIRMS it (optionally adjusting the
+-- amount for that one time) and a normal transaktion is created from it. Editing the
+-- template therefore only affects occurrences that have not been confirmed yet —
+-- already-booked ones are part of the legal record and never move.
+CREATE TABLE recurring (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind           TEXT NOT NULL CHECK (kind IN ('expense','income')),
+    name           TEXT NOT NULL,
+    category_id    INTEGER NOT NULL REFERENCES category(id),
+    supplier_id    INTEGER REFERENCES supplier(id),
+    customer_id    INTEGER REFERENCES customer(kundnummer),
+    lines_json     TEXT NOT NULL,       -- [{rate_code, amount_ore, inclusive,
+                                        --   category_id, reverse_charge}]
+    note           TEXT,
+    ext_ref        TEXT,                -- kvitto-/fakturanummer template (optional)
+    paid_account   TEXT NOT NULL DEFAULT 'bank' CHECK (paid_account IN ('bank','privat')),
+    interval_unit  TEXT NOT NULL CHECK (interval_unit IN ('month','year')),
+    interval_count INTEGER NOT NULL DEFAULT 1 CHECK (interval_count > 0),
+    next_date      TEXT NOT NULL,       -- the next occurrence waiting to be confirmed
+    end_date       TEXT,                -- inclusive; NULL = runs until paused
+    active         INTEGER NOT NULL DEFAULT 1,
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT
+);
+
+-- Every occurrence that has been dealt with: confirmed (booked -> transaktion_id) or
+-- skipped. Gives the series an auditable history and stops a date being booked twice.
+CREATE TABLE recurring_occurrence (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    recurring_id   INTEGER NOT NULL REFERENCES recurring(id),
+    due_date       TEXT NOT NULL,
+    status         TEXT NOT NULL CHECK (status IN ('booked','skipped')),
+    transaktion_id INTEGER REFERENCES transaktion(id),
+    created_at     TEXT NOT NULL,
+    UNIQUE (recurring_id, due_date)
+);
+
 -- ----- RUT/ROT recipients: a household can split the skattereduktion across ----
 -- several people, each their own name + personnummer (encrypted), linked customer,
 -- a share percentage, and their resulting RUT and ROT amounts (frozen on the invoice).
@@ -597,6 +656,13 @@ _DEFAULT_CONFIG = {
     "account_kundfordran": "1510",          # Kundfordringar (year-end accrual)
     "account_leverantorsskuld": "2440",     # Leverantörsskulder (year-end accrual)
     "account_ores_kronutjamning": "3740",   # Öres- och kronutjämning (rounding)
+    # Omvänd betalningsskyldighet (reverse charge): the buyer reports BOTH sides of the
+    # moms. The computed utgående moms lands on 26x4 and the matching (deductible)
+    # ingående moms on 2645, so the two net out when you have full avdragsrätt.
+    "account_utg_moms_omvand_25": "2614",   # Utgående moms omvänd skattskyldighet, 25 %
+    "account_utg_moms_omvand_12": "2624",   # Utgående moms omvänd skattskyldighet, 12 %
+    "account_utg_moms_omvand_6": "2634",    # Utgående moms omvänd skattskyldighet, 6 %
+    "account_ing_moms_utland": "2645",      # Beräknad ingående moms på förvärv från utlandet
     # When Skatteverket's husavdrag payout differs from the claimed amount by no more
     # than this many ören, treat it as pure rounding and book the diff to 3740. A
     # larger underpayment is a partial payout (a follow-up receivable on the customer).
@@ -1051,6 +1117,46 @@ _MIGRATIONS: dict[int, str] = {
            AND EXISTS (SELECT 1 FROM transaktion t
                         WHERE t.id = moms_line.transaktion_id
                           AND t.verifikation_id IS NOT NULL);
+    """,
+    # v40: omvänd betalningsskyldighet (reverse charge) on purchase lines + the konton
+    # it books to, and the återkommande-betalningar (recurring) templates.
+    40: """
+        ALTER TABLE moms_line ADD COLUMN reverse_charge TEXT;
+
+        INSERT OR IGNORE INTO config(key, value) VALUES ('account_utg_moms_omvand_25', '2614');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('account_utg_moms_omvand_12', '2624');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('account_utg_moms_omvand_6', '2634');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('account_ing_moms_utland', '2645');
+
+        CREATE TABLE IF NOT EXISTS recurring (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind           TEXT NOT NULL CHECK (kind IN ('expense','income')),
+            name           TEXT NOT NULL,
+            category_id    INTEGER NOT NULL REFERENCES category(id),
+            supplier_id    INTEGER REFERENCES supplier(id),
+            customer_id    INTEGER REFERENCES customer(kundnummer),
+            lines_json     TEXT NOT NULL,
+            note           TEXT,
+            ext_ref        TEXT,
+            paid_account   TEXT NOT NULL DEFAULT 'bank' CHECK (paid_account IN ('bank','privat')),
+            interval_unit  TEXT NOT NULL CHECK (interval_unit IN ('month','year')),
+            interval_count INTEGER NOT NULL DEFAULT 1 CHECK (interval_count > 0),
+            next_date      TEXT NOT NULL,
+            end_date       TEXT,
+            active         INTEGER NOT NULL DEFAULT 1,
+            created_at     TEXT NOT NULL,
+            updated_at     TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS recurring_occurrence (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            recurring_id   INTEGER NOT NULL REFERENCES recurring(id),
+            due_date       TEXT NOT NULL,
+            status         TEXT NOT NULL CHECK (status IN ('booked','skipped')),
+            transaktion_id INTEGER REFERENCES transaktion(id),
+            created_at     TEXT NOT NULL,
+            UNIQUE (recurring_id, due_date)
+        );
     """,
 }
 

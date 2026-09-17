@@ -97,6 +97,19 @@ _UTG_MOMS_KEY = {
     "6": "account_utgaende_moms_6",
 }
 
+# Omvänd betalningsskyldighet (reverse charge) on a PURCHASE: the seller invoices
+# without moms and you report both sides yourself. The key picks the momsdeklaration
+# box for the beskattningsunderlag; the moms itself lands in box 30/31/32 (utgående)
+# and box 48 (ingående), so it nets to zero with full avdragsrätt.
+REVERSE_CHARGE_KINDS = S.REVERSE_CHARGE_BOXES
+REVERSE_CHARGE_RATES = S.REVERSE_CHARGE_RATES
+
+_UTG_MOMS_OMVAND_KEY = {
+    "25": "account_utg_moms_omvand_25",
+    "12": "account_utg_moms_omvand_12",
+    "6": "account_utg_moms_omvand_6",
+}
+
 # Notes stamped on the SYNTHETIC transaktion rows that `_clone_transaktion_for_report`
 # creates to attribute a rättelse/accrual to the right period in the moms/result
 # reports. They are bookkeeping artefacts, not user transactions, so the default
@@ -132,6 +145,22 @@ def compute_moms_figures(amount_ore: int, rate_code: str, inclusive: bool) -> tu
         moms = int((Decimal(ex) * rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
         inc = ex + moms
     return ex, moms, inc
+
+
+def _clean_reverse_charge(rate_code: str, value) -> Optional[str]:
+    """Validate a moms line's omvänd-betalningsskyldighet marking (None = normal moms)."""
+    if value in (None, "", "none"):
+        return None
+    value = str(value)
+    if value not in REVERSE_CHARGE_KINDS:
+        raise ValueError(
+            f"Okänd omvänd betalningsskyldighet {value!r} — välj en av: "
+            + ", ".join(REVERSE_CHARGE_KINDS))
+    if rate_code not in REVERSE_CHARGE_RATES:
+        raise ValueError(
+            "Omvänd betalningsskyldighet kräver en momssats (25, 12 eller 6 %) — "
+            f"{rate_code!r} går inte att räkna moms på")
+    return value
 
 
 def _now() -> str:
@@ -1264,11 +1293,14 @@ class BookOps:
             raise KeyError(f"No transaktion {transaktion_id}")
         if t["direction"] != "in":
             raise InvalidState("Endast inköp kan redigeras här")
-        remaining: dict[str, int] = {}
+        # Keyed by (rate, omvänd betalningsskyldighet) so a reverse-charge line survives
+        # the round trip through the form.
+        remaining: dict[tuple, int] = {}
         for r in self.conn.execute(
-                "SELECT rate_code, ex_moms_ore FROM moms_line WHERE transaktion_id=?",
-                (transaktion_id,)).fetchall():
-            remaining[r["rate_code"]] = remaining.get(r["rate_code"], 0) + r["ex_moms_ore"]
+                "SELECT rate_code, reverse_charge, ex_moms_ore FROM moms_line "
+                "WHERE transaktion_id=?", (transaktion_id,)).fetchall():
+            key = (r["rate_code"], r["reverse_charge"])
+            remaining[key] = remaining.get(key, 0) + r["ex_moms_ore"]
         items = []
         batches = self.conn.execute(
             "SELECT sb.qty_in_centi, sb.unit_cost_ore, a.description, a.category_id, "
@@ -1279,15 +1311,19 @@ class BookOps:
         for sb in batches:
             rate = sb["rate_code"] or "25"
             ex = round(sb["qty_in_centi"] * sb["unit_cost_ore"] / 100)
-            remaining[rate] = remaining.get(rate, 0) - ex
+            # Charge the batch against a moms line of the same rate, plain moms first.
+            key = next((k for k in ((rate, None), *(k for k in remaining if k[0] == rate))
+                        if remaining.get(k, 0) >= ex), (rate, None))
+            remaining[key] = remaining.get(key, 0) - ex
             items.append({"description": sb["description"], "category_id": sb["category_id"],
                           "quantity_centi": sb["qty_in_centi"], "unit_cost_ore": sb["unit_cost_ore"],
-                          "rate_code": rate, "unit": sb["unit"],
+                          "rate_code": rate, "unit": sb["unit"], "reverse_charge": key[1],
                           "reduction_type": sb["reduction_type"], "to_stock": True})
-        for rate, ex in remaining.items():
+        for (rate, rc), ex in remaining.items():
             if ex > 0:
                 items.append({"description": "", "category_id": None, "quantity_centi": 100,
-                              "unit_cost_ore": ex, "rate_code": rate, "to_stock": False})
+                              "unit_cost_ore": ex, "rate_code": rate, "reverse_charge": rc,
+                              "to_stock": False})
         return {
             "transaktion_id": transaktion_id, "supplier_id": t["supplier_id"],
             "category_id": t["category_id"], "trans_date": t["trans_date"],
@@ -1395,6 +1431,238 @@ class BookOps:
         return result
 
     # ==================================================================
+    # Återkommande betalningar (recurring templates)
+    # ==================================================================
+    #
+    # A template books NOTHING by itself. When an occurrence falls due it shows up in
+    # "att bekräfta"; confirming it creates an ordinary transaktion (and books it, if a
+    # payment date is given) exactly as if it had been entered by hand. That is what
+    # makes editing safe: a template edit can only ever affect occurrences that have not
+    # been confirmed yet — every already-booked one is an immutable verifikation.
+
+    _REC_FIELDS = ("name", "category_id", "supplier_id", "customer_id", "note", "ext_ref",
+                   "paid_account", "interval_unit", "interval_count", "next_date",
+                   "end_date", "active")
+
+    @staticmethod
+    def _rec_next_date(date: str, unit: str, count: int) -> str:
+        """The occurrence after `date` for a month/year interval."""
+        return _add_months(date, count * (12 if unit == "year" else 1))
+
+    def _validate_rec_lines(self, kind: str, lines: list) -> str:
+        """Check a template's moms lines the same way a real entry would be checked, so a
+        broken template is rejected when it is SAVED rather than when it is confirmed."""
+        if not lines:
+            raise ValueError("En återkommande betalning behöver minst en rad")
+        clean = []
+        for ln in lines:
+            rate_code = ln.get("rate_code")
+            if rate_code not in S.MOMS_RATES:
+                raise ValueError(f"Okänd momssats {rate_code!r}")
+            amount = int(ln.get("amount_ore") or 0)
+            if amount <= 0:
+                raise ValueError("Beloppet måste vara större än noll")
+            rc = _clean_reverse_charge(rate_code, ln.get("reverse_charge"))
+            if rc and kind != "expense":
+                raise ValueError("Omvänd betalningsskyldighet gäller bara inköp")
+            cat = ln.get("category_id")
+            if cat is not None:
+                self._check_category(int(cat), "expense" if kind == "expense" else "income")
+            clean.append({"rate_code": rate_code, "amount_ore": amount,
+                          "inclusive": bool(ln.get("inclusive", True)),
+                          "category_id": cat, "reverse_charge": rc})
+        return json.dumps(clean)
+
+    def create_recurring(self, kind: str, name: str, category_id: int, lines: list,
+                         start_date: str, interval_unit: str = "month",
+                         interval_count: int = 1, *,
+                         supplier_id: Optional[int] = None,
+                         customer_id: Optional[int] = None,
+                         note: Optional[str] = None, ext_ref: Optional[str] = None,
+                         paid_account: str = "bank",
+                         end_date: Optional[str] = None) -> int:
+        """Create a recurring template. `start_date` is the FIRST occurrence to confirm."""
+        if kind not in ("expense", "income"):
+            raise ValueError("kind måste vara 'expense' eller 'income'")
+        if not (name or "").strip():
+            raise ValueError("Ge den återkommande betalningen ett namn")
+        if interval_unit not in ("month", "year"):
+            raise ValueError("Intervallet måste vara 'month' eller 'year'")
+        if int(interval_count) < 1:
+            raise ValueError("Intervallet måste vara minst 1")
+        if paid_account not in ("bank", "privat"):
+            raise ValueError("Okänt betalkonto")
+        self._check_category(category_id, "expense" if kind == "expense" else "income")
+        lines_json = self._validate_rec_lines(kind, lines)
+        if end_date and end_date < start_date:
+            raise ValueError("Slutdatum kan inte ligga före startdatum")
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO recurring(kind, name, category_id, supplier_id, customer_id, "
+                "lines_json, note, ext_ref, paid_account, interval_unit, interval_count, "
+                "next_date, end_date, active, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)",
+                (kind, name.strip(), category_id, supplier_id, customer_id, lines_json,
+                 note, (ext_ref or None), paid_account, interval_unit, int(interval_count),
+                 start_date, end_date, _now()))
+        return cur.lastrowid
+
+    def update_recurring(self, recurring_id: int, **changes) -> None:
+        """
+        Edit a recurring template. The change applies to the WHOLE SERIES GOING FORWARD —
+        every occurrence not yet confirmed, including the one currently due. Occurrences
+        already confirmed are booked verifikationer and are never touched (correct them
+        with a rättelse if they are wrong).
+        """
+        row = self.conn.execute("SELECT * FROM recurring WHERE id=?", (recurring_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No recurring {recurring_id}")
+        sets: dict = {}
+        if "lines" in changes and changes["lines"] is not None:
+            sets["lines_json"] = self._validate_rec_lines(row["kind"], changes["lines"])
+        for f in self._REC_FIELDS:
+            if f not in changes or changes[f] is None:
+                continue
+            v = changes[f]
+            if f == "category_id":
+                self._check_category(int(v), "expense" if row["kind"] == "expense" else "income")
+            if f == "interval_unit" and v not in ("month", "year"):
+                raise ValueError("Intervallet måste vara 'month' eller 'year'")
+            if f == "interval_count" and int(v) < 1:
+                raise ValueError("Intervallet måste vara minst 1")
+            if f == "paid_account" and v not in ("bank", "privat"):
+                raise ValueError("Okänt betalkonto")
+            if f == "name" and not str(v).strip():
+                raise ValueError("Namnet kan inte vara tomt")
+            sets[f] = int(v) if f == "active" else v
+        if not sets:
+            return
+        cols = ", ".join(f"{k}=?" for k in sets)
+        with self.conn:
+            self.conn.execute(f"UPDATE recurring SET {cols}, updated_at=? WHERE id=?",
+                              (*sets.values(), _now(), recurring_id))
+
+    def delete_recurring(self, recurring_id: int) -> dict:
+        """Remove a template. Refused once it has produced booked occurrences — those are
+        part of the books, so the series is paused (active=0) instead, keeping its history."""
+        row = self.conn.execute("SELECT id FROM recurring WHERE id=?", (recurring_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No recurring {recurring_id}")
+        if self.conn.execute("SELECT 1 FROM recurring_occurrence WHERE recurring_id=? "
+                             "AND status='booked' LIMIT 1", (recurring_id,)).fetchone():
+            raise InvalidState(
+                "Serien har redan bokförda betalningar och kan inte tas bort — pausa den "
+                "istället, så finns historiken kvar")
+        with self.conn:
+            self.conn.execute("DELETE FROM recurring_occurrence WHERE recurring_id=?",
+                              (recurring_id,))
+            self.conn.execute("DELETE FROM recurring WHERE id=?", (recurring_id,))
+        return {"deleted": True, "id": recurring_id}
+
+    def _rec_row(self, row) -> dict:
+        d = dict(row)
+        d["lines"] = json.loads(d.pop("lines_json") or "[]")
+        d["total_ore"] = sum(
+            compute_moms_figures(ln["amount_ore"], ln["rate_code"],
+                                 False if ln.get("reverse_charge") else ln.get("inclusive", True))[2]
+            for ln in d["lines"])
+        return d
+
+    def list_recurring(self, active_only: bool = False) -> list[dict]:
+        """All recurring templates with their lines, total and a `due` flag."""
+        where = " WHERE active=1" if active_only else ""
+        today = _now()[:10]
+        out = []
+        for row in self.conn.execute(
+                f"SELECT * FROM recurring{where} ORDER BY active DESC, next_date, id"):
+            d = self._rec_row(row)
+            d["due"] = bool(d["active"]) and d["next_date"] <= today and (
+                not d["end_date"] or d["next_date"] <= d["end_date"])
+            d["booked_count"] = self.conn.execute(
+                "SELECT COUNT(*) FROM recurring_occurrence WHERE recurring_id=? "
+                "AND status='booked'", (row["id"],)).fetchone()[0]
+            out.append(d)
+        return out
+
+    def due_recurring(self, as_of: Optional[str] = None) -> list[dict]:
+        """Active templates whose next occurrence has fallen due — the confirm worklist."""
+        as_of = (as_of or _now())[:10]
+        return [d for d in self.list_recurring(active_only=True)
+                if d["next_date"] <= as_of and (not d["end_date"] or d["next_date"] <= d["end_date"])]
+
+    def _advance_recurring(self, rec: dict, due_date: str) -> None:
+        """Move the series past `due_date`, deactivating it when it runs past end_date."""
+        nxt = self._rec_next_date(due_date, rec["interval_unit"], rec["interval_count"])
+        done = bool(rec["end_date"]) and nxt > rec["end_date"]
+        self.conn.execute(
+            "UPDATE recurring SET next_date=?, active=?, updated_at=? WHERE id=?",
+            (nxt, 0 if done else rec["active"], _now(), rec["id"]))
+
+    def _rec_due(self, recurring_id: int, date: Optional[str]) -> tuple[dict, str]:
+        rec = self.conn.execute("SELECT * FROM recurring WHERE id=?", (recurring_id,)).fetchone()
+        if rec is None:
+            raise KeyError(f"No recurring {recurring_id}")
+        rec = self._rec_row(rec)
+        due_date = date or rec["next_date"]
+        if self.conn.execute("SELECT 1 FROM recurring_occurrence WHERE recurring_id=? "
+                             "AND due_date=?", (recurring_id, due_date)).fetchone():
+            raise InvalidState(f"{due_date} är redan hanterad i den här serien")
+        return rec, due_date
+
+    def confirm_recurring(self, recurring_id: int, *, date: Optional[str] = None,
+                          lines: Optional[list] = None, paid_date: Optional[str] = None,
+                          note: Optional[str] = None, ext_ref: Optional[str] = None,
+                          paid_account: Optional[str] = None) -> dict:
+        """
+        Confirm one occurrence: create the real transaktion from the template (booking it
+        when `paid_date` is given) and move the series to the next date.
+
+        `lines` overrides the amount for THIS occurrence only (a subscription that varies
+        month to month) — the template itself is untouched. To change the series, edit the
+        template instead.
+        """
+        rec, due_date = self._rec_due(recurring_id, date)
+        use_lines = (json.loads(self._validate_rec_lines(rec["kind"], lines))
+                     if lines is not None else rec["lines"])
+        acct = paid_account or rec["paid_account"]
+        note = note if note is not None else rec["note"]
+        ext_ref = ext_ref if ext_ref is not None else rec["ext_ref"]
+        text = f"{rec['name']} ({due_date})" + (f" – {note}" if note else "")
+        if rec["kind"] == "expense":
+            res = self.record_expense(
+                rec["supplier_id"], rec["category_id"], use_lines, due_date,
+                note=text, ext_ref=ext_ref, paid_date=paid_date, paid_account=acct)
+        else:
+            if not rec["customer_id"]:
+                raise InvalidState("Den återkommande inkomsten saknar kund")
+            res = self.record_income(rec["customer_id"], rec["category_id"], use_lines,
+                                     due_date, note=text, paid_date=paid_date)
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO recurring_occurrence(recurring_id, due_date, status, "
+                "transaktion_id, created_at) VALUES (?,?,'booked',?,?)",
+                (recurring_id, due_date, res["transaktion_id"], _now()))
+            self._advance_recurring(rec, due_date)
+        return {**res, "recurring_id": recurring_id, "due_date": due_date}
+
+    def skip_recurring(self, recurring_id: int, date: Optional[str] = None) -> dict:
+        """Skip one occurrence (a month you were not charged) without booking anything."""
+        rec, due_date = self._rec_due(recurring_id, date)
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO recurring_occurrence(recurring_id, due_date, status, created_at) "
+                "VALUES (?,?,'skipped',?)", (recurring_id, due_date, _now()))
+            self._advance_recurring(rec, due_date)
+        return {"recurring_id": recurring_id, "due_date": due_date, "status": "skipped"}
+
+    def recurring_history(self, recurring_id: int) -> list[dict]:
+        """Every occurrence already confirmed or skipped, newest first."""
+        return [dict(r) for r in self.conn.execute(
+            "SELECT o.*, t.verifikation_id, v.ver_number FROM recurring_occurrence o "
+            "LEFT JOIN transaktion t ON t.id = o.transaktion_id "
+            "LEFT JOIN verifikation v ON v.id = t.verifikation_id "
+            "WHERE o.recurring_id=? ORDER BY o.due_date DESC", (recurring_id,))]
+
+    # ==================================================================
     # Booking (money moved) — creates the immutable verifikation
     # ==================================================================
 
@@ -1489,17 +1757,33 @@ class BookOps:
         income_splits = self._income_splits(transaktion_id)
         if t["direction"] == "in":
             postings = [(k, ex_k, "utgift") for k, ex_k in income_splits]
-            if sum_moms:
-                postings.append((self._sys_account("account_ingaende_moms"), sum_moms, "ingående moms"))
+            # Omvänd betalningsskyldighet: the supplier invoiced without moms, so you
+            # report BOTH sides — the computed moms is debited as ingående moms on 2645
+            # and credited as utgående moms on 26x4. The two cancel in the ledger (and in
+            # the momsdeklaration, with full avdragsrätt), and no money moves for it.
+            rc_by_rate = self._reverse_charge_moms(transaktion_id)
+            rc_total = sum(rc_by_rate.values())
+            normal_moms = sum_moms - rc_total
+            if normal_moms:
+                postings.append((self._sys_account("account_ingaende_moms"), normal_moms,
+                                 "ingående moms"))
+            if rc_total:
+                postings.append((self._sys_account("account_ing_moms_utland"), rc_total,
+                                 "beräknad ingående moms (omvänd betalningsskyldighet)"))
+                for rate_code, m in sorted(rc_by_rate.items()):
+                    if m:
+                        postings.append((self._sys_account(_UTG_MOMS_OMVAND_KEY[rate_code]),
+                                         -m, f"utgående moms omvänd skattskyldighet {rate_code}%"))
             # Öresavrundning (supplier rounded to whole kronor): the bank pays the rounded
             # total; ex-moms + ingående moms stay exact and the öre diff goes to 3740.
             # An extra momsfri betaltjänstavgift (Klarna/Qliro) is debited to its own konto
             # and added to the bank outflow (the fee is exact, never rounded).
-            round_inc = _round_to_krona(inc) if t["ores_rounding"] else inc
-            postings.append((outflow_konto, -(round_inc + fee), outflow_label))
-            if round_inc != inc:
+            cash_exact = inc - rc_total          # reverse-charge moms is never paid out
+            round_cash = _round_to_krona(cash_exact) if t["ores_rounding"] else cash_exact
+            postings.append((outflow_konto, -(round_cash + fee), outflow_label))
+            if round_cash != cash_exact:
                 postings.append((self._sys_account("account_ores_kronutjamning"),
-                                 round_inc - inc, "öresavrundning"))
+                                 round_cash - cash_exact, "öresavrundning"))
             if fee:
                 postings.append((fee_konto, fee, "betaltjänstavgift (momsfri)"))
             text = "Utgift" + note_suffix
@@ -3853,13 +4137,16 @@ class BookOps:
                 rate_code = ln["rate_code"]
                 if rate_code not in S.MOMS_RATES:
                     raise ValueError(f"Unknown moms rate {rate_code!r}")
-                ex, moms, inc = compute_moms_figures(
-                    ln["amount_ore"], rate_code, ln.get("inclusive", True)
-                )
+                rc = _clean_reverse_charge(rate_code, ln.get("reverse_charge"))
+                # Reverse charge: the supplier invoiced WITHOUT moms, so the amount on the
+                # receipt is always the beskattningsunderlag — the moms is computed on top
+                # of it (and then reported on both sides), never extracted from it.
+                inclusive = False if rc else ln.get("inclusive", True)
+                ex, moms, inc = compute_moms_figures(ln["amount_ore"], rate_code, inclusive)
                 self.conn.execute(
                     "INSERT INTO moms_line(transaktion_id, rate_code, category_id, ex_moms_ore, "
-                    "moms_ore, inc_moms_ore) VALUES (?,?,?,?,?,?)",
-                    (transaktion_id, rate_code, ln.get("category_id"), ex, moms, inc),
+                    "moms_ore, inc_moms_ore, reverse_charge) VALUES (?,?,?,?,?,?,?)",
+                    (transaktion_id, rate_code, ln.get("category_id"), ex, moms, inc, rc),
                 )
 
     def _insert_rut_claim(self, transaktion_id, customer_id, rut_amount_ore, year) -> int:
@@ -3883,6 +4170,17 @@ class BookOps:
         for r in rows:
             moms_by_rate[r["rate_code"]] = moms_by_rate.get(r["rate_code"], 0) + r["moms_ore"]
         return ex, moms_by_rate, inc
+
+    def _reverse_charge_moms(self, transaktion_id: int) -> dict[str, int]:
+        """{rate_code: moms} for the transaktion's omvänd-betalningsskyldighet lines only
+        (the part you owe as utgående moms and simultaneously deduct as ingående)."""
+        agg: dict[str, int] = {}
+        for r in self.conn.execute(
+                "SELECT rate_code, moms_ore FROM moms_line "
+                "WHERE transaktion_id=? AND reverse_charge IS NOT NULL", (transaktion_id,)):
+            if r["moms_ore"]:
+                agg[r["rate_code"]] = agg.get(r["rate_code"], 0) + r["moms_ore"]
+        return agg
 
     def _next_ver_number(self, series: str) -> int:
         row = self.conn.execute(

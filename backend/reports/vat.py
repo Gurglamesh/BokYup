@@ -15,12 +15,25 @@ Boxes produced (domestic small-business subset of the form):
     10  Utgående moms 25 %
     11  Utgående moms 12 %
     12  Utgående moms 6 %
+    20  Inköp av varor från ett annat EU-land
+    21  Inköp av tjänster från ett annat EU-land enligt huvudregeln
+    22  Inköp av tjänster från ett land utanför EU
+    23  Inköp av varor i Sverige (omvänd betalningsskyldighet)
+    24  Övriga inköp av tjänster (omvänd betalningsskyldighet)
+    30  Utgående moms 25 % på inköpen i ruta 20–24
+    31  Utgående moms 12 % på inköpen i ruta 20–24
+    32  Utgående moms 6 % på inköpen i ruta 20–24
     48  Ingående moms att dra av
-    49  Moms att betala (+) eller få tillbaka (−)   = (10+11+12) − 48
+    49  Moms att betala (+) eller få tillbaka (−)
+        = (10+11+12) + (30+31+32) − 48
 
-Plus informational sums for 0 %-rated and momsfri sales. EU/import/reverse-charge
-boxes (20–24, 30–32, 35–41) are out of scope for now — there is no cross-border
-data model yet.
+Omvänd betalningsskyldighet (boxes 20–24/30–32) comes from purchase moms_lines marked
+with a `reverse_charge` kind: the seller invoiced without moms, so the buyer reports the
+underlag in its box, the computed moms as utgående in 30–32, and the same moms as
+ingående in 48 — netting to zero with full avdragsrätt.
+
+Plus informational sums for 0 %-rated and momsfri sales. The SALES-side cross-border
+boxes (35–41) are still out of scope — the faktura has no EU/export marking yet.
 
 Note: a *rättelse* currently adjusts the ledger postings but does not net the
 business-level moms_line aggregation this report reads. Period locking prevents
@@ -32,6 +45,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from backend.models.schema import REVERSE_CHARGE_BOXES
+
 
 def momsdeklaration(conn: sqlite3.Connection, period_start: str, period_end: str) -> dict:
     """
@@ -42,6 +57,7 @@ def momsdeklaration(conn: sqlite3.Connection, period_start: str, period_end: str
         """
         SELECT t.direction AS direction,
                m.rate_code AS rate_code,
+               m.reverse_charge AS reverse_charge,
                SUM(m.ex_moms_ore)  AS ex,
                SUM(m.moms_ore)     AS moms,
                SUM(m.inc_moms_ore) AS inc
@@ -49,12 +65,14 @@ def momsdeklaration(conn: sqlite3.Connection, period_start: str, period_end: str
         JOIN transaktion t  ON t.id = m.transaktion_id
         JOIN verifikation v ON v.id = t.verifikation_id
         WHERE v.posted = 1 AND v.ver_date BETWEEN ? AND ?
-        GROUP BY t.direction, m.rate_code
+        GROUP BY t.direction, m.rate_code, m.reverse_charge
         """,
         (period_start, period_end),
     ).fetchall()
 
     output_vat = {"25": 0, "12": 0, "6": 0}
+    reverse_vat = {"25": 0, "12": 0, "6": 0}   # boxes 30/31/32
+    reverse_base = {"20": 0, "21": 0, "22": 0, "23": 0, "24": 0}
     sales_base = 0          # box 05
     zero_rated_sales = 0    # informational (0 %)
     momsfri_sales = 0       # informational (momsfri)
@@ -72,8 +90,18 @@ def momsdeklaration(conn: sqlite3.Connection, period_start: str, period_end: str
                 momsfri_sales += ex
         else:  # 'in' — purchases; deductible ingående moms (ej_avdragsgill has moms 0)
             input_vat += moms
+            kind = r["reverse_charge"]
+            if kind:
+                # Omvänd betalningsskyldighet: the underlag goes in its own box and the
+                # computed moms is ALSO owed as utgående moms (box 30–32).
+                box, _label = REVERSE_CHARGE_BOXES[kind]
+                reverse_base[box] += ex
+                if rate in reverse_vat:
+                    reverse_vat[rate] += moms
 
-    output_total = output_vat["25"] + output_vat["12"] + output_vat["6"]
+    domestic_output = output_vat["25"] + output_vat["12"] + output_vat["6"]
+    reverse_output = reverse_vat["25"] + reverse_vat["12"] + reverse_vat["6"]
+    output_total = domestic_output + reverse_output
     to_pay = output_total - input_vat
 
     return {
@@ -83,10 +111,21 @@ def momsdeklaration(conn: sqlite3.Connection, period_start: str, period_end: str
             "10": output_vat["25"],
             "11": output_vat["12"],
             "12": output_vat["6"],
+            "20": reverse_base["20"],
+            "21": reverse_base["21"],
+            "22": reverse_base["22"],
+            "23": reverse_base["23"],
+            "24": reverse_base["24"],
+            "30": reverse_vat["25"],
+            "31": reverse_vat["12"],
+            "32": reverse_vat["6"],
             "48": input_vat,
             "49": to_pay,
         },
         "output_vat_total_ore": output_total,
+        "domestic_output_vat_ore": domestic_output,
+        "reverse_charge_vat_ore": reverse_output,
+        "reverse_charge_base_ore": sum(reverse_base.values()),
         "input_vat_ore": input_vat,
         "vat_to_pay_ore": to_pay,          # positive = pay; negative = refund
         "sales_base_ore": sales_base,

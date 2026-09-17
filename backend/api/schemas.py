@@ -141,6 +141,61 @@ class MomsLineReq(BaseModel):
     rate_code: str
     amount_ore: int
     inclusive: bool = True
+    # Omvänd betalningsskyldighet (purchases): 'eu_vara' | 'eu_tjanst' | 'utanfor_eu' |
+    # 'sv_vara' | 'sv_tjanst'. None = normal moms. The amount is then always the
+    # beskattningsunderlag (the seller invoiced without moms).
+    reverse_charge: Optional[str] = None
+
+
+class RecurringLineReq(MomsLineReq):
+    category_id: Optional[int] = None
+
+
+class RecurringReq(BaseModel):
+    kind: str = "expense"                  # 'expense' | 'income'
+    name: str
+    category_id: int
+    lines: list[RecurringLineReq]
+    start_date: str                        # the first occurrence to confirm
+    interval_unit: str = "month"           # 'month' | 'year'
+    interval_count: int = 1
+    supplier_id: Optional[int] = None
+    customer_id: Optional[int] = None
+    note: Optional[str] = None
+    ext_ref: Optional[str] = None
+    paid_account: str = "bank"             # 'bank' (1930) | 'privat' (2018)
+    end_date: Optional[str] = None
+
+
+class RecurringUpdateReq(BaseModel):
+    """Any field given changes the series GOING FORWARD (already-confirmed
+    occurrences are booked verifikationer and never move)."""
+    name: Optional[str] = None
+    category_id: Optional[int] = None
+    lines: Optional[list[RecurringLineReq]] = None
+    supplier_id: Optional[int] = None
+    customer_id: Optional[int] = None
+    note: Optional[str] = None
+    ext_ref: Optional[str] = None
+    paid_account: Optional[str] = None
+    interval_unit: Optional[str] = None
+    interval_count: Optional[int] = None
+    next_date: Optional[str] = None
+    end_date: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class RecurringConfirmReq(BaseModel):
+    date: Optional[str] = None             # occurrence date (default: the one due)
+    lines: Optional[list[RecurringLineReq]] = None   # override THIS time only
+    paid_date: Optional[str] = None        # given => booked now; omitted => stays pending
+    note: Optional[str] = None
+    ext_ref: Optional[str] = None
+    paid_account: Optional[str] = None
+
+
+class RecurringSkipReq(BaseModel):
+    date: Optional[str] = None
 
 
 class ExpenseItemReq(BaseModel):
@@ -155,6 +210,7 @@ class ExpenseItemReq(BaseModel):
     unit: Optional[str] = None
     to_stock: bool = True
     note: Optional[str] = None
+    reverse_charge: Optional[str] = None   # omvänd betalningsskyldighet (see MomsLineReq)
 
 
 class RecordExpenseReq(BaseModel):

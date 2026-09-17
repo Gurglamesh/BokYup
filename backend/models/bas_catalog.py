@@ -258,8 +258,18 @@ _ENTRIES: list[tuple] = [
      "Skulder – moms", "Utgående moms med 12 %."),
     (2630, "Utgående moms, 6 %", "debt", None,
      "Skulder – moms", "Utgående moms med 6 %."),
+    (2614, "Utgående moms omvänd skattskyldighet, 25 %", "debt", None,
+     "Skulder – moms", "Moms du själv beräknar på ett inköp med omvänd "
+     "betalningsskyldighet (t.ex. en EU-tjänst). Motsvaras av avdraget på 2645."),
+    (2624, "Utgående moms omvänd skattskyldighet, 12 %", "debt", None,
+     "Skulder – moms", "Som 2614 men med 12 % moms."),
+    (2634, "Utgående moms omvänd skattskyldighet, 6 %", "debt", None,
+     "Skulder – moms", "Som 2614 men med 6 % moms."),
     (2640, "Ingående moms", "debt", None,
      "Skulder – moms", "Moms på dina inköp, som du får dra av."),
+    (2645, "Beräknad ingående moms på förvärv från utlandet", "debt", None,
+     "Skulder – moms", "Avdragsgill motpost till den moms du själv beräknat vid "
+     "omvänd betalningsskyldighet. Nettoeffekten blir noll vid full avdragsrätt."),
     (2650, "Redovisningskonto för moms", "debt", None,
      "Skulder – moms", "Nettot som deklareras för perioden."),
     (2710, "Personalskatt", "debt", None,
