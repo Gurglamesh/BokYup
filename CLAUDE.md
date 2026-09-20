@@ -980,6 +980,23 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       pure verifikation — a depreciation or any manual entry — never appears in Rapporter →
       resultat. Årsbokslut and Skatt read the raw postings and DO include it, so those are
       correct. Moving the result report onto postings is the fix.
+- [x] **Per-rads kostnadskonto i Inköp OCH Bokför (2026-09).** One receipt often mixes
+      verktyg (5410), förbrukningsmaterial (5460) and programvara (5420). Both entry forms
+      now take a **default konto plus a per-line override**: the line's konto is carried on
+      `moms_line.category_id` — the mechanism per-line invoice categories already used —
+      so booking, the frozen-konto logic and the result report split across konton with no
+      new code path. NULL falls back to the entry's category, so a single-konto post is
+      byte-for-byte unchanged. `record_expense`/`record_income` validate that an override
+      is the SAME kind as the entry (an expense row can never land on an income konto).
+      `ExpenseItemReq.expense_category_id` (Inköp line-items) + **`MomsLineReq.category_id`**
+      — the latter was the bug: without the Pydantic field the per-line konto was silently
+      dropped and everything landed on the default, which a test caught (140 000 vs
+      100 000). `expense_edit_payload` keys its reconstruction by (rate, reverse_charge,
+      category) so an override survives an edit round trip. UI: a "Kostnadskonto"-väljare
+      per rad in the Inköp line editor and a "Konto (valfritt)"-väljare per rad in
+      `momsLinesEditor` (hidden when no options are passed; `setCategories` re-fills it
+      when the Bokför form switches inkomst/utgift). Tests pass (483); browser-smoke-tested
+      both forms (one receipt → 5410/5460/5420 balanced, and 5410/5460 from Bokför).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

@@ -796,6 +796,9 @@ const SECTION_RENDERERS = {
       }
       rutRow.style.display = k === "income" ? "" : "none";
       receiptBlock.style.display = k === "expense" ? "" : "none";
+      // Per-row konto override: same kind as the entry, so an expense row can never be
+      // booked to an income konto.
+      linesEd.setCategories(cats.filter((x) => x.kind === k && x.active !== 0));
     };
     kind.addEventListener("change", () => refreshFor(kind.value));
     refreshFor("income");
@@ -803,7 +806,12 @@ const SECTION_RENDERERS = {
     const form = el("div", {},
       el("div", { class: "row" }, wrap("Typ", kind), wrap("Motpart", counter), wrap("Kategori", cat)),
       el("div", { class: "row" }, wrap("Datum", date), wrap("Betald?", paidNow), rutRow),
-      el("div", { style: "margin-top:6px" }, el("label", {}, "Belopp & moms (en rad per momssats)"), linesEd.element),
+      el("div", { style: "margin-top:6px" },
+        el("label", {}, "Belopp & moms (en rad per momssats)"),
+        el("p", { class: "muted", style: "margin:2px 0 6px;font-size:12px" },
+          "Varje rad bokförs på kategorin ovan. Sätt ett eget konto på en rad om samma "
+          + "kvitto innehåller flera sorters saker."),
+        linesEd.element),
       receiptBlock,
       el("div", { style: "margin-top:14px" }, el("button", { class: "btn brand", onclick: () => guard(submit) }, "Bokför")),
     );
@@ -2346,9 +2354,24 @@ function invoiceTotals(lines, rutPct, rotPct) {
   const attBetala = Math.round(attExakt / 100) * 100;       // avrundningslagen (helt krontal)
   return { ex, moms, inc, rabatt, rut, rot, husavdrag, attBetala };
 }
-function momsLinesEditor() {
+// `katOptions`, when given, adds a per-row BAS-konto override: the row is booked to the
+// chosen konto instead of the entry's default one. Lets a single receipt that mixes
+// verktyg, förbrukningsmaterial and programvara be split without splitting the entry.
+// It is refreshable, because the picker above may change kind (inkomst/utgift) after the
+// rows already exist.
+function momsLinesEditor(katOptions) {
   const rowsBox = el("div", {});
   const element = el("div", {});
+  let cats = katOptions || null;
+
+  function fillKat(sel, keep) {
+    sel.innerHTML = "";
+    sel.appendChild(el("option", { value: "" }, "(standardkonto)"));
+    for (const c of cats || []) {
+      sel.appendChild(el("option", { value: c.id }, categoryPath(cats, c.id)));
+    }
+    if (keep && (cats || []).some((c) => String(c.id) === String(keep))) sel.value = keep;
+  }
 
   function addRow(value = "0,00", rate = "25") {
     const amount = el("input", { type: "text", value });
@@ -2356,12 +2379,19 @@ function momsLinesEditor() {
       ...RATE_OPTIONS.map((r) => el("option", { value: r },
         r === "momsfri" || r === "ej_avdragsgill" ? r : r + "%")));
     rateSel.value = rate;
+    const katSel = el("select", { style: "min-width:170px" });
+    fillKat(katSel);
+    const katWrap = wrap("Konto (valfritt)", katSel);
+    if (!cats) katWrap.style.display = "none";
     const remove = el("button", { class: "btn small ghost", type: "button",
       onclick: () => { if (rowsBox.children.length > 1) row.remove(); } }, "✕");
     const row = el("div", { class: "row line-row" },
-      wrap("Belopp (kr, inkl. moms)", amount), wrap("Moms", rateSel),
+      wrap("Belopp (kr, inkl. moms)", amount), wrap("Moms", rateSel), katWrap,
       el("div", { style: "flex:0 0 auto;align-self:flex-end" }, remove));
-    row._read = () => ({ rate_code: rateSel.value, amount_ore: toOre(amount.value), inclusive: true });
+    row._kat = katSel; row._katWrap = katWrap;
+    row._read = () => ({ rate_code: rateSel.value, amount_ore: toOre(amount.value),
+      inclusive: true,
+      category_id: katSel.value ? parseInt(katSel.value, 10) : null });
     rowsBox.appendChild(row);
   }
   addRow();
@@ -2372,6 +2402,15 @@ function momsLinesEditor() {
 
   return {
     element,
+    /** Swap the konto options (the Bokför form changes kind after the rows exist). */
+    setCategories(list) {
+      cats = list && list.length ? list : null;
+      for (const row of rowsBox.children) {
+        const keep = row._kat.value;
+        fillKat(row._kat, keep);
+        row._katWrap.style.display = cats ? "" : "none";
+      }
+    },
     getLines() {
       return Array.from(rowsBox.children)
         .map((r) => r._read())
@@ -3717,7 +3756,7 @@ async function offertToInvoiceFlow(o) {
 // qty × à-cost (ex moms) + moms rate. A named row becomes a stock batch on booking; a
 // blank-name row is a pure cost line (still booked, no stock). Picking an existing
 // article prefills the row (so buying it again just adds a batch to the same article).
-function purchaseItemsEditor(incomeCats, articles, onChange, initialItems) {
+function purchaseItemsEditor(incomeCats, articles, onChange, initialItems, expenseCats) {
   const rowsBox = el("div", {});
   const cats = incomeCats || [];
   const arts = articles || [];
@@ -3767,9 +3806,17 @@ function purchaseItemsEditor(incomeCats, articles, onChange, initialItems) {
     const rcWrap = wrap("Omvänd moms", rc);
     rc._wrap = rcWrap;
     syncRc();
+    // Kostnadskonto for this row. Empty = the purchase's default, so one receipt can mix
+    // verktyg (5410), förbrukningsmaterial (5460) and programvara (5420) on separate rows.
+    const expCats = expenseCats || [];
+    const expCat = el("select", { style: "min-width:170px", onchange: fire },
+      el("option", { value: "" }, "(standardkonto)"),
+      ...expCats.map((c) => el("option", { value: c.id }, categoryPath(expCats, c.id))));
+    if (v.expense_category_id) expCat.value = String(v.expense_category_id);
     const row = el("div", { class: "row", style: "gap:6px;align-items:flex-end;flex-wrap:wrap" },
       wrap("Befintlig", pick), wrap("Artikelnamn", name), wrap("Produktkategori", cat),
       wrap("Antal", qty), wrap("À-pris ex moms", cost), wrap("Moms", rate), rcWrap,
+      wrap("Kostnadskonto", expCat),
       el("button", { class: "btn small ghost", onclick: (e) => { e.target.closest(".row").remove(); fire(); } }, "✕"));
     row._get = () => ({
       description: name.value.trim() || null,
@@ -3777,6 +3824,7 @@ function purchaseItemsEditor(incomeCats, articles, onChange, initialItems) {
       quantity_centi: Math.round(parseFloat((qty.value || "0").replace(",", ".")) * 100),
       unit_cost_ore: toOre(cost.value), rate_code: rate.value, to_stock: true,
       reverse_charge: rc.value || null,
+      expense_category_id: expCat.value ? parseInt(expCat.value, 10) : null,
     });
     rowsBox.appendChild(row);
   }
@@ -3907,7 +3955,7 @@ async function purchaseForm(panel, draft, edit) {
           + `ingående — du betalar ${toKr(ex + moms - rcMoms)} kr till leverantören)`
         : "");
   };
-  const items = purchaseItemsEditor(incomeCats, articles, updateTotals, dp.items);
+  const items = purchaseItemsEditor(incomeCats, articles, updateTotals, dp.items, expenseCats);
   // On a create the kvittoformat is required; on an edit the inköp already has one, so a
   // new receipt is optional (its format is prefilled and kept if none is picked).
   const receipt = receiptPicker({ requireFormat: !editId });
@@ -3929,7 +3977,7 @@ async function purchaseForm(panel, draft, edit) {
   }
 
   panel.appendChild(el("div", { class: "row" },
-    wrap("Leverantör", supplier), wrap("Bokförs på (kostnadskonto)", cat),
+    wrap("Leverantör", supplier), wrap("Standard kostnadskonto", cat),
     wrap("Kvitto-/fakturanummer", extRef)));
   // Editing an unbooked inköp never changes its booking status — it stays a pending
   // leverantörsfaktura; only the fields change. So hide the pay controls in edit mode.
@@ -3939,7 +3987,12 @@ async function purchaseForm(panel, draft, edit) {
     : el("div", { class: "row" }, wrap("Inköpsdatum", date), wrap("Betald?", paidNow), payDateWrap, paidAccountWrap));
   panel.appendChild(el("div", { style: "margin-top:6px" }, oresWrap));
   panel.appendChild(el("div", { style: "margin-top:6px" },
-    el("label", {}, "Artiklar (namnge en rad → den läggs i lager som en batch)"), items.element));
+    el("label", {}, "Artiklar (namnge en rad → den läggs i lager som en batch)"),
+    el("p", { class: "muted", style: "margin:2px 0 6px;font-size:12px" },
+      "Varje rad bokförs på standardkontot ovan. Köpte du flera sorters saker på samma "
+      + "kvitto — verktyg, förbrukningsmaterial, programvara — sätt ett eget "
+      + "kostnadskonto på just den raden."),
+    items.element));
   panel.appendChild(totalsBox);
   panel.appendChild(el("div", { style: "margin-top:6px" },
     el("label", {}, "Kvitto/faktura (bild eller PDF) — välj papper eller digitalt"), receipt.element));

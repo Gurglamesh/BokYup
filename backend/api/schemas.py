@@ -141,6 +141,9 @@ class MomsLineReq(BaseModel):
     rate_code: str
     amount_ore: int
     inclusive: bool = True
+    # Konto for THIS line, overriding the entry's category. None = use the entry's, so a
+    # single-konto post is unchanged. Must be the same kind (income/expense) as the entry.
+    category_id: Optional[int] = None
     # Omvänd betalningsskyldighet (purchases): 'eu_vara' | 'eu_tjanst' | 'utanfor_eu' |
     # 'sv_vara' | 'sv_tjanst'. None = normal moms. The amount is then always the
     # beskattningsunderlag (the seller invoiced without moms).
@@ -148,7 +151,7 @@ class MomsLineReq(BaseModel):
 
 
 class RecurringLineReq(MomsLineReq):
-    category_id: Optional[int] = None
+    """Same shape as a moms line; `category_id` (from the base) is the per-line konto."""
 
 
 class RecurringReq(BaseModel):
@@ -211,6 +214,9 @@ class ExpenseItemReq(BaseModel):
     to_stock: bool = True
     note: Optional[str] = None
     reverse_charge: Optional[str] = None   # omvänd betalningsskyldighet (see MomsLineReq)
+    # Kostnadskonto for THIS line, overriding the purchase's default. None = use the
+    # default, so a receipt with one konto behaves exactly as before.
+    expense_category_id: Optional[int] = None
 
 
 class RecordExpenseReq(BaseModel):

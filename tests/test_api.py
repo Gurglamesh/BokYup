@@ -2516,3 +2516,94 @@ class TestDepreciation:
                     json={"period_start": "2026-01-01", "period_end": "2026-12-31"})
         assert client.post(f"/books/{book}/depreciations",
                            json={"fiscal_year_end": "2026-12-31"}).status_code == 409
+
+
+class TestPerLineExpenseKonto:
+    """One receipt, several kinds of thing: a default konto plus per-line overrides."""
+
+    def _cats(self, client, book):
+        mk = lambda n, k: client.post(f"/books/{book}/categories",
+                                      json={"name": n, "kind": "expense",
+                                            "bas_konto": k}).json()["id"]
+        return (mk("Förbrukningsinventarier", 5410), mk("Förbrukningsmaterial", 5460),
+                mk("Programvaror", 5420))
+
+    def test_one_purchase_splits_across_three_konton(self, client, book):
+        verktyg, material, program = self._cats(client, book)
+        res = client.post(f"/books/{book}/expenses", json={
+            "category_id": verktyg,                 # the default for the receipt
+            "trans_date": "2026-05-01", "paid_date": "2026-05-01", "ext_ref": "KV-1",
+            "items": [
+                # no override -> falls back to the default konto
+                {"quantity_centi": 100, "unit_cost_ore": 100000, "rate_code": "25"},
+                {"quantity_centi": 100, "unit_cost_ore": 40000, "rate_code": "25",
+                 "expense_category_id": material},
+                {"quantity_centi": 100, "unit_cost_ore": 60000, "rate_code": "25",
+                 "expense_category_id": program},
+            ]})
+        assert res.status_code == 201
+
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[5410] == 100000 and hb[5460] == 40000 and hb[5420] == 60000
+        assert hb[2640] == 50000                    # 25 % of 2 000 kr
+        assert hb[1930] == -250000
+        assert sum(hb.values()) == 0
+
+        # the result report splits the same way
+        by = {r["bas_konto"]: r["amount_ore"] for r in client.get(
+            f"/books/{book}/reports/result",
+            params={"start": "2026-01-01", "end": "2026-12-31"}).json()["by_category"]}
+        assert by == {5410: 100000, 5460: 40000, 5420: 60000}
+
+    def test_override_must_be_an_expense_konto(self, client, book):
+        verktyg, _, _ = self._cats(client, book)
+        income = client.post(f"/books/{book}/categories",
+                             json={"name": "Försäljning", "kind": "income",
+                                   "bas_konto": 3041}).json()["id"]
+        assert client.post(f"/books/{book}/expenses", json={
+            "category_id": verktyg, "trans_date": "2026-05-01",
+            "items": [{"quantity_centi": 100, "unit_cost_ore": 10000, "rate_code": "25",
+                       "expense_category_id": income}]}).status_code in (400, 409)
+
+    def test_per_line_konto_survives_an_edit_round_trip(self, client, book):
+        verktyg, material, _ = self._cats(client, book)
+        tid = client.post(f"/books/{book}/expenses", json={
+            "category_id": verktyg, "trans_date": "2026-05-01",
+            "items": [{"quantity_centi": 100, "unit_cost_ore": 100000, "rate_code": "25"},
+                      {"quantity_centi": 100, "unit_cost_ore": 40000, "rate_code": "25",
+                       "expense_category_id": material}]}).json()["transaktion_id"]
+        payload = client.get(f"/books/{book}/transaktioner/{tid}/edit-payload").json()
+        overrides = {i.get("expense_category_id") for i in payload["items"]}
+        assert overrides == {None, material}
+
+    def test_a_single_konto_purchase_is_unchanged(self, client, book):
+        verktyg, _, _ = self._cats(client, book)
+        client.post(f"/books/{book}/expenses", json={
+            "category_id": verktyg, "trans_date": "2026-05-01", "paid_date": "2026-05-01",
+            "items": [{"quantity_centi": 100, "unit_cost_ore": 100000, "rate_code": "25"}]})
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[5410] == 100000 and 5460 not in hb
+
+    def test_bokfor_form_lines_can_override_the_konto_too(self, client, book):
+        """The same per-line konto works for a plain income/expense entry."""
+        verktyg, material, _ = self._cats(client, book)
+        client.post(f"/books/{book}/expenses", json={
+            "category_id": verktyg, "trans_date": "2026-06-01", "paid_date": "2026-06-01",
+            "lines": [{"rate_code": "25", "amount_ore": 125000},
+                      {"rate_code": "25", "amount_ore": 50000,
+                       "category_id": material}]})
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[5410] == 100000 and hb[5460] == 40000
+        assert hb[2640] == 35000 and sum(hb.values()) == 0
+
+    def test_income_line_override_must_be_an_income_konto(self, client, book):
+        verktyg, _, _ = self._cats(client, book)
+        sales = client.post(f"/books/{book}/categories",
+                            json={"name": "Tjänster", "kind": "income",
+                                  "bas_konto": 3041}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "K AB"}).json()["kundnummer"]
+        assert client.post(f"/books/{book}/incomes", json={
+            "customer_id": kid, "category_id": sales, "trans_date": "2026-06-01",
+            "lines": [{"rate_code": "25", "amount_ore": 12500,
+                       "category_id": verktyg}]}).status_code in (400, 409)

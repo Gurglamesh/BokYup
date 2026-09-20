@@ -532,8 +532,13 @@ class AppFacade:
         for it in items:
             ex = round(int(it["quantity_centi"]) * int(it["unit_cost_ore"]) / 100)
             if ex > 0:
+                # `expense_category_id` overrides the purchase's default konto for THIS
+                # line (one receipt can mix verktyg, förbrukningsmaterial and programvara).
+                # NULL falls back to the transaktion's category, so a single-konto inköp
+                # is unchanged.
                 moms_lines.append({"rate_code": it["rate_code"], "amount_ore": ex,
                                    "inclusive": False,
+                                   "category_id": it.get("expense_category_id"),
                                    "reverse_charge": it.get("reverse_charge")})
         if not moms_lines:
             raise ValueError("Inköpet behöver minst en rad med belopp")

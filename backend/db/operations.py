@@ -1166,6 +1166,11 @@ class BookOps:
         insättningar — paid from private money).
         """
         self._check_category(category_id, "expense")
+        # A line may override the purchase's konto (one receipt can mix verktyg,
+        # förbrukningsmaterial and programvara) — but only with another EXPENSE konto.
+        for ln in lines or []:
+            if ln.get("category_id") is not None:
+                self._check_category(int(ln["category_id"]), "expense")
         tid = self._insert_transaktion(
             direction="in", category_id=category_id, supplier_id=supplier_id,
             customer_id=None, trans_date=trans_date, note=note,
@@ -1310,9 +1315,9 @@ class BookOps:
         # the round trip through the form.
         remaining: dict[tuple, int] = {}
         for r in self.conn.execute(
-                "SELECT rate_code, reverse_charge, ex_moms_ore FROM moms_line "
+                "SELECT rate_code, reverse_charge, category_id, ex_moms_ore FROM moms_line "
                 "WHERE transaktion_id=?", (transaktion_id,)).fetchall():
-            key = (r["rate_code"], r["reverse_charge"])
+            key = (r["rate_code"], r["reverse_charge"], r["category_id"])
             remaining[key] = remaining.get(key, 0) + r["ex_moms_ore"]
         items = []
         batches = self.conn.execute(
@@ -1325,18 +1330,20 @@ class BookOps:
             rate = sb["rate_code"] or "25"
             ex = round(sb["qty_in_centi"] * sb["unit_cost_ore"] / 100)
             # Charge the batch against a moms line of the same rate, plain moms first.
-            key = next((k for k in ((rate, None), *(k for k in remaining if k[0] == rate))
-                        if remaining.get(k, 0) >= ex), (rate, None))
+            key = next((k for k in ((rate, None, None),
+                                    *(k for k in remaining if k[0] == rate))
+                        if remaining.get(k, 0) >= ex), (rate, None, None))
             remaining[key] = remaining.get(key, 0) - ex
             items.append({"description": sb["description"], "category_id": sb["category_id"],
                           "quantity_centi": sb["qty_in_centi"], "unit_cost_ore": sb["unit_cost_ore"],
                           "rate_code": rate, "unit": sb["unit"], "reverse_charge": key[1],
+                          "expense_category_id": key[2],
                           "reduction_type": sb["reduction_type"], "to_stock": True})
-        for (rate, rc), ex in remaining.items():
+        for (rate, rc, exp_cat), ex in remaining.items():
             if ex > 0:
                 items.append({"description": "", "category_id": None, "quantity_centi": 100,
                               "unit_cost_ore": ex, "rate_code": rate, "reverse_charge": rc,
-                              "to_stock": False})
+                              "expense_category_id": exp_cat, "to_stock": False})
         return {
             "transaktion_id": transaktion_id, "supplier_id": t["supplier_id"],
             "category_id": t["category_id"], "trans_date": t["trans_date"],
@@ -1416,6 +1423,10 @@ class BookOps:
         customers only). If `paid_date` is given the customer payment is booked now.
         """
         self._check_category(category_id, "income")
+        # A line may override the entry's konto, but only with another INCOME konto.
+        for ln in lines or []:
+            if ln.get("category_id") is not None:
+                self._check_category(int(ln["category_id"]), "income")
         customer = self.get_customer(customer_id)
 
         if rut_amount_ore:
