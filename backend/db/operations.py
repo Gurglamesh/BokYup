@@ -49,6 +49,14 @@ from typing import Optional
 from backend.db.manager import BookSession
 from backend.models import schema as S
 from backend.models.bas_catalog import BAS_CATALOG, CATEGORY_KINDS, catalog_entry
+# The ingående balans is entered on the balansräkningens rutor, so it reads off the
+# SAME box definitions the årsbokslut report uses — the entry form and the report can
+# then never drift apart.
+from backend.reports.arsbokslut import (
+    _ASSET_BOXES as _AB_ASSET_BOXES,
+    _BALANS_LABELS as _AB_BALANS_LABELS,
+    _EK_SKULD_BOXES as _AB_EK_SKULD_BOXES,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +77,12 @@ class ImbalancedPostings(OperationError):
 
 class InvalidState(OperationError):
     """Raised on an illegal lifecycle transition (e.g. RUT order, double-book)."""
+
+
+def _bas_catalog_name(bas_konto: int) -> Optional[str]:
+    """The standard BAS name for a konto, when the catalog knows it."""
+    e = catalog_entry(bas_konto)
+    return e["name"] if e else None
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +106,7 @@ _SYS_ACCOUNT_NAMES = {
     "account_ing_moms_utland": "Beräknad ingående moms på förvärv från utlandet",
     "account_forbrukningsinventarier": "Förbrukningsinventarier",
     "account_inventarier": "Inventarier och verktyg",
+    "account_eget_kapital": "Eget kapital",
 }
 
 _DEFAULT_PAY_METHODS = ["Företagskonto", "Kort", "Swish", "Klarna delbetalning",
@@ -2416,6 +2431,158 @@ class BookOps:
                 egenupprattad=egenupprattad, motivering=motivering,
                 ext_ref=ext_ref, kommentar=kommentar)
         return {"verifikation_id": vid, "ver_number": number}
+
+    # ------------------------------------------------------------------
+    # Ingående balans (opening balances)
+    # ------------------------------------------------------------------
+    #
+    # A book's FIRST fiscal year in this app starts where the previous one ended. Until
+    # those closing balances are entered, the balansräkning is missing everything that
+    # existed before day one — the bank, the inventarier, the debts — while the
+    # resultaträkning is correct, so the årsbokslut reads as if the firm started from
+    # nothing. The source is the previous year's årsbokslut; for an enskild näringsidkare
+    # that is usually the NE-bilaga's B-rutor.
+    #
+    # Two rules make this entry different from an ordinary manual verifikation:
+    #
+    #   * ONLY balance-sheet accounts (1xxx/2xxx). A result konto in an opening balance
+    #     would put last year's income or cost into THIS year's result. Last year's
+    #     result is already inside eget kapital — that is what B10 means.
+    #   * Amounts are given in each konto's NATURAL direction, exactly as the blankett
+    #     prints them: assets positive, equity and debts positive. The signs come from
+    #     the konto class, so the user never has to think about debet/kredit.
+    #
+    # Eget kapital is the balancing post (NE: "B10 Eget kapital (tillgångar − skulder)").
+    # Give it as a row to copy the blankett faithfully — a mistyped figure then shows up
+    # as an imbalance instead of being silently absorbed — or leave it out and let it be
+    # computed.
+    #
+    # There is no external document behind the entry, so it is an EGENUPPRÄTTAD
+    # VERIFIKATION (BFL 5 kap.) and the motivation names the source it was copied from.
+
+    _IB_TEXT = "Ingående balans"
+    _IB_ASSET_LO, _IB_ASSET_HI = 1000, 1999
+    _IB_DEBT_LO, _IB_DEBT_HI = 2000, 2999
+
+    def opening_balance_template(self) -> list[dict]:
+        """
+        The rows an ingående balans is entered on: one per balansräknings-ruta in the
+        förenklat årsbokslut / NE-bilagan, in blankett order, each with the BAS-konto it
+        normally maps to. Driven off `arsbokslut`'s own box ranges, so the entry form and
+        the report can never drift apart. The UI may change any konto — the box is only
+        a label to read the blankett by.
+        """
+        suggested = {
+            "B1": 1030, "B2": 1110, "B3": 1130, "B4": 1220, "B5": 1350, "B6": 1400,
+            "B7": 1510, "B8": 1650, "B9": 1930,
+            "B10": int(self._config("account_eget_kapital")),
+            "B11": 2150, "B13": 2350, "B14": 2650, "B15": 2440, "B16": 2890,
+        }
+        rows = []
+        for box in _AB_ASSET_BOXES + _AB_EK_SKULD_BOXES:
+            konto = suggested[box]
+            rows.append({
+                "box": box,
+                "label": _AB_BALANS_LABELS[box],
+                "bas_konto": konto,
+                "konto_namn": self._account_name(konto) or _bas_catalog_name(konto) or "",
+                "side": "asset" if box in _AB_ASSET_BOXES else "debt",
+                "is_equity": box == "B10",
+            })
+        return rows
+
+    def opening_balance_verifikation(self) -> Optional[dict]:
+        """The book's ingående balans, if one has been posted (else None)."""
+        r = self.conn.execute(
+            "SELECT id, series, ver_number, ver_date FROM verifikation "
+            "WHERE posted=1 AND rattelse_of IS NULL AND text LIKE ? ORDER BY ver_number LIMIT 1",
+            (self._IB_TEXT + "%",)).fetchone()
+        return dict(r) if r else None
+
+    def book_opening_balances(self, date: str, balances: list[dict], *,
+                              source: Optional[str] = None,
+                              motivering: Optional[str] = None,
+                              kommentar: Optional[str] = None) -> dict:
+        """
+        Post the ingående balans as ONE balanced verifikation dated `date` (the first day
+        of the fiscal year).
+
+        `balances` = [{bas_konto, amount_ore, account_name?}] where amount_ore is the
+        konto's balance in its NATURAL direction: an asset (1xxx) positive means a debit
+        balance, equity/a debt (2xxx) positive means a credit balance. Zero rows are
+        dropped — a blankett is mostly zeros.
+
+        Eget kapital may be given as a row like any other, in which case the whole thing
+        must balance; leave it out and the balancing amount is posted to the config konto
+        (2010) automatically.
+        """
+        eq_konto = self._sys_account("account_eget_kapital")
+        existing = self.opening_balance_verifikation()
+        if existing:
+            raise InvalidState(
+                f"Boken har redan en ingående balans (ver {existing['series']}"
+                f"{existing['ver_number']}, {existing['ver_date']}). Rätta den med en "
+                "rättelse om den blev fel — bokför inte en till.")
+
+        postings: list[tuple[int, int, Optional[str]]] = []
+        names: dict[int, Optional[str]] = {}
+        seen: dict[int, int] = {}
+        equity_given = False
+        for row in balances or []:
+            konto = int(row["bas_konto"])
+            amount = int(row.get("amount_ore") or 0)
+            if amount == 0:
+                continue
+            if konto > self._IB_DEBT_HI or konto < self._IB_ASSET_LO:
+                raise InvalidState(
+                    f"Konto {konto} är ett resultatkonto. En ingående balans innehåller "
+                    "bara balanskonton (1xxx tillgångar, 2xxx eget kapital och skulder) — "
+                    "föregående års resultat ligger redan i eget kapital.")
+            if konto in seen:
+                raise InvalidState(f"Konto {konto} förekommer flera gånger")
+            seen[konto] = amount
+            names[konto] = row.get("account_name")
+            if konto == eq_konto:
+                equity_given = True
+            # An asset's positive balance is a debit; equity/a debt's is a credit.
+            signed = amount if konto <= self._IB_ASSET_HI else -amount
+            postings.append((konto, signed, "ingående balans"))
+
+        if not postings:
+            raise ValueError("Ange minst ett saldo att bokföra")
+
+        diff = sum(a for _, a, _ in postings)
+        if equity_given:
+            if diff != 0:
+                raise ValueError(
+                    f"Balansräkningen går inte ihop: tillgångar minus skulder skiljer "
+                    f"{self._kr(diff)} från det egna kapitalet. Kontrollera siffrorna mot "
+                    f"underlaget, eller lämna eget kapital tomt så räknas det ut.")
+        elif diff:
+            postings.append((eq_konto, -diff, "ingående balans (utjämning)"))
+            names.setdefault(eq_konto, None)
+
+        for konto, _, _ in postings:
+            self.ensure_account(
+                konto, names.get(konto) or self._account_name(konto)
+                or _bas_catalog_name(konto) or f"Konto {konto}")
+
+        if not (motivering or "").strip():
+            src = (source or "").strip() or "föregående års årsbokslut"
+            lines = ", ".join(
+                f"{k} {self._account_name(k) or ''}".strip() + f" {self._kr(abs(a))}"
+                for k, a, _ in sorted(postings))
+            motivering = (
+                f"Ingående balanser per {date}, överförda från {src}. Endast "
+                f"balanskonton; föregående års resultat ingår i eget kapital. "
+                f"Saldon: {lines}.")
+
+        with self.conn:
+            vid, number = self._post_verifikation(
+                date, _now()[:10], f"{self._IB_TEXT} {date}", postings,
+                egenupprattad=True, motivering=motivering, kommentar=kommentar)
+        return {"verifikation_id": vid, "ver_number": number,
+                "postings": [{"bas_konto": k, "amount_ore": a} for k, a, _ in postings]}
 
     # ------------------------------------------------------------------
     # Privat tillgång in i verksamheten (tillskott)

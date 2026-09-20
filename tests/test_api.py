@@ -2928,3 +2928,37 @@ class TestHuvudbokCsv:
         assert empty.lstrip("﻿").strip().count("\r\n") == 0   # header only
         assert client.get(f"/books/{book}/huvudbok.csv",
                           params={"kind": "nonsens"}).status_code == 400
+
+
+class TestOpeningBalanceApi:
+    def test_template_and_booking_round_trip(self, client, book):
+        tpl = client.get(f"/books/{book}/opening-balance").json()
+        assert tpl["existing"] is None
+        assert [r["box"] for r in tpl["rows"]][:3] == ["B1", "B2", "B3"]
+
+        r = client.post(f"/books/{book}/opening-balance", json={
+            "date": "2026-01-01",
+            "balances": [{"bas_konto": 1930, "amount_ore": 1292900},
+                         {"bas_konto": 2010, "amount_ore": 1292900}],
+            "source": "NE-bilagan till Inkomstdeklaration 1 för inkomståret 2025"})
+        assert r.status_code == 201
+
+        ver = client.get(f"/books/{book}/verifikationer-full").json()[0]
+        assert ver["text"] == "Ingående balans 2026-01-01" and ver["egenupprattad"] == 1
+        assert {p["bas_konto"]: p["amount_ore"] for p in ver["postings"]} == {
+            1930: 1292900, 2010: -1292900}
+        assert client.get(f"/books/{book}/opening-balance").json()["existing"]["ver_number"] == 1
+
+    def test_result_account_is_rejected_with_409(self, client, book):
+        r = client.post(f"/books/{book}/opening-balance", json={
+            "date": "2026-01-01",
+            "balances": [{"bas_konto": 1930, "amount_ore": 100},
+                         {"bas_konto": 3001, "amount_ore": 100}]})
+        assert r.status_code == 409 and "resultatkonto" in r.json()["detail"]
+
+    def test_imbalance_is_rejected_with_400(self, client, book):
+        r = client.post(f"/books/{book}/opening-balance", json={
+            "date": "2026-01-01",
+            "balances": [{"bas_konto": 1930, "amount_ore": 1292900},
+                         {"bas_konto": 2010, "amount_ore": 1292800}]})
+        assert r.status_code == 400 and "går inte ihop" in r.json()["detail"]

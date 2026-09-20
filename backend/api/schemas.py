@@ -310,6 +310,23 @@ class ManualVerifikationReq(BaseModel):
     kommentar: Optional[str] = None        # free note kept with the entry
 
 
+class OpeningBalanceRowReq(BaseModel):
+    bas_konto: int
+    # The konto's balance in its NATURAL direction: an asset (1xxx) positive is a debit
+    # balance, equity/a debt (2xxx) positive is a credit balance — exactly as the
+    # årsbokslut/NE blankett prints them. Zero rows are dropped.
+    amount_ore: int = 0
+    account_name: Optional[str] = None
+
+
+class OpeningBalanceReq(BaseModel):
+    date: str                              # first day of the fiscal year
+    balances: list[OpeningBalanceRowReq]
+    source: Optional[str] = None           # what the figures were copied from
+    motivering: Optional[str] = None       # overrides the composed motivation
+    kommentar: Optional[str] = None
+
+
 class AssetPurchaseReq(BaseModel):
     """A tool/inventarie bought BY the firma: normal deductible moms, but the net may go
     to a balance-sheet konto (capitalised + depreciated) instead of a cost konto."""

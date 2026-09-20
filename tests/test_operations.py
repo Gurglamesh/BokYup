@@ -1767,3 +1767,88 @@ class TestOffertToInvoiceBookkeeping:
         ops.create_invoice_from_offert(off["offert_id"])
         with pytest.raises(InvalidState):
             ops.create_invoice_from_offert(off["offert_id"])
+
+
+class TestOpeningBalances:
+    """Ingående balans: last year's closing balances entered as one verifikation."""
+
+    def test_template_follows_the_balansrakning_boxes(self, ops: BookOps):
+        rows = ops.opening_balance_template()
+        boxes = [r["box"] for r in rows]
+        assert boxes[:9] == ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9"]
+        assert [r for r in rows if r["is_equity"]][0]["bas_konto"] == 2010
+        b9 = [r for r in rows if r["box"] == "B9"][0]
+        assert b9["bas_konto"] == 1930 and b9["side"] == "asset"
+
+    def test_natural_amounts_become_debit_and_credit(self, ops: BookOps):
+        # Assets are typed positive and land as debits; equity/debts positive as credits.
+        res = ops.book_opening_balances("2026-01-01", [
+            {"bas_konto": 1930, "amount_ore": 1292900},
+            {"bas_konto": 2440, "amount_ore": 200000},
+            {"bas_konto": 2010, "amount_ore": 1092900},
+        ], source="NE-bilagan 2025")
+        posts = {p["bas_konto"]: p["amount_ore"] for p in res["postings"]}
+        assert posts == {1930: 1292900, 2440: -200000, 2010: -1092900}
+        assert sum(posts.values()) == 0
+
+    def test_equity_is_computed_when_left_out(self, ops: BookOps):
+        res = ops.book_opening_balances("2026-01-01", [
+            {"bas_konto": 1930, "amount_ore": 1292900},
+            {"bas_konto": 2440, "amount_ore": 200000},
+        ])
+        posts = {p["bas_konto"]: p["amount_ore"] for p in res["postings"]}
+        assert posts[2010] == -1092900          # tillgångar − skulder
+
+    def test_a_mistyped_equity_is_refused_not_absorbed(self, ops: BookOps):
+        with pytest.raises(ValueError, match="går inte ihop"):
+            ops.book_opening_balances("2026-01-01", [
+                {"bas_konto": 1930, "amount_ore": 1292900},
+                {"bas_konto": 2010, "amount_ore": 1292800},   # 1 kr fel
+            ])
+        assert ops.opening_balance_verifikation() is None
+
+    def test_a_result_account_is_refused(self, ops: BookOps):
+        # Last year's result belongs inside eget kapital, never on a 3xxx–8xxx konto.
+        with pytest.raises(InvalidState, match="resultatkonto"):
+            ops.book_opening_balances("2026-01-01", [
+                {"bas_konto": 1930, "amount_ore": 1292900},
+                {"bas_konto": 3001, "amount_ore": 1292900},
+            ])
+
+    def test_zero_rows_are_dropped(self, ops: BookOps):
+        # A blankett is mostly zeros; they must not become postings.
+        res = ops.book_opening_balances("2026-01-01", [
+            {"bas_konto": 1220, "amount_ore": 0},
+            {"bas_konto": 1400, "amount_ore": 0},
+            {"bas_konto": 1930, "amount_ore": 1292900},
+        ])
+        assert [p["bas_konto"] for p in res["postings"]] == [1930, 2010]
+
+    def test_it_is_egenupprattad_with_a_motivation_naming_the_source(self, ops: BookOps):
+        ops.book_opening_balances("2026-01-01", [{"bas_konto": 1930, "amount_ore": 1292900}],
+                                  source="NE-bilagan till Inkomstdeklaration 1 för 2025")
+        v = ops.verifikationer_full()[0]
+        assert v["text"] == "Ingående balans 2026-01-01"
+        assert v["egenupprattad"] == 1
+        assert "NE-bilagan" in v["motivering"] and "12 929,00" in v["motivering"]
+
+    def test_a_second_opening_balance_is_refused(self, ops: BookOps):
+        ops.book_opening_balances("2026-01-01", [{"bas_konto": 1930, "amount_ore": 1292900}])
+        with pytest.raises(InvalidState, match="redan en ingående balans"):
+            ops.book_opening_balances("2026-01-01", [{"bas_konto": 1930, "amount_ore": 100}])
+
+    def test_it_reaches_the_arsbokslut_and_not_the_result(self, ops: BookOps):
+        # The whole point: the balansräkning must show the bank the firm actually had,
+        # while the year's result is untouched by an opening balance.
+        from backend.reports.arsbokslut import forenklat_arsbokslut
+        from backend.reports.result import result_report
+        ops.book_opening_balances("2026-01-01", [
+            {"bas_konto": 1930, "amount_ore": 1292900},
+            {"bas_konto": 2010, "amount_ore": 1292900},
+        ])
+        ab = forenklat_arsbokslut(ops.conn, "2026-01-01", "2026-12-31")
+        assert ab["balans"]["B9"]["value_ore"] == 1292900
+        assert ab["balans"]["B10"]["value_ore"] == 1292900
+        assert ab["balanserar"] is True
+        r = result_report(ops.conn, "2026-01-01", "2026-12-31")
+        assert r["income_ore"] == 0 and r["expense_ore"] == 0

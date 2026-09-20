@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 43
+SCHEMA_VERSION = 44
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -696,6 +696,10 @@ _DEFAULT_CONFIG = {
     "account_kundfordran": "1510",          # Kundfordringar (year-end accrual)
     "account_leverantorsskuld": "2440",     # Leverantörsskulder (year-end accrual)
     "account_ores_kronutjamning": "3740",   # Öres- och kronutjämning (rounding)
+    # Eget kapital. For an enskild näringsidkare the previous years' accumulated result
+    # and capital are carried here; 2018 Egna insättningar is only the CURRENT year's
+    # contributions. This is the balancing post of an ingående balans.
+    "account_eget_kapital": "2010",         # Eget kapital (opening balance)
     # Omvänd betalningsskyldighet (reverse charge): the buyer reports BOTH sides of the
     # moms. The computed utgående moms lands on 26x4 and the matching (deductible)
     # ingående moms on 2645, so the two net out when you have full avdragsrätt.
@@ -1147,6 +1151,7 @@ _MIGRATIONS: dict[int, str] = {
     """,
     38: """
         INSERT OR IGNORE INTO config(key, value) VALUES ('account_egna_insattningar', '2018');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('account_eget_kapital', '2010');
     """,
     # v39: freeze each booked moms_line's BAS-konto so editing a category's konto later
     # never rewrites history. Backfill from the category's current konto — exact, because
@@ -1255,6 +1260,9 @@ _MIGRATIONS: dict[int, str] = {
             created_at      TEXT NOT NULL,
             UNIQUE (fixed_asset_id, fiscal_year_end)
         );
+    """,
+    44: """
+        INSERT OR IGNORE INTO config(key, value) VALUES ('account_eget_kapital', '2010');
     """,
 }
 

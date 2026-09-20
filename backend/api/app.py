@@ -620,6 +620,14 @@ def _build_router():
     def manual_verifikation(book_id: str, body: sc.ManualVerifikationReq, request: Request):
         return fac(request).h_manual_verifikation({"book_id": book_id}, body.model_dump(), {})
 
+    @r.get("/books/{book_id}/opening-balance")
+    def opening_balance_template(book_id: str, request: Request):
+        return fac(request).h_opening_balance_template({"book_id": book_id}, {}, {})
+
+    @r.post("/books/{book_id}/opening-balance", status_code=201)
+    def book_opening_balances(book_id: str, body: sc.OpeningBalanceReq, request: Request):
+        return fac(request).h_book_opening_balances({"book_id": book_id}, body.model_dump(), {})
+
     @r.get("/books/{book_id}/transaktioner")
     def list_transaktioner(book_id: str, request: Request, include_synthetic: bool = False,
                            only_deleted: bool = False):

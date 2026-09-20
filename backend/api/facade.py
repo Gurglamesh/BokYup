@@ -755,6 +755,16 @@ class AppFacade:
             egenupprattad=bool(b.get("egenupprattad")), motivering=b.get("motivering"),
             ext_ref=b.get("ext_ref"), kommentar=b.get("kommentar"))
 
+    def h_opening_balance_template(self, p, b, q):
+        return {"rows": self._ops(p["book_id"]).opening_balance_template(),
+                "existing": self._ops(p["book_id"]).opening_balance_verifikation()}
+
+    def h_book_opening_balances(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        return ops.book_opening_balances(
+            b["date"], b["balances"], source=b.get("source"),
+            motivering=b.get("motivering"), kommentar=b.get("kommentar"))
+
     def h_list_transaktioner(self, p, b, q):
         ops = self._ops(p["book_id"])
         cols = ("SELECT t.id, t.direction, t.status, t.trans_date, t.payment_date, "
@@ -1159,6 +1169,8 @@ _route("GET", "/books/{book_id}/verifikationer-full", "h_verifikationer_full")
 _route("GET", "/books/{book_id}/huvudbok", "h_huvudbok")
 _route("GET", "/books/{book_id}/huvudbok.csv", "h_huvudbok_csv")
 _route("POST", "/books/{book_id}/verifikationer/manual", "h_manual_verifikation", 201)
+_route("GET", "/books/{book_id}/opening-balance", "h_opening_balance_template")
+_route("POST", "/books/{book_id}/opening-balance", "h_book_opening_balances", 201)
 _route("GET", "/books/{book_id}/transaktioner", "h_list_transaktioner")
 
 _route("POST", "/books/{book_id}/transaktioner/{transaktion_id}/receipts", "h_upload_receipt", 201)

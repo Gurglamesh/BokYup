@@ -1691,8 +1691,10 @@ const SECTION_RENDERERS = {
   async bokslut(panel) {
     panel.appendChild(el("h2", {}, "Bokslut & perioder"));
 
+    await openingBalanceBlock(panel);
+
     // Period locking
-    panel.appendChild(el("h3", {}, "Lås period"));
+    panel.appendChild(el("h3", { style: "margin-top:26px" }, "Lås period"));
     panel.appendChild(el("p", { class: "muted" },
       "När en momsdeklaration är inlämnad: lås perioden så inget kan bakdateras in i den."));
     const lockStart = el("input", { type: "date", value: "2026-01-01" });
@@ -2915,6 +2917,111 @@ async function rutSkvPayFlow(claimId, claimedOre, defaultNote) {
 
 // Manual journal entry (manuell verifikation): a balanced, hand-entered verifikation
 // independent of invoices — for fixing something manually. Takes over the section panel.
+// ---- Ingående balans -------------------------------------------------------
+// A book's first year in the app starts where the previous one ended. Until those
+// closing balances are entered the balansräkning is missing everything that existed
+// before day one. The rows follow the balansräkningens rutor (B1–B16) so the figures
+// can be copied straight off last year's årsbokslut / NE-bilaga, and amounts are typed
+// in each konto's natural direction — the backend turns them into debet/kredit.
+async function openingBalanceBlock(panel) {
+  panel.appendChild(el("h3", {}, "Ingående balans"));
+  const info = el("p", { class: "muted" },
+    "Första året i appen börjar där förra året slutade. Fyll i utgående balanser per "
+    + "räkenskapsårets början — för en enskild näringsidkare står de i NE-bilagans "
+    + "B-rutor. Bara balanskonton: förra årets resultat ligger redan i eget kapital.");
+  panel.appendChild(info);
+
+  const box = el("div", {});
+  panel.appendChild(box);
+
+  const data = await api("GET", `/books/${bid()}/opening-balance`);
+  if (data.existing) {
+    box.appendChild(el("p", {},
+      el("span", { class: "pill" }, "Bokförd"),
+      el("span", { style: "margin-left:8px" },
+        `Ingående balans finns som ver ${data.existing.series}${data.existing.ver_number} `
+        + `(${data.existing.ver_date}). Blev den fel — rätta den med en rättelse i `
+        + `Verifikat, bokför inte en till.`)));
+    return;
+  }
+
+  const date = el("input", { type: "date", value: `${new Date().getFullYear()}-01-01` });
+  const source = el("input", { type: "text", style: "min-width:320px",
+    placeholder: "t.ex. NE-bilagan till Inkomstdeklaration 1 för inkomståret 2025" });
+  box.appendChild(el("div", { class: "row" },
+    wrap("Räkenskapsårets första dag", date), wrap("Källa (underlag)", source)));
+
+  const rowsBox = el("div", { style: "margin-top:10px" });
+  const summary = el("div", { class: "muted", style: "margin:10px 0;font-weight:600" });
+  const made = [];
+
+  function recompute() {
+    let assets = 0, debts = 0, equity = 0;
+    for (const r of made) {
+      const v = r.amount.value.trim() ? toOre(r.amount.value) : 0;
+      if (r.row.side === "asset") assets += v;
+      else { debts += v; if (r.row.is_equity) equity += v; }
+    }
+    const diff = assets - debts;
+    summary.textContent =
+      `Tillgångar ${toKr(assets)} kr · Eget kapital och skulder ${toKr(debts)} kr · `
+      + (diff === 0 ? "balanserar ✓" : `differens ${toKr(diff)} kr`);
+    summary.style.color = diff === 0 ? "" : "var(--danger)";
+    return { assets, debts, equity, diff };
+  }
+
+  for (const row of data.rows) {
+    const konto = el("input", { type: "text", style: "width:80px",
+      value: String(row.bas_konto) });
+    const amount = el("input", { type: "text", style: "width:120px", placeholder: "0,00",
+      oninput: recompute });
+    const label = el("div", { style: "flex:1 1 260px;align-self:flex-end;padding-bottom:8px" },
+      el("strong", {}, row.box), " ", row.label,
+      row.konto_namn ? el("span", { class: "muted" }, ` · ${row.konto_namn}`) : null);
+    rowsBox.appendChild(el("div", { class: "row", style: "gap:8px;align-items:flex-end" },
+      label, wrap("Konto", konto), wrap("Belopp (kr)", amount)));
+    made.push({ row, konto, amount });
+  }
+  box.appendChild(rowsBox);
+
+  // B10 is by definition tillgångar − skulder, so offer to fill it rather than make the
+  // user do the subtraction. Typing it from the blankett instead is the better check —
+  // a mistyped figure then shows up as a differens.
+  const eq = made.find((m) => m.row.is_equity);
+  box.appendChild(el("div", {},
+    el("button", { class: "btn small ghost", onclick: () => {
+      const { assets, debts, equity } = recompute();
+      eq.amount.value = toKr(assets - (debts - equity));
+      recompute();
+    } }, "Räkna ut eget kapital (B10)")));
+  box.appendChild(summary);
+  recompute();
+
+  const kommentar = el("input", { type: "text", style: "min-width:320px",
+    placeholder: "valfri notering" });
+  box.appendChild(el("div", { class: "row" }, wrap("Kommentar", kommentar)));
+  box.appendChild(el("div", { style: "margin-top:12px" },
+    el("button", { class: "btn brand", onclick: () => guard(submit) },
+      "Bokför ingående balans")));
+
+  async function submit() {
+    const balances = [];
+    for (const m of made) {
+      const v = m.amount.value.trim() ? toOre(m.amount.value) : 0;
+      if (!v) continue;
+      const k = parseInt(m.konto.value.trim(), 10);
+      if (!k) { toast(`${m.row.box}: ange ett konto`, true); return; }
+      balances.push({ bas_konto: k, amount_ore: v, account_name: m.row.label });
+    }
+    if (balances.length === 0) { toast("Fyll i minst ett saldo", true); return; }
+    const res = await api("POST", `/books/${bid()}/opening-balance`, {
+      date: date.value, balances, source: source.value.trim() || null,
+      kommentar: kommentar.value.trim() || null });
+    toast(`Ingående balans bokförd (ver ${res.ver_number})`);
+    renderWorkspace();
+  }
+}
+
 async function manualVerForm(panel, accounts) {
   const known = new Map((accounts || []).map((a) => [String(a.bas_konto), a.name]));
   panel.innerHTML = "";

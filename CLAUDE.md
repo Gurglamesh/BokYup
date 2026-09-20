@@ -1073,6 +1073,34 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       `ores_rounding` (without the Pydantic fields both are dropped silently — the trap
       that has now bitten three times). Tests pass (501); browser-smoke-tested (1 250,49 kr
       → 1930 1 250,00 / 3740 0,49 / 2610 −250,10 / 3001 −1 000,39, balanced).
+- [x] **Ingående balans (schema v44, 2026-09).** A book's first fiscal year in the app
+      starts where the previous one ended, so until last year's closing balances are
+      entered the balansräkning is missing everything that existed before day one — the
+      bank, the inventarier, the debts — while the resultaträkning is right. The
+      årsbokslut then reads as if the firm started from nothing.
+      `book_opening_balances(date, balances)` posts ONE balanced verifikation, marked
+      **egenupprättad** (there is no external document — the motivation names the source
+      it was copied from, BFL 5 kap.) with the text `Ingående balans <date>`, which is
+      also the marker `opening_balance_verifikation()` reads: a **second** IB is refused
+      (InvalidState→409) rather than silently doubling the bank.
+      Two rules set it apart from a manual verifikation. **Only balance-sheet konton**
+      (1000–2999) — a 3xxx–8xxx konto would drop last year's result into THIS year's
+      result, and it is already inside eget kapital (that is what NE's B10 means).
+      **Amounts are given in each konto's natural direction** — assets positive, equity
+      and debts positive, exactly as the blankett prints them — and the backend derives
+      debet/kredit from the konto class, so the user never converts signs.
+      Eget kapital may be **typed from the blankett** (a mistyped figure then surfaces as
+      an imbalance with the exact diff → 400, instead of being absorbed) or **left out**
+      and computed as tillgångar − skulder. `opening_balance_template()` builds the entry
+      rows from `arsbokslut`'s OWN B1–B16 box ranges + labels, so the form and the report
+      can never drift apart. New config `account_eget_kapital` (2010 — distinct from 2018
+      Egna insättningar, which is only the current year's contributions). API
+      `GET/POST /opening-balance`. UI: an **"Ingående balans"** block at the top of
+      **Bokslut** — one row per B-ruta with an editable konto, a live
+      "Tillgångar · Eget kapital och skulder · balanserar ✓", a "Räkna ut eget kapital"
+      helper, and a källa-field that goes into the motivation. Tests pass (513);
+      browser-smoke-tested (12 929 kr → 1930/2010 balanced, B9+B10 in the årsbokslut,
+      0 kr in the result report).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
