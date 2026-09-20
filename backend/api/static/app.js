@@ -591,19 +591,21 @@ const SECTION_RENDERERS = {
     const catName = Object.fromEntries(cats.map((c) => [c.id, c.name]));
     panel.appendChild(el("h2", {}, "Transaktioner"));
     if (txs.length === 0) { panel.appendChild(el("p", { class: "muted" }, "Inga transaktioner ännu.")); return; }
-    const rows = txs.map((t) => el("tr", {},
-      el("td", {}, t.trans_date),
-      el("td", {}, t.direction === "in" ? "Utgift" : "Inkomst"),
-      el("td", {}, catName[t.category_id] || "—"),
-      el("td", {}, el("span", { style: "display:inline-flex;gap:4px" },
+    const rowFn = (t) => [
+      t.trans_date,
+      t.direction === "in" ? "Utgift" : "Inkomst",
+      catName[t.category_id] || "—",
+      t.ext_ref || "",
+      el("span", { class: "num" }, toKr(t.amount_ore || 0) + " kr"),
+      el("span", { style: "display:inline-flex;gap:4px" },
         el("span", { class: "pill " + t.status }, t.status === "paid" ? "Betald" : "Väntar"),
-        t.corrected ? el("span", { class: "pill", title: "Bokföringen har rättats (ombokförd med en rättelse)" }, "Rättad") : null)),
-      el("td", { class: "num" }, t.verifikation_id
+        t.corrected ? el("span", { class: "pill", title: "Bokföringen har rättats (ombokförd med en rättelse)" }, "Rättad") : null),
+      el("span", { class: "num" }, t.verifikation_id
         ? ("ver " + t.verifikation_id + (t.corrected ? " (rättad)" : "")) : ""),
-      el("td", { class: "num" }, t.direction === "in"
-        ? el("button", { class: "btn small ghost", onclick: () => guard(() => receiptsFlow(t.id, t.status === "pending")) }, "📎 Kvitto")
-        : ""),
-      el("td", { class: "num" }, el("span", { style: "display:inline-flex;gap:4px;justify-content:flex-end" },
+      el("span", { style: "display:inline-flex;gap:4px;justify-content:flex-end" },
+        t.direction === "in"
+          ? el("button", { class: "btn small ghost", onclick: () => guard(() => receiptsFlow(t.id, t.status === "pending")) }, "📎 Kvitto")
+          : null,
         t.status === "pending"
           ? el("button", { class: "btn small", onclick: () => guard(() => payFlow(t.id, { allowFee: t.direction === "in" })) }, "Bokför betalning")
           : null,
@@ -611,14 +613,24 @@ const SECTION_RENDERERS = {
         (t.verifikation_id && !t.corrected && !t.invoice_backed && !t.rut)
           ? el("button", { class: "btn small ghost", title: "Rätta baskonto/moms — backar och bokför om med samma belopp",
               onclick: () => guard(() => rebookFlow(t, cats)) }, "Rätta baskonto")
-          : null)),
-    ));
-    panel.appendChild(el("table", {},
-      el("thead", {}, el("tr", {},
-        el("th", {}, "Datum"), el("th", {}, "Typ"), el("th", {}, "Kategori"),
-        el("th", {}, "Status"), el("th", { class: "num" }, "Verifikat"),
-        el("th", { class: "num" }, "Kvitto"), el("th", {}, ""))),
-      el("tbody", {}, rows),
+          : null),
+    ];
+    panel.appendChild(searchTable(
+      "Sök transaktion (datum, kategori, kvitto-/fakturanr)…",
+      ["Datum", "Typ", "Kategori", "Kvitto/Faktura-nr", "Belopp", "Status", "Verifikat", ""],
+      txs,
+      (t, q) => [t.trans_date, t.direction === "in" ? "utgift" : "inkomst",
+        catName[t.category_id] || "", t.ext_ref || ""].join(" ").toLowerCase().includes(q),
+      rowFn,
+      [(t) => t.trans_date,
+       (t) => (t.direction === "in" ? "Utgift" : "Inkomst"),
+       (t) => catName[t.category_id] || "",
+       (t) => t.ext_ref || "",
+       (t) => t.amount_ore || 0,
+       (t) => (t.status === "paid" ? 1 : 0),
+       (t) => t.verifikation_id || 0,
+       null],
+      "transaktioner",
     ));
   },
 
@@ -701,6 +713,17 @@ const SECTION_RENDERERS = {
       t.status === "pending"
         ? el("button", { class: "btn small", onclick: () => guard(() => payFlow(t.id, { allowFee: true })) }, "Bokför betalning")
         : null);
+    // Click a column header to sort. Belopp sorts numerically (öre), status by
+    // "väntar före betald" so the ones still needing action come first.
+    const inkopSortKeys = [
+      (t) => t.trans_date,
+      (t) => supName[t.supplier_id] || "",
+      (t) => catName[t.category_id] || "",
+      (t) => t.ext_ref || "",
+      (t) => t.amount_ore || 0,
+      (t) => (t.status === "paid" ? 1 : 0),
+      null,
+    ];
     panel.appendChild(searchTable(
       "Sök inköp (leverantör, nr, datum, kategori)…",
       ["Datum", "Leverantör", "Kategori", "Kvitto/Faktura-nr", "Belopp", "Status", ""],
@@ -715,6 +738,7 @@ const SECTION_RENDERERS = {
             t.status === "paid" ? "Betald" : "Väntar"),
           t.corrected ? el("span", { class: "pill", title: "Bokföringen har rättats" }, "Rättad") : null),
         actions(t)],
+      inkopSortKeys, "inkop",
     ));
     appendDeleted();
   },
@@ -1002,7 +1026,13 @@ const SECTION_RENDERERS = {
     const placeholder = type === "business"
       ? "Sök företag (namn, org.nr, momsreg.nr, e-post, adress)…"
       : "Sök privatperson (namn, nr, e-post, telefon, adress)…";
-    panel.appendChild(searchTable(placeholder, headers, all, match, rowFn));
+    const sortKeys = type === "business"
+      ? [(c) => c.kundnummer, (c) => cname(c), (c) => c.org_nr || "", (c) => c.vat_nr || "",
+         (c) => c.email || "", (c) => c.invoiced_ore || 0, null]
+      : [(c) => c.kundnummer, (c) => cname(c), (c) => c.personnummer || "",
+         (c) => c.email || "", (c) => c.phone || "", (c) => c.invoiced_ore || 0, null];
+    panel.appendChild(searchTable(placeholder, headers, all, match, rowFn,
+                                  sortKeys, "customers-" + type));
   },
 
   // ----- återkommande betalningar -----
@@ -1335,6 +1365,8 @@ const SECTION_RENDERERS = {
           out.appendChild(el("h3", { style: "margin-top:18px" },
             `${v.series}${v.ver_number} `,
             el("span", { class: "muted", style: "font-weight:400" }, `${v.ver_date} — ${v.text || ""}`),
+            v.ext_ref ? el("span", { class: "pill", style: "margin-left:6px",
+              title: "Kvitto-/fakturanummer" }, v.ext_ref) : null,
             v.rattelse_of ? el("span", { class: "pill", style: "margin-left:6px" }, "rättelse") : null,
             v.egenupprattad ? el("span", { class: "pill", style: "margin-left:6px",
               title: "Egenupprättad verifikation (BFL 5 kap.) — motiveringen är underlaget" },
@@ -1343,6 +1375,9 @@ const SECTION_RENDERERS = {
           // belongs in the grundbok view, not hidden behind a click.
           if (v.motivering) {
             out.appendChild(el("p", { class: "muted", style: "margin:4px 0 0" }, v.motivering));
+          }
+          if (v.kommentar) {
+            out.appendChild(el("p", { class: "muted", style: "margin:4px 0 0" }, v.kommentar));
           }
           out.appendChild(el("table", {},
             el("thead", {}, el("tr", {},
@@ -2081,10 +2116,45 @@ const SECTION_RENDERERS = {
         iv.invoice_date || "", iv.due_date || ""].join(" ").toLowerCase().includes(q);
       const search = el("input", { type: "search", placeholder: "Sök faktura (nr, kund, datum)…",
         style: "margin-top:12px;max-width:340px" });
+      // Click-to-sort, same behaviour as the Inköp/Transaktioner tables. Kept in
+      // state.tableSort so it survives the re-render after paying/crediting an invoice.
+      const SORTS = [
+        ["Nr", (iv) => iv.invoice_number, "num"],
+        ["Kund", (iv) => custName[iv.customer_id] || "", ""],
+        ["Datum", (iv) => iv.invoice_date || "", ""],
+        ["Förfaller", (iv) => iv.due_date || "", ""],
+        ["Summa", (iv) => iv.inc_moms_ore || 0, "num"],
+        ["Marginal", (iv) => (iv.has_cost ? (iv.margin_ore || 0) : null), "num"],
+        ["Kvar", (iv) => iv.outstanding_ore || 0, "num"],
+        ["Status", (iv) => iv.state || "", ""],
+        ["", null, ""],
+      ];
+      if (!state.tableSort) state.tableSort = {};
+      const cur = () => state.tableSort.fakturor || { idx: null, dir: 1 };
       const tbody = el("tbody", {});
+      const thead = el("thead", {});
+      const drawHead = () => {
+        const { idx, dir } = cur();
+        thead.innerHTML = "";
+        thead.appendChild(el("tr", {}, SORTS.map(([label, keyFn, cls], i) => {
+          if (!keyFn) return el("th", { class: cls }, label);
+          return el("th", { class: cls }, el("span", {
+            style: "cursor:pointer;user-select:none;white-space:nowrap",
+            title: "Sortera på " + label,
+            onclick: () => {
+              state.tableSort.fakturor = idx === i ? { idx: i, dir: -dir } : { idx: i, dir: 1 };
+              drawHead(); drawRows();
+            },
+          }, label + (idx === i ? (dir > 0 ? " ▲" : " ▼") : "")));
+        })));
+      };
       const drawRows = () => {
         const q = search.value.trim().toLowerCase();
-        const shown = q ? rows.filter((iv) => ivMatch(iv, q)) : rows;
+        let shown = q ? rows.filter((iv) => ivMatch(iv, q)) : rows.slice();
+        const { idx, dir } = cur();
+        if (idx !== null && SORTS[idx] && SORTS[idx][1]) {
+          shown = shown.slice().sort((a, b) => dir * sortCmp(SORTS[idx][1](a), SORTS[idx][1](b)));
+        }
         tbody.innerHTML = "";
         if (q && shown.length === 0) {
           tbody.appendChild(el("tr", {}, el("td", { colspan: "9", class: "muted" }, "Inga träffar.")));
@@ -2093,15 +2163,10 @@ const SECTION_RENDERERS = {
         }
       };
       search.oninput = drawRows;
+      drawHead();
       drawRows();
       content.appendChild(search);
-      content.appendChild(el("table", { style: "margin-top:14px" },
-        el("thead", {}, el("tr", {},
-          el("th", { class: "num" }, "Nr"), el("th", {}, "Kund"), el("th", {}, "Datum"),
-          el("th", {}, "Förfaller"), el("th", { class: "num" }, "Summa"),
-          el("th", { class: "num" }, "Marginal"),
-          el("th", { class: "num" }, "Kvar"), el("th", {}, "Status"), el("th", {}, ""))),
-        tbody));
+      content.appendChild(el("table", { style: "margin-top:14px" }, thead, tbody));
     }
     renderContent();
   },
@@ -2665,8 +2730,16 @@ async function manualVerForm(panel, accounts) {
   const today = new Date().toISOString().slice(0, 10);
   const verDate = el("input", { type: "date", value: today });
   const text = el("input", { type: "text", placeholder: "T.ex. Omföring materialkostnad", style: "min-width:280px" });
+  // Same kvitto-/fakturanummer field the Inköp tab uses, plus a free comment kept with
+  // the entry — both land on the verifikation and show up in grundboken.
+  const extRef = el("input", { type: "text", placeholder: "t.ex. 12345 eller INV-2026-07",
+    style: "width:200px" });
+  const kommentar = el("input", { type: "text",
+    placeholder: "Fritext som följer med verifikatet", style: "min-width:280px" });
   panel.appendChild(el("div", { class: "row" },
     wrap("Verifikationsdatum", verDate), wrap("Verifikationstext", text)));
+  panel.appendChild(el("div", { class: "row" },
+    wrap("Kvitto-/fakturanummer", extRef), wrap("Kommentar", kommentar)));
 
   const rowsBox = el("div", {});
   const balance = el("div", { class: "muted", style: "margin:8px 0;font-weight:600" });
@@ -2730,7 +2803,9 @@ async function manualVerForm(panel, accounts) {
     const ksum = postings.reduce((s, p) => s + p.credit_ore, 0);
     if (dsum !== ksum) { toast(`Balanserar inte (differens ${toKr(dsum - ksum)} kr)`, true); return; }
     const res = await api("POST", `/books/${bid()}/verifikationer/manual`,
-      { ver_date: verDate.value, text: text.value.trim(), postings });
+      { ver_date: verDate.value, text: text.value.trim(), postings,
+        ext_ref: extRef.value.trim() || null,
+        kommentar: kommentar.value.trim() || null });
     toast(`Verifikation ${res.ver_number} bokförd`);
     state.section = "huvudbok";
     renderWorkspace();
@@ -4978,19 +5053,64 @@ function simpleTable(headers, rows) {
 //   items   – the data array
 //   matchFn – (item, lowercased-query) -> bool
 //   rowFn   – (item) -> array of cells for simpleTable
-function searchTable(placeholder, headers, items, matchFn, rowFn) {
+// Compare two sort values: numbers numerically, everything else as Swedish text.
+// Blanks always sink to the bottom regardless of direction, so an empty kvittonummer
+// never pushes the rows you care about off the top.
+function sortCmp(a, b) {
+  const aEmpty = a === null || a === undefined || a === "";
+  const bEmpty = b === null || b === undefined || b === "";
+  if (aEmpty || bEmpty) return aEmpty && bEmpty ? 0 : (aEmpty ? 1 : -1);
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  return String(a).localeCompare(String(b), "sv");
+}
+
+/**
+ * A filterable table with optional click-to-sort column headers.
+ *
+ * `sortKeys` is an array parallel to `headers`; each entry is either null (that column
+ * is not sortable) or a function item -> comparable value. `sortId` keys the chosen
+ * column/direction into `state.tableSort` so it SURVIVES the re-render that every
+ * action (betala, ändra, ta bort) triggers — otherwise the list would silently jump
+ * back to its default order after each click.
+ */
+function searchTable(placeholder, headers, items, matchFn, rowFn, sortKeys, sortId) {
   const search = el("input", { type: "search", placeholder,
     style: "margin-top:12px;max-width:340px" });
   const body = el("div", {});
+  const canSort = Array.isArray(sortKeys) && sortKeys.some(Boolean);
+  if (!state.tableSort) state.tableSort = {};
+  const key = sortId || placeholder;
+  const cur = () => (canSort ? (state.tableSort[key] || { idx: null, dir: 1 }) : { idx: null, dir: 1 });
+
+  const headerCells = () => headers.map((h, i) => {
+    if (!canSort || !sortKeys[i]) return h;
+    const { idx, dir } = cur();
+    const arrow = idx === i ? (dir > 0 ? " ▲" : " ▼") : "";
+    return el("span", {
+      style: "cursor:pointer;user-select:none;white-space:nowrap",
+      title: "Sortera på " + (typeof h === "string" ? h : "kolumnen"),
+      onclick: () => {
+        // Same column toggles direction; a new column starts ascending.
+        state.tableSort[key] = idx === i ? { idx: i, dir: -dir } : { idx: i, dir: 1 };
+        draw();
+      },
+    }, (typeof h === "string" ? h : "") + arrow);
+  });
+
   const draw = () => {
     const q = search.value.trim().toLowerCase();
-    const shown = q ? items.filter((it) => matchFn(it, q)) : items;
+    let shown = q ? items.filter((it) => matchFn(it, q)) : items.slice();
+    const { idx, dir } = cur();
+    if (canSort && idx !== null && sortKeys[idx]) {
+      // Sort a COPY — never reorder the caller's array under it.
+      shown = shown.slice().sort((a, b) => dir * sortCmp(sortKeys[idx](a), sortKeys[idx](b)));
+    }
     body.innerHTML = "";
     if (q && shown.length === 0) {
       body.appendChild(el("p", { class: "muted", style: "margin-top:14px" },
         "Inga träffar."));
     } else {
-      body.appendChild(simpleTable(headers, shown.map(rowFn)));
+      body.appendChild(simpleTable(headerCells(), shown.map(rowFn)));
     }
   };
   search.oninput = draw;

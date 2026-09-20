@@ -295,6 +295,8 @@ class ManualVerifikationReq(BaseModel):
     # motivation IS the underlag and is required when the flag is set.
     egenupprattad: bool = False
     motivering: Optional[str] = None
+    ext_ref: Optional[str] = None          # kvitto-/fakturanummer (as on an inköp)
+    kommentar: Optional[str] = None        # free note kept with the entry
 
 
 class PrivateAssetReq(BaseModel):

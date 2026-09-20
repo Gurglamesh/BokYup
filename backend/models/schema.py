@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 41
+SCHEMA_VERSION = 42
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -182,6 +182,9 @@ CREATE TABLE verifikation (
     -- underlag and must say what it concerns and how the amount was arrived at.
     egenupprattad     INTEGER NOT NULL DEFAULT 0,
     motivering        TEXT,
+    ext_ref           TEXT,             -- kvitto-/fakturanummer (same field as on an inköp;
+                                        -- copied from the transaktion when one books it)
+    kommentar         TEXT,             -- free note kept with the entry, beyond its text
     created_at        TEXT NOT NULL,
     UNIQUE (series, ver_number)         -- unbroken sequence guard (NULLs allowed)
 );
@@ -1175,6 +1178,17 @@ _MIGRATIONS: dict[int, str] = {
 
         INSERT OR IGNORE INTO config(key, value) VALUES ('account_forbrukningsinventarier', '5410');
         INSERT OR IGNORE INTO config(key, value) VALUES ('account_inventarier', '1220');
+    """,
+    # v42: kvitto-/fakturanummer + kommentar on the verifikation itself, so a MANUAL entry
+    # can carry the same reference an inköp does.
+    #
+    # Existing verifikationer are deliberately NOT backfilled: a posted verifikation is
+    # immutable (the DB trigger enforces it), and rewriting one to add a reference is
+    # exactly what that rule forbids. Old entries keep ext_ref NULL — nothing is lost,
+    # their transaktion still carries the number — and every new booking stamps it.
+    42: """
+        ALTER TABLE verifikation ADD COLUMN ext_ref TEXT;
+        ALTER TABLE verifikation ADD COLUMN kommentar TEXT;
     """,
 }
 

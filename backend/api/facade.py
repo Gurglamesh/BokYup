@@ -683,7 +683,8 @@ class AppFacade:
                  for ln in b["postings"]]
         return ops.add_manual_verifikation(
             b["ver_date"], b["text"], lines, b.get("reg_date"),
-            egenupprattad=bool(b.get("egenupprattad")), motivering=b.get("motivering"))
+            egenupprattad=bool(b.get("egenupprattad")), motivering=b.get("motivering"),
+            ext_ref=b.get("ext_ref"), kommentar=b.get("kommentar"))
 
     def h_list_transaktioner(self, p, b, q):
         ops = self._ops(p["book_id"])

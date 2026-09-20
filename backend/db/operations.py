@@ -1827,7 +1827,10 @@ class BookOps:
                     "INSERT INTO moms_line(transaktion_id, rate_code, category_id, ex_moms_ore, "
                     "moms_ore, inc_moms_ore, bas_konto) VALUES (?, 'momsfri', ?, ?, 0, ?, ?)",
                     (transaktion_id, int(extra_fee_category_id), fee, fee, fee_konto))
-            vid, number = self._post_verifikation(payment_date, payment_date, text, postings)
+            # Carry the kvitto-/fakturanummer onto the verifikation, so the grundbok shows
+            # the same reference a manual entry can be given by hand.
+            vid, number = self._post_verifikation(payment_date, payment_date, text, postings,
+                                                  ext_ref=t["ext_ref"])
             self.conn.execute(
                 "UPDATE transaktion SET status='paid', payment_date=?, verifikation_id=? WHERE id=?",
                 (payment_date, vid, transaktion_id),
@@ -2241,8 +2244,8 @@ class BookOps:
         clause = (" WHERE " + " AND ".join(where)) if where else ""
         vers = [dict(r) for r in self.conn.execute(
             "SELECT id, series, ver_number, ver_date, registration_date, text, posted, "
-            "rattelse_of, egenupprattad, motivering FROM verifikation" + clause
-            + " ORDER BY ver_number", args)]
+            "rattelse_of, egenupprattad, motivering, ext_ref, kommentar FROM verifikation"
+            + clause + " ORDER BY ver_number", args)]
         for v in vers:
             v["postings"] = [dict(r) for r in self.conn.execute(
                 "SELECT p.bas_konto, a.name AS konto_namn, p.amount_ore, p.text "
@@ -2290,7 +2293,9 @@ class BookOps:
     def add_manual_verifikation(self, ver_date: str, text: str, lines: list[dict],
                                 reg_date: Optional[str] = None,
                                 egenupprattad: bool = False,
-                                motivering: Optional[str] = None) -> dict:
+                                motivering: Optional[str] = None,
+                                ext_ref: Optional[str] = None,
+                                kommentar: Optional[str] = None) -> dict:
         """
         Post a MANUAL verifikation (a hand-entered journal entry, independent of
         invoices/transaktioner) — for corrections that the automated flows can't make,
@@ -2325,7 +2330,8 @@ class BookOps:
         with self.conn:
             vid, number = self._post_verifikation(
                 ver_date, reg_date or ver_date, text.strip(), postings,
-                egenupprattad=egenupprattad, motivering=motivering)
+                egenupprattad=egenupprattad, motivering=motivering,
+                ext_ref=ext_ref, kommentar=kommentar)
         return {"verifikation_id": vid, "ver_number": number}
 
     # ------------------------------------------------------------------
@@ -4355,7 +4361,9 @@ class BookOps:
                            series: str = "A",
                            rattelse_of: Optional[int] = None,
                            egenupprattad: bool = False,
-                           motivering: Optional[str] = None) -> tuple[int, int]:
+                           motivering: Optional[str] = None,
+                           ext_ref: Optional[str] = None,
+                           kommentar: Optional[str] = None) -> tuple[int, int]:
         """
         Insert a posted verifikation with balanced postings. Asserts the postings
         sum to zero and the period is open. MUST be called inside a `with self.conn`.
@@ -4370,10 +4378,11 @@ class BookOps:
         number = self._next_ver_number(series)
         cur = self.conn.execute(
             "INSERT INTO verifikation(series, ver_number, ver_date, registration_date, "
-            "text, posted, rattelse_of, egenupprattad, motivering, created_at) "
-            "VALUES (?,?,?,?,?,1,?,?,?,?)",
+            "text, posted, rattelse_of, egenupprattad, motivering, ext_ref, kommentar, "
+            "created_at) VALUES (?,?,?,?,?,1,?,?,?,?,?,?)",
             (series, number, ver_date, reg_date, text, rattelse_of,
-             int(bool(egenupprattad)), (motivering or None), _now()),
+             int(bool(egenupprattad)), (motivering or None),
+             ((ext_ref or "").strip() or None), ((kommentar or "").strip() or None), _now()),
         )
         vid = cur.lastrowid
         for konto, amount, ptext in postings:

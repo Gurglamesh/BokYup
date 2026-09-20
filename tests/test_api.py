@@ -2250,3 +2250,40 @@ class TestPrivateAssetContribution:
         assert client.post(f"/books/{book}/verifikationer/manual", json=body).status_code == 201
         ver = client.get(f"/books/{book}/verifikationer-full").json()[0]
         assert ver["egenupprattad"] == 1 and "kontoutdrag" in ver["motivering"]
+
+
+class TestManualVerifikationRefAndComment:
+    """A manual entry carries the same kvitto-/fakturanummer an inköp does, plus a comment."""
+
+    def _post(self, client, book, **over):
+        body = {"ver_date": "2026-03-01", "text": "Omföring materialkostnad",
+                "postings": [{"bas_konto": 5460, "debit_ore": 50000, "credit_ore": 0},
+                             {"bas_konto": 1930, "debit_ore": 0, "credit_ore": 50000}]}
+        body.update(over)
+        return client.post(f"/books/{book}/verifikationer/manual", json=body)
+
+    def test_ref_and_comment_are_stored_and_shown_in_grundboken(self, client, book):
+        assert self._post(client, book, ext_ref="INV-2026-07",
+                          kommentar="Delbetalning enligt överenskommelse").status_code == 201
+        ver = client.get(f"/books/{book}/verifikationer-full").json()[0]
+        assert ver["ext_ref"] == "INV-2026-07"
+        assert ver["kommentar"] == "Delbetalning enligt överenskommelse"
+
+    def test_both_are_optional_and_blanks_become_null(self, client, book):
+        assert self._post(client, book).status_code == 201
+        assert self._post(client, book, ver_date="2026-03-02", ext_ref="  ",
+                          kommentar="   ").status_code == 201
+        vers = client.get(f"/books/{book}/verifikationer-full").json()
+        assert [v["ext_ref"] for v in vers] == [None, None]
+        assert [v["kommentar"] for v in vers] == [None, None]
+
+    def test_an_inkops_kvittonummer_reaches_its_verifikation(self, client, book):
+        cid = client.post(f"/books/{book}/categories",
+                          json={"name": "Förbrukning", "kind": "expense",
+                                "bas_konto": 5460}).json()["id"]
+        client.post(f"/books/{book}/expenses", json={
+            "category_id": cid, "trans_date": "2026-02-01", "paid_date": "2026-02-01",
+            "ext_ref": "KVITTO-991",
+            "lines": [{"rate_code": "25", "amount_ore": 1250}]})
+        ver = client.get(f"/books/{book}/verifikationer-full").json()[0]
+        assert ver["ext_ref"] == "KVITTO-991"

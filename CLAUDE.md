@@ -914,6 +914,26 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       **Bokföring → Bokför** with a live preview of konto/treatment/threshold.
       Tests pass (458); browser-smoke-tested (18 500 kr dator → 5410/2018 balanced,
       egenupprättad, ingen moms).
+- [x] **Kvitto-/fakturanummer + kommentar på manuella verifikat, och sorterbara listor
+      (schema v42, 2026-09).** (1) The **manual verifikation** form gained the SAME
+      kvitto-/fakturanummer field the Inköp tab has, plus a free **kommentar**:
+      `verifikation.ext_ref` + `verifikation.kommentar`, threaded through
+      `_post_verifikation`/`add_manual_verifikation`, shown in the grundbok (the reference
+      as a pill next to the number, the comment under it). An inköp's `ext_ref` is now
+      also **stamped onto its verifikation** when it books, so the reference reads the
+      same whether the entry was automatic or hand-made. Existing verifikationer are
+      deliberately NOT backfilled — a posted verifikation is immutable and the DB trigger
+      refuses the UPDATE (it caught the first attempt); their transaktion still carries
+      the number, so nothing is lost.
+      (2) **Click-to-sort columns.** `searchTable` gained optional `sortKeys` (one per
+      column, null = not sortable) + a `sortId`, with `sortCmp` sorting numbers
+      numerically and text with `localeCompare("sv")` and always sinking blanks to the
+      bottom. The choice is kept in `state.tableSort` so it **survives the re-render every
+      action triggers**. Wired into **Inköp** (datum/leverantör/kategori/kvittonr/belopp/
+      status), **Transaktioner** (which also gained search, a kvitto-/fakturanr and a
+      belopp column), **Kunder** (both sub-tabs) and **Ordrar → Fakturor** (nr/kund/datum/
+      förfaller/summa/marginal/kvar/status). Tests pass (461); browser-smoke-tested (every
+      column, both directions, and the sort surviving an action).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
