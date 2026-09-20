@@ -246,6 +246,21 @@ def _build_router():
     def reverse_charge_kinds(book_id: str, request: Request):
         return fac(request).h_reverse_charge_kinds({"book_id": book_id}, {}, {})
 
+    @r.get("/books/{book_id}/asset-purchase/preview")
+    def asset_purchase_preview(book_id: str, request: Request, amount_ore: int = 0,
+                               rate_code: str = "25", inclusive: bool = True,
+                               mode: str = "auto", konto: int | None = None,
+                               useful_life_years: int | None = None):
+        return fac(request).h_asset_purchase_preview(
+            {"book_id": book_id}, {},
+            {"amount_ore": amount_ore, "rate_code": rate_code,
+             "inclusive": str(inclusive), "mode": mode, "konto": konto,
+             "useful_life_years": useful_life_years})
+
+    @r.post("/books/{book_id}/asset-purchase", status_code=201)
+    def book_asset_purchase(book_id: str, body: sc.AssetPurchaseReq, request: Request):
+        return fac(request).h_book_asset_purchase({"book_id": book_id}, body.model_dump(), {})
+
     @r.get("/books/{book_id}/private-asset/preview")
     def private_asset_preview(book_id: str, request: Request, amount_ore: int = 0,
                               mode: str = "auto", business_pct_centi: int = 10000,

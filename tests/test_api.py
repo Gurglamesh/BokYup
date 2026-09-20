@@ -2287,3 +2287,111 @@ class TestManualVerifikationRefAndComment:
             "lines": [{"rate_code": "25", "amount_ore": 1250}]})
         ver = client.get(f"/books/{book}/verifikationer-full").json()[0]
         assert ver["ext_ref"] == "KVITTO-991"
+
+
+class TestAssetPurchase:
+    """Inventarieinköp: the firma buys a tool. Deductible moms; konto depends on price."""
+
+    def test_expensive_tool_is_capitalised_and_is_not_a_cost_of_the_year(self, client, book):
+        # 2026 prisbasbelopp 59 200 -> threshold 29 600 kr ex moms.
+        prev = client.get(f"/books/{book}/asset-purchase/preview",
+                          params={"amount_ore": 5000000}).json()
+        assert prev["threshold_ore"] == 2960000
+        assert prev["suggested"] == "aktivera" and prev["bas_konto"] == 1220
+        assert prev["ex_moms_ore"] == 4000000 and prev["moms_ore"] == 1000000
+
+        res = client.post(f"/books/{book}/asset-purchase", json={
+            "description": "Lödstation JBC, serienr X1", "amount_ore": 5000000,
+            "trans_date": "2026-04-01", "paid_date": "2026-04-01", "ext_ref": "F-123"})
+        assert res.status_code == 201 and res.json()["treatment"] == "aktivera"
+
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[1220] == 4000000          # asset, not a cost
+        assert hb[2640] == 1000000          # moms IS deductible here
+        assert hb[1930] == -5000000
+        assert sum(hb.values()) == 0
+
+        # The result report must NOT treat it as a cost of the year...
+        r = client.get(f"/books/{book}/reports/result",
+                       params={"start": "2026-01-01", "end": "2026-12-31"}).json()
+        assert r["expense_ore"] == 0
+        # ...and the årsbokslut must agree with it.
+        ab = client.get(f"/books/{book}/reports/arsbokslut",
+                        params={"start": "2026-01-01", "end": "2026-12-31"}).json()
+        assert ab["arets_resultat_ore"] == 0 and ab["balanserar"] is True
+        # The moms still reaches the momsdeklaration.
+        assert client.get(f"/books/{book}/reports/momsdeklaration",
+                          params={"start": "2026-01-01", "end": "2026-06-30"}
+                          ).json()["boxes"]["48"] == 1000000
+
+    def test_cheap_tool_is_expensed_directly(self, client, book):
+        res = client.post(f"/books/{book}/asset-purchase", json={
+            "description": "Skruvdragare", "amount_ore": 250000,
+            "trans_date": "2026-02-01", "paid_date": "2026-02-01"}).json()
+        assert res["treatment"] == "direktavdrag" and res["bas_konto"] == 5410
+        r = client.get(f"/books/{book}/reports/result",
+                       params={"start": "2026-01-01", "end": "2026-12-31"}).json()
+        assert r["expense_ore"] == 200000
+
+    def test_three_year_rule_allows_direct_deduction_above_the_threshold(self, client, book):
+        prev = client.get(f"/books/{book}/asset-purchase/preview",
+                          params={"amount_ore": 5000000, "useful_life_years": 3}).json()
+        assert prev["suggested"] == "direktavdrag" and prev["bas_konto"] == 5410
+        assert any("18 kap. 4" in n for n in prev["notes"])
+        # four years -> back to capitalising
+        assert client.get(f"/books/{book}/asset-purchase/preview",
+                          params={"amount_ore": 5000000, "useful_life_years": 4}
+                          ).json()["suggested"] == "aktivera"
+
+    def test_mode_and_konto_override(self, client, book):
+        res = client.post(f"/books/{book}/asset-purchase", json={
+            "description": "Dator", "amount_ore": 5000000, "trans_date": "2026-04-01",
+            "mode": "aktivera", "konto": 1250, "paid_date": "2026-04-01"}).json()
+        assert res["bas_konto"] == 1250
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[1250] == 4000000
+
+    def test_unpaid_becomes_a_leverantorsfaktura_booked_on_payment(self, client, book):
+        res = client.post(f"/books/{book}/asset-purchase", json={
+            "description": "Mätinstrument", "amount_ore": 5000000,
+            "trans_date": "2026-04-01", "ext_ref": "LF-9"}).json()
+        tid = res["transaktion_id"]
+        assert "verifikation_id" not in res
+        rows = client.get(f"/books/{book}/transaktioner").json()
+        row = [t for t in rows if t["id"] == tid][0]
+        assert row["status"] == "pending" and row["ext_ref"] == "LF-9"
+        assert row["konto_label"].startswith("1220 ")     # labelled by konto, not category
+        assert client.post(f"/books/{book}/transaktioner/{tid}/pay",
+                           json={"payment_date": "2026-05-01"}).status_code == 200
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[1220] == 4000000 and hb[1930] == -5000000
+
+    def test_private_account_and_receipt_and_soft_delete_all_work(self, client, book):
+        res = client.post(f"/books/{book}/asset-purchase", json={
+            "description": "Verktyg", "amount_ore": 5000000, "trans_date": "2026-04-01",
+            "paid_date": "2026-04-01", "paid_account": "privat"}).json()
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[2018] == -5000000 and 1930 not in hb
+
+        pending = client.post(f"/books/{book}/asset-purchase", json={
+            "description": "Annat", "amount_ore": 100000, "trans_date": "2026-04-02"}).json()
+        tid = pending["transaktion_id"]
+        assert client.post(f"/books/{book}/transaktioner/{tid}/delete").status_code == 200
+        assert all(t["id"] != tid for t in client.get(f"/books/{book}/transaktioner").json())
+
+    def test_guards(self, client, book):
+        base = {"description": "X", "amount_ore": 100000, "trans_date": "2026-04-01"}
+        assert client.post(f"/books/{book}/asset-purchase",
+                           json={**base, "description": " "}).status_code == 400
+        assert client.post(f"/books/{book}/asset-purchase",
+                           json={**base, "amount_ore": 0}).status_code == 400
+        assert client.post(f"/books/{book}/asset-purchase",
+                           json={**base, "mode": "nonsens"}).status_code == 400
+        # An asset purchase must not be edited through the ordinary inköp editor, which
+        # would rebuild its moms lines from a category it does not have.
+        tid = client.post(f"/books/{book}/asset-purchase", json=base).json()["transaktion_id"]
+        assert client.get(f"/books/{book}/transaktioner/{tid}/edit-payload").status_code == 409
+        booked = client.post(f"/books/{book}/asset-purchase",
+                             json={**base, "paid_date": "2026-04-01"}).json()["transaktion_id"]
+        assert client.post(f"/books/{book}/transaktioner/{booked}/rebook",
+                           json={"corrections": {}}).status_code == 409

@@ -299,6 +299,26 @@ class ManualVerifikationReq(BaseModel):
     kommentar: Optional[str] = None        # free note kept with the entry
 
 
+class AssetPurchaseReq(BaseModel):
+    """A tool/inventarie bought BY the firma: normal deductible moms, but the net may go
+    to a balance-sheet konto (capitalised + depreciated) instead of a cost konto."""
+    description: str                       # e.g. "Lödstation JBC CD-2BE, serienr XYZ"
+    amount_ore: int
+    trans_date: str
+    rate_code: str = "25"
+    inclusive: bool = True                 # is amount_ore incl. moms?
+    mode: str = "auto"                     # auto | direktavdrag | aktivera
+    konto: Optional[int] = None            # override the suggested konto
+    useful_life_years: Optional[int] = None  # <=3 years allows a direct deduction
+    supplier_id: Optional[int] = None
+    ext_ref: Optional[str] = None          # kvitto-/fakturanummer
+    note: Optional[str] = None
+    receipt_original_format: Optional[str] = None
+    ores_rounding: bool = False
+    paid_date: Optional[str] = None        # omitted => pending leverantörsfaktura
+    paid_account: str = "bank"
+
+
 class PrivateAssetReq(BaseModel):
     """A privately-owned asset brought into the business (tillskott): debited to the
     cost/asset konto against 2018 Egna insättningar. No moms, no money."""

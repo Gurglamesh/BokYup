@@ -1244,12 +1244,15 @@ class BookOps:
         The old stock batches this purchase created are dropped and rebuilt by the caller
         from the new lines; that is only allowed while they are wholly unconsumed."""
         t = self.conn.execute(
-            "SELECT direction, status, verifikation_id, deleted_at FROM transaktion WHERE id=?",
-            (transaktion_id,)).fetchone()
+            "SELECT direction, status, verifikation_id, deleted_at, category_id "
+            "FROM transaktion WHERE id=?", (transaktion_id,)).fetchone()
         if t is None:
             raise KeyError(f"No transaktion {transaktion_id}")
         if t["direction"] != "in":
             raise InvalidState("Endast inköp kan redigeras här")
+        if t["category_id"] is None:
+            raise InvalidState(
+                "Ett inventarieinköp redigeras inte här — ta bort det och lägg in det på nytt")
         if t["deleted_at"] is not None:
             raise InvalidState("Transaktionen är borttagen")
         if t["status"] == "paid" or t["verifikation_id"] is not None:
@@ -1299,6 +1302,10 @@ class BookOps:
             raise KeyError(f"No transaktion {transaktion_id}")
         if t["direction"] != "in":
             raise InvalidState("Endast inköp kan redigeras här")
+        if t["category_id"] is None:
+            raise InvalidState(
+                "Ett inventarieinköp redigeras inte här — ta bort det och lägg in det på "
+                "nytt (det är inte bokfört), eller rätta det bokförda med en rättelse")
         # Keyed by (rate, omvänd betalningsskyldighet) so a reverse-charge line survives
         # the round trip through the form.
         remaining: dict[tuple, int] = {}
@@ -2154,6 +2161,10 @@ class BookOps:
             raise InvalidState("Fakturor rättas med en kreditfaktura, inte ombokföring")
         if self.conn.execute("SELECT 1 FROM rut_claim WHERE transaktion_id=?", (transaktion_id,)).fetchone():
             raise InvalidState("RUT/ROT-ärenden rättas med en kreditfaktura")
+        if t["category_id"] is None:
+            raise InvalidState(
+                "Ett inventarieinköp har inget baskonto via kategori — rätta det med en "
+                "rättelse och ett manuellt verifikat")
         if self.conn.execute("SELECT 1 FROM verifikation WHERE rattelse_of=?", (vid,)).fetchone():
             raise InvalidState("Verifikatet är redan rättat")
 
@@ -2420,6 +2431,152 @@ class BookOps:
             "motkonto": self._sys_account("account_egna_insattningar"),
             "notes": notes,
         }
+
+    # ------------------------------------------------------------------
+    # Inventarieinköp (an asset bought BY the firma)
+    # ------------------------------------------------------------------
+    #
+    # Distinct from `book_private_asset_contribution` (property you already owned
+    # privately): this is a normal purchase with a supplier invoice, so the moms IS
+    # deductible and money really leaves the firma. What makes it special is that the
+    # cost may not belong in the year's result at all — an inventarie over the threshold
+    # is capitalised (1220/1250) and written off over its useful life instead.
+    #
+    # It is created as an ordinary `transaktion` with NO category and the konto frozen
+    # straight onto its moms_line, which means every existing mechanism keeps working:
+    # receipt attachment, kvitto-/fakturanummer, supplier, paid-now vs leverantörsfaktura,
+    # privat insättning, öresavrundning and the whole register_payment booking path.
+
+    def asset_purchase_preview(self, amount_ore: int, *, rate_code: str = "25",
+                               inclusive: bool = True, mode: str = "auto",
+                               konto: Optional[int] = None,
+                               useful_life_years: Optional[int] = None) -> dict:
+        """
+        Decide how a tool/asset purchase should be booked WITHOUT booking it.
+
+        The threshold is compared against the price EXCLUDING moms (anskaffningsvärdet).
+        A useful life of at most three years allows an immediate deduction whatever the
+        price (IL 18 kap. 4 §), so it overrides the amount test.
+        """
+        amount_ore = int(amount_ore)
+        if amount_ore <= 0:
+            raise ValueError("Ange vad inventarien kostade")
+        if rate_code not in S.MOMS_RATES:
+            raise ValueError(f"Okänd momssats {rate_code!r}")
+        if mode not in ("auto", "direktavdrag", "aktivera"):
+            raise ValueError("mode måste vara auto, direktavdrag eller aktivera")
+        life = int(useful_life_years) if useful_life_years else None
+        if life is not None and life < 1:
+            raise ValueError("Livslängden måste vara minst 1 år")
+
+        ex, moms, inc = compute_moms_figures(amount_ore, rate_code, inclusive)
+        threshold = self._halva_prisbasbeloppet_ore()
+        short_life = life is not None and life <= 3
+        suggested = "direktavdrag" if (ex <= threshold or short_life) else "aktivera"
+        chosen = suggested if mode == "auto" else mode
+        default_konto = self._sys_account(
+            "account_forbrukningsinventarier" if chosen == "direktavdrag"
+            else "account_inventarier")
+        konto = int(konto) if konto else default_konto
+        entry = catalog_entry(konto)
+        konto_namn = self._account_name(konto) or (entry["name"] if entry else None)
+
+        notes = []
+        if chosen == "aktivera":
+            notes.append(
+                "Inventarien bokförs som en tillgång och kostnadsförs genom avskrivning "
+                "över nyttjandeperioden — den belastar alltså INTE årets resultat direkt. "
+                "Bokför avskrivningen vid bokslutet (7832 mot 1229).")
+        elif short_life and ex > threshold:
+            notes.append(
+                f"Beloppet överstiger halva prisbasbeloppet ({self._kr(threshold)}), men "
+                f"en ekonomisk livslängd på {life} år ger direktavdrag ändå "
+                "(IL 18 kap. 4 §). Motivera livslängden i noteringen.")
+        elif chosen == "direktavdrag" and ex > threshold:
+            notes.append(
+                f"OBS: {self._kr(ex)} exkl. moms överstiger halva prisbasbeloppet "
+                f"({self._kr(threshold)}). Direktavdrag kräver att den ekonomiska "
+                "livslängden är högst tre år.")
+        elif chosen == "aktivera" and ex <= threshold:
+            notes.append(
+                "Beloppet ligger under halva prisbasbeloppet, så direktavdrag hade också "
+                "varit möjligt. Att aktivera är tillåtet.")
+        notes.append(
+            "Hör flera delar ihop och fungerar tillsammans ska de bedömas som EN enhet "
+            "mot gränsen, inte var för sig.")
+        return {
+            "ex_moms_ore": ex, "moms_ore": moms, "inc_moms_ore": inc,
+            "rate_code": rate_code, "threshold_ore": threshold,
+            "suggested": suggested, "treatment": chosen,
+            "bas_konto": konto, "konto_namn": konto_namn,
+            "useful_life_years": life, "notes": notes,
+        }
+
+    def book_asset_purchase(self, description: str, amount_ore: int, trans_date: str, *,
+                            rate_code: str = "25", inclusive: bool = True,
+                            mode: str = "auto", konto: Optional[int] = None,
+                            useful_life_years: Optional[int] = None,
+                            supplier_id: Optional[int] = None,
+                            ext_ref: Optional[str] = None,
+                            note: Optional[str] = None,
+                            receipt_original_format: Optional[str] = None,
+                            ores_rounding: bool = False,
+                            paid_date: Optional[str] = None,
+                            paid_account: str = "bank") -> dict:
+        """
+        Buy a tool/inventarie for the firma. Books the net to the asset or cost konto and
+        the moms as deductible ingående moms, exactly like any other inköp — the only
+        difference is that the konto may be a balance-sheet one.
+
+        Leaving `paid_date` out keeps it pending (a leverantörsfaktura to be marked paid
+        later); giving it books the payment immediately.
+        """
+        description = (description or "").strip()
+        if not description:
+            raise ValueError("Beskriv inventarien (t.ex. modell och serienummer)")
+        plan = self.asset_purchase_preview(
+            amount_ore, rate_code=rate_code, inclusive=inclusive, mode=mode, konto=konto,
+            useful_life_years=useful_life_years)
+        self.ensure_account(plan["bas_konto"],
+                            plan["konto_namn"] or f"Konto {plan['bas_konto']}")
+
+        life = plan["useful_life_years"]
+        full_note = description
+        if life:
+            full_note += f" (bedömd livslängd {life} år)"
+        if note and note.strip():
+            full_note += f" – {note.strip()}"
+
+        tid = self._insert_transaktion(
+            direction="in", category_id=None, supplier_id=supplier_id, customer_id=None,
+            trans_date=trans_date, note=full_note,
+            receipt_original_format=receipt_original_format, snapshot_enc=None,
+            ext_ref=(ext_ref.strip() if ext_ref and ext_ref.strip() else None),
+        )
+        with self.conn:
+            # No category: the konto is frozen straight onto the line, so every booking
+            # path (which groups by moms_line.bas_konto) picks it up unchanged.
+            self.conn.execute(
+                "INSERT INTO moms_line(transaktion_id, rate_code, category_id, ex_moms_ore, "
+                "moms_ore, inc_moms_ore, bas_konto) VALUES (?,?,NULL,?,?,?,?)",
+                (tid, plan["rate_code"], plan["ex_moms_ore"], plan["moms_ore"],
+                 plan["inc_moms_ore"], plan["bas_konto"]))
+            if ores_rounding:
+                self.conn.execute("UPDATE transaktion SET ores_rounding=1 WHERE id=?", (tid,))
+        result = {"transaktion_id": tid,
+                  **{k: plan[k] for k in ("treatment", "bas_konto", "konto_namn",
+                                          "ex_moms_ore", "moms_ore", "inc_moms_ore",
+                                          "threshold_ore", "notes")}}
+        if paid_date:
+            result.update(self.register_payment(tid, paid_date, paid_account=paid_account))
+        return result
+
+    def is_asset_purchase(self, transaktion_id: int) -> bool:
+        """An inköp booked straight to a konto instead of a category (no category_id)."""
+        row = self.conn.execute(
+            "SELECT direction, category_id FROM transaktion WHERE id=?",
+            (transaktion_id,)).fetchone()
+        return bool(row and row["direction"] == "in" and row["category_id"] is None)
 
     def book_private_asset_contribution(self, description: str, amount_ore: int, date: str, *,
                                         mode: str = "auto",

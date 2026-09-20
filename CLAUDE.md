@@ -934,6 +934,31 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       belopp column), **Kunder** (both sub-tabs) and **Ordrar → Fakturor** (nr/kund/datum/
       förfaller/summa/marginal/kvar/status). Tests pass (461); browser-smoke-tested (every
       column, both directions, and the sort surviving an action).
+- [x] **Inventarieinköp + resultatrapporten räknar bara resultatkonton (2026-09).**
+      (1) **Bugfix, verifierad:** `result_report` summerade allt med direction='in' som
+      kostnad oavsett konto, så ett inköp bokfört på ett balanskonto blåste upp årets
+      kostnader med hela tillgångsvärdet medan årsbokslutet (som läser råa konteringar)
+      visade rätt — två olika svar ur samma bok. Rapporten filtrerar nu
+      `COALESCE(moms_line.bas_konto, category.bas_konto, 3000) >= 3000`; rader helt utan
+      konto behåller sitt gamla beteende.
+      (2) **"🔧 Inventarieinköp"** i Inköp-fliken: ett verktyg/maskin köpt AV firman.
+      Till skillnad från `book_private_asset_contribution` (egendom du redan ägde privat)
+      är momsen **avdragsgill** och pengar lämnar firman — det speciella är att kostnaden
+      kanske inte hör till årets resultat alls. `asset_purchase_preview` klassar utan att
+      bokföra: priset **exkl. moms** mot halva prisbasbeloppet (config, följer årets
+      uppdatering) ger direktavdrag (5410) eller aktivering (1220/1250 + not om att
+      avskrivningen ska bokföras vid bokslutet); **`useful_life_years` ≤ 3 ger
+      direktavdrag oavsett belopp** (IL 18 kap. 4 §) och `mode`/`konto` överstyr.
+      `book_asset_purchase` skapar en **vanlig `transaktion` utan kategori** med kontot
+      fryst direkt på moms_line:n — därför fungerar kvitto, kvitto-/fakturanummer,
+      leverantör, betald-nu vs leverantörsfaktura, privat insättning och hela
+      `register_payment`-vägen oförändrat. `update_expense`/`expense_edit_payload`/
+      `rebook_transaktion` vägrar (409) på en kategorilös rad, så det frysta kontot inte
+      kan tappas bort; `list_transaktioner` exponerar `konto_label` så raden märks med
+      kontot i stället för att stå tom. API `GET /asset-purchase/preview`,
+      `POST /asset-purchase`. Tester passerar (468); browser-smoke-testat (50 000 kr →
+      1220/2640/1930 balanserat, 0 kr i resultatrapporten OCH i årsbokslutet, treårs-
+      regeln växlar till direktavdrag live).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

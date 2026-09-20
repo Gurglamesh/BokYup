@@ -646,7 +646,12 @@ const SECTION_RENDERERS = {
     const catName = Object.fromEntries(cats.map((c) => [c.id, c.name]));
     const supName = Object.fromEntries(suppliers.map((s) => [s.id, s.name]));
     const list = txs.filter((t) => t.direction === "in");
-    panel.appendChild(headerWithAdd("Inköp", "+ Nytt inköp", () => guard(() => purchaseForm(panel))));
+    const inkopHead = headerWithAdd("Inköp", "+ Nytt inköp", () => guard(() => purchaseForm(panel)));
+    inkopHead.appendChild(el("button", { class: "btn ghost", title:
+      "Verktyg, maskin eller utrustning till firman — programmet avgör om den ska dras av "
+      + "direkt eller aktiveras och skrivas av",
+      onclick: () => guard(() => assetPurchaseFlow(suppliers)) }, "🔧 Inventarieinköp"));
+    panel.appendChild(inkopHead);
     panel.appendChild(el("p", { class: "muted", style: "margin-top:6px" },
       "Inköp och utgifter till firman. Ange kvitto- eller fakturanummer och bifoga kvittot. "
       + "En leverantörsfaktura kan bokföras direkt och markeras som betald när den betalas."));
@@ -718,7 +723,7 @@ const SECTION_RENDERERS = {
     const inkopSortKeys = [
       (t) => t.trans_date,
       (t) => supName[t.supplier_id] || "",
-      (t) => catName[t.category_id] || "",
+      (t) => catName[t.category_id] || t.konto_label || "",
       (t) => t.ext_ref || "",
       (t) => t.amount_ore || 0,
       (t) => (t.status === "paid" ? 1 : 0),
@@ -728,10 +733,11 @@ const SECTION_RENDERERS = {
       "Sök inköp (leverantör, nr, datum, kategori)…",
       ["Datum", "Leverantör", "Kategori", "Kvitto/Faktura-nr", "Belopp", "Status", ""],
       list,
-      (t, q) => [t.trans_date, supName[t.supplier_id] || "", catName[t.category_id] || "",
+      (t, q) => [t.trans_date, supName[t.supplier_id] || "",
+        catName[t.category_id] || t.konto_label || "",
         t.ext_ref || ""].join(" ").toLowerCase().includes(q),
       (t) => [t.trans_date, t.supplier_id ? (supName[t.supplier_id] || "—") : "—",
-        catName[t.category_id] || "—", t.ext_ref || "",
+        catName[t.category_id] || t.konto_label || "—", t.ext_ref || "",
         toKr(t.amount_ore || 0) + " kr",
         el("span", { style: "display:inline-flex;gap:4px" },
           el("span", { class: "pill " + (t.status === "paid" ? "paid" : "pending") },
@@ -5483,5 +5489,110 @@ async function privateAssetFlow() {
     + (res.treatment === "direktavdrag"
       ? `direktavdrag på ${res.bas_konto}`
       : `aktiverat på ${res.bas_konto}, glöm inte avskrivningen vid bokslutet`));
+  renderWorkspace();
+}
+
+// ---------------------------------------------------------------------------
+// Inventarieinköp — ett verktyg/maskin köpt AV firman
+// ---------------------------------------------------------------------------
+// Skiljer sig från ett vanligt inköp på en punkt: kostnaden hör kanske inte till årets
+// resultat alls. Över halva prisbasbeloppet (och med mer än tre års livslängd) ska den
+// aktiveras som tillgång och skrivas av. Momsen är avdragsgill precis som vanligt.
+async function assetPurchaseFlow(suppliers) {
+  const today = new Date().toISOString().slice(0, 10);
+  const desc = el("input", { type: "text",
+    placeholder: "t.ex. Lödstation JBC CD-2BE, serienr X1" });
+  const amount = el("input", { type: "text", value: "", style: "width:140px" });
+  const rate = el("select", {}, ...RATE_OPTIONS.map((r) => el("option", { value: r }, rateLabel(r))));
+  const incl = el("select", {}, el("option", { value: "1" }, "Inkl. moms"),
+    el("option", { value: "0" }, "Ex moms"));
+  const date = el("input", { type: "date", value: today });
+  const life = el("input", { type: "number", min: "1", style: "width:80px", placeholder: "t.ex. 5" });
+  const mode = el("select", {}, el("option", { value: "auto" }, "Låt programmet avgöra"),
+    el("option", { value: "direktavdrag" }, "Direktavdrag (kostnad)"),
+    el("option", { value: "aktivera" }, "Aktivera som inventarie"));
+  const supplier = el("select", {}, el("option", { value: "" }, "(ingen)"),
+    ...(suppliers || []).map((x) => el("option", { value: x.id }, x.name)));
+  const extRef = el("input", { type: "text", placeholder: "kvitto-/fakturanummer",
+    style: "width:180px" });
+  const paidNow = el("select", {}, el("option", { value: "yes" }, "Ja, betald nu"),
+    el("option", { value: "no" }, "Nej, leverantörsfaktura (betalas senare)"));
+  const payDate = el("input", { type: "date", value: today });
+  const paidAccount = el("select", {}, el("option", { value: "bank" }, "Företagskonto"),
+    el("option", { value: "privat" }, "Privat insättning (privat konto)"));
+  const note = el("input", { type: "text", placeholder: "valfri notering" });
+  const verdict = el("div", { class: "muted", style: "margin-top:6px" });
+
+  // Live preview — the backend owns the threshold rule (halva prisbasbeloppet, config).
+  const refresh = async () => {
+    const ore = toOre(amount.value);
+    if (!ore) { verdict.textContent = ""; return; }
+    try {
+      const qs = `?amount_ore=${ore}&rate_code=${rate.value}&inclusive=${incl.value === "1"}`
+        + `&mode=${mode.value}` + (life.value ? `&useful_life_years=${parseInt(life.value, 10)}` : "");
+      const plan = await api("GET", `/books/${bid()}/asset-purchase/preview${qs}`);
+      verdict.innerHTML = "";
+      const head = plan.treatment === "aktivera"
+        ? "Aktiveras som inventarie" : "Direktavdrag (kostnad)";
+      verdict.appendChild(el("div", {}, el("strong", {}, head),
+        ` — ${toKr(plan.ex_moms_ore)} kr ex moms på ${plan.bas_konto} `
+        + `${plan.konto_namn || ""}, moms ${toKr(plan.moms_ore)} kr på 2640. `
+        + `Gräns: ${toKr(plan.threshold_ore)} kr (halva prisbasbeloppet).`));
+      for (const n of plan.notes) verdict.appendChild(el("div", { style: "margin-top:4px" }, n));
+    } catch (e) { verdict.textContent = String(e.message || e); }
+  };
+  amount.oninput = refresh; life.oninput = refresh;
+  rate.onchange = refresh; incl.onchange = refresh; mode.onchange = refresh;
+
+  const payDateWrap = wrap("Betaldatum", payDate);
+  const paidAccountWrap = wrap("Pengarna dras från", paidAccount);
+  const syncPaid = () => {
+    const on = paidNow.value === "yes";
+    payDateWrap.style.display = on ? "" : "none";
+    paidAccountWrap.style.display = on ? "" : "none";
+  };
+  paidNow.onchange = syncPaid;
+
+  const body = $("#modal-body");
+  $("#modal-title").textContent = "Inventarieinköp";
+  body.innerHTML = "";
+  body.appendChild(el("p", { class: "muted", style: "margin:0 0 8px" },
+    "Verktyg, maskin eller utrustning till firman. Kostar den mer än halva "
+    + "prisbasbeloppet och håller längre än tre år ska den aktiveras och skrivas av "
+    + "i stället för att dras av direkt — programmet föreslår rätt konto. Hör flera "
+    + "delar ihop räknas de som en enhet mot gränsen."));
+  body.appendChild(wrap("Vad är det? (modell, serienummer)", desc));
+  body.appendChild(el("div", { class: "row", style: "gap:10px;flex-wrap:wrap" },
+    wrap("Pris", amount), wrap("Beloppet är", incl), wrap("Moms", rate),
+    wrap("Inköpsdatum", date)));
+  body.appendChild(el("div", { class: "row", style: "gap:10px;flex-wrap:wrap" },
+    wrap("Livslängd (år, valfritt)", life), wrap("Behandling", mode),
+    wrap("Leverantör", supplier), wrap("Kvitto-/fakturanr", extRef)));
+  body.appendChild(verdict);
+  body.appendChild(el("div", { class: "row", style: "gap:10px;flex-wrap:wrap;margin-top:8px" },
+    wrap("Är den betald?", paidNow), payDateWrap, paidAccountWrap));
+  body.appendChild(wrap("Notering", note));
+  syncPaid();
+
+  const ok = await openModalPromise("Bokför inventarieinköp");
+  if (!ok) return;
+  if (!desc.value.trim()) { toast("Beskriv inventarien", true); return; }
+  if (!toOre(amount.value)) { toast("Ange vad inventarien kostade", true); return; }
+
+  const payload = {
+    description: desc.value.trim(), amount_ore: toOre(amount.value),
+    trans_date: date.value, rate_code: rate.value, inclusive: incl.value === "1",
+    mode: mode.value, supplier_id: supplier.value ? parseInt(supplier.value, 10) : null,
+    ext_ref: extRef.value.trim() || null, note: note.value.trim() || null,
+    useful_life_years: life.value ? parseInt(life.value, 10) : null,
+  };
+  if (paidNow.value === "yes") {
+    payload.paid_date = payDate.value || date.value;
+    payload.paid_account = paidAccount.value;
+  }
+  const res = await api("POST", `/books/${bid()}/asset-purchase`, payload);
+  toast(res.treatment === "aktivera"
+    ? `Aktiverat på ${res.bas_konto} — glöm inte avskrivningen vid bokslutet`
+    : `Direktavdrag på ${res.bas_konto}`);
   renderWorkspace();
 }

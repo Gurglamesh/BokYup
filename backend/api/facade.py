@@ -333,6 +333,26 @@ class AppFacade:
             acquired_amount_ore=b.get("acquired_amount_ore"),
             motivering=b.get("motivering"))
 
+    # ---- inventarieinköp ----
+    def h_asset_purchase_preview(self, p, b, q):
+        return self._ops(p["book_id"]).asset_purchase_preview(
+            int(q.get("amount_ore") or 0), rate_code=q.get("rate_code") or "25",
+            inclusive=str(q.get("inclusive", "true")).lower() not in ("0", "false"),
+            mode=q.get("mode") or "auto",
+            konto=int(q["konto"]) if q.get("konto") else None,
+            useful_life_years=int(q["useful_life_years"]) if q.get("useful_life_years") else None)
+
+    def h_book_asset_purchase(self, p, b, q):
+        return self._ops(p["book_id"]).book_asset_purchase(
+            b.get("description"), int(b.get("amount_ore") or 0), b["trans_date"],
+            rate_code=b.get("rate_code") or "25",
+            inclusive=b.get("inclusive", True), mode=b.get("mode") or "auto",
+            konto=b.get("konto"), useful_life_years=b.get("useful_life_years"),
+            supplier_id=b.get("supplier_id"), ext_ref=b.get("ext_ref"),
+            note=b.get("note"), receipt_original_format=b.get("receipt_original_format"),
+            ores_rounding=bool(b.get("ores_rounding")),
+            paid_date=b.get("paid_date"), paid_account=b.get("paid_account") or "bank")
+
     def h_reverse_charge_kinds(self, p, b, q):
         """The omvänd-betalningsskyldighet options + which momsdeklaration box each fills."""
         from backend.models.schema import REVERSE_CHARGE_BOXES, REVERSE_CHARGE_RATES
@@ -697,7 +717,13 @@ class AppFacade:
                 "EXISTS(SELECT 1 FROM verifikation v WHERE v.rattelse_of = t.verifikation_id) "
                 "AS corrected, "
                 "EXISTS(SELECT 1 FROM invoice i WHERE i.transaktion_id = t.id) AS invoice_backed, "
-                "EXISTS(SELECT 1 FROM rut_claim rc WHERE rc.transaktion_id = t.id) AS rut "
+                "EXISTS(SELECT 1 FROM rut_claim rc WHERE rc.transaktion_id = t.id) AS rut, "
+                # An inventarieinköp has no category — its konto is frozen on the moms_line.
+                # Expose it so the list can label the row instead of showing a blank.
+                "(SELECT a.bas_konto || ' ' || a.name FROM moms_line m "
+                " JOIN account a ON a.bas_konto = m.bas_konto "
+                " WHERE m.transaktion_id = t.id AND m.bas_konto IS NOT NULL LIMIT 1) "
+                "AS konto_label "
                 "FROM transaktion t")
         # Soft-delete: default lists exclude removed rows; only_deleted shows the Borttagna list.
         only_deleted = q.get("only_deleted") in ("1", "true", True)
@@ -1006,6 +1032,8 @@ _route("GET", "/books/{book_id}/categories/next-prefix", "h_next_prefix")
 _route("GET", "/books/{book_id}/bas-katalog", "h_bas_catalog")
 _route("GET", "/books/{book_id}/reverse-charge-kinds", "h_reverse_charge_kinds")
 _route("GET", "/books/{book_id}/private-asset/preview", "h_private_asset_preview")
+_route("GET", "/books/{book_id}/asset-purchase/preview", "h_asset_purchase_preview")
+_route("POST", "/books/{book_id}/asset-purchase", "h_book_asset_purchase", 201)
 _route("POST", "/books/{book_id}/private-asset", "h_book_private_asset", 201)
 _route("GET", "/books/{book_id}/recurring", "h_list_recurring")
 _route("GET", "/books/{book_id}/recurring/due", "h_due_recurring")

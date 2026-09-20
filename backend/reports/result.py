@@ -43,6 +43,13 @@ def result_report(conn: sqlite3.Connection, period_start: str, period_end: str) 
         JOIN verifikation v ON v.id = t.verifikation_id
         LEFT JOIN category c ON c.id = COALESCE(m.category_id, t.category_id)
         WHERE v.posted = 1 AND v.ver_date BETWEEN ? AND ?
+          -- Only RESULT accounts belong in a profit/loss. A purchase booked to a
+          -- balance-sheet konto (1xxx tillgång / 2xxx skuld) — e.g. an inventarie that
+          -- is capitalised and depreciated instead of expensed — is NOT a cost of the
+          -- year; counting it here would overstate costs by the whole asset value while
+          -- the årsbokslut (which reads the raw postings) correctly shows it as an asset.
+          -- A row with no konto at all keeps its previous behaviour.
+          AND COALESCE(m.bas_konto, c.bas_konto, 3000) >= 3000
         GROUP BY t.direction, COALESCE(m.category_id, t.category_id),
                  COALESCE(m.bas_konto, c.bas_konto)
         ORDER BY bas_konto
