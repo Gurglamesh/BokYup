@@ -637,6 +637,17 @@ def _build_router():
              "only_deleted": "1" if only_deleted else "0"})
 
     # ---- receipts (encrypted photos) ----
+    @r.post("/books/{book_id}/verifikationer/{verifikation_id}/receipts", status_code=201)
+    def upload_verifikation_receipt(book_id: str, verifikation_id: int,
+                                    body: sc.ReceiptUploadReq, request: Request):
+        return fac(request).h_upload_verifikation_receipt(
+            {"book_id": book_id, "verifikation_id": verifikation_id}, body.model_dump(), {})
+
+    @r.get("/books/{book_id}/verifikationer/{verifikation_id}/receipts")
+    def list_verifikation_receipts(book_id: str, verifikation_id: int, request: Request):
+        return fac(request).h_list_verifikation_receipts(
+            {"book_id": book_id, "verifikation_id": verifikation_id}, {}, {})
+
     @r.post("/books/{book_id}/transaktioner/{transaktion_id}/receipts", status_code=201)
     def upload_receipt(book_id: str, transaktion_id: int, body: sc.ReceiptUploadReq, request: Request):
         return fac(request).h_upload_receipt(

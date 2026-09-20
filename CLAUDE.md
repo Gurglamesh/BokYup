@@ -1113,6 +1113,26 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       the ones line editors add at runtime, and the native element keeps its API (callers
       still read `.value` and get `YYYY-MM-DD`), so no other code changes. `.date-hint` in
       styles.css. Browser-smoke-tested (hint renders and follows the value on change).
+- [x] **Underlag på verifikationer utan transaktion (schema v45, 2026-09).** A receipt
+      could only hang on a `transaktion`, so a verifikation entered by hand had nowhere
+      to keep its supporting documents — and an **egenupprättad** one needs them most: the
+      original receipt showing what a privately bought tool cost, the NE-bilaga an
+      ingående balans was copied from, the listings a market value was assessed against.
+      They ended up in a folder beside the book instead of inside it, outside the `.buyn`
+      bundle. `receipt` gained **`verifikation_id`** and `transaktion_id` became nullable
+      (SQLite cannot drop a NOT NULL, so migration 45 rebuilds the table; rows carry over
+      and the photo files are untouched), with a `CHECK` that a receipt hangs on one or
+      the other and never floats free. `attach_verifikation_receipt`/
+      `list_verifikation_receipts`; `attach_receipt` takes either target;
+      `verifikationer_full` returns `receipt_count`. **Deletion is refused** (InvalidState
+      →409): a verifikation is posted the moment it exists, so removing its underlag would
+      destroy räkenskapsinformation — uploading the correct document alongside is the
+      correction. A transaktion's receipt keeps its old rule (deletable while pending) and
+      the two lists never leak into each other. API `GET/POST /verifikationer/{id}/receipts`.
+      UI: a **📎** button (with the count) on every verifikation in the grundbok opens an
+      underlag view — `receiptCard` factored out of `receiptsFlow` and reused — with a file
+      picker + originalformat (papper/digitalt). Tests pass (521); browser-smoke-tested
+      (PDF uploaded onto an egenupprättat verifikat, count in the grundbok, delete → 409).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

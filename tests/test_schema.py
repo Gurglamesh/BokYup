@@ -332,6 +332,11 @@ class TestMigration:
             CREATE TABLE invoice (id INTEGER PRIMARY KEY);   -- migrations 31/33/35 ALTER this
             CREATE TABLE offert (id INTEGER PRIMARY KEY);    -- migration 34 ALTERs this
             CREATE TABLE company (id INTEGER PRIMARY KEY);   -- migration 36 ALTERs this
+            -- migration 45 rebuilds this (a real v25 book has had it since v2)
+            CREATE TABLE receipt (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transaktion_id INTEGER NOT NULL, rut_claim_id INTEGER, filename TEXT NOT NULL,
+                mime TEXT NOT NULL, original_format TEXT, byte_size INTEGER NOT NULL,
+                sha256 TEXT NOT NULL, created_at TEXT NOT NULL);
         """)
         db.execute("PRAGMA user_version = 25")
         db.execute("INSERT INTO account VALUES (3001,'x','t')")
@@ -541,3 +546,49 @@ class TestInvoiceSchema:
         names = {r["name"] for r in db.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"company", "payment_method", "invoice", "invoice_line", "rut_recipient"} <= names
+
+
+class TestMigration45VerifikationReceipts:
+    def test_existing_receipt_rows_survive_the_rebuild(self):
+        # A v44 book: receipt.transaktion_id is NOT NULL and there is no verifikation_id.
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        S.initialize_schema(db)
+        db.execute("DROP TABLE receipt")
+        db.execute("""
+            CREATE TABLE receipt (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                transaktion_id  INTEGER NOT NULL REFERENCES transaktion(id),
+                rut_claim_id    INTEGER,
+                filename        TEXT NOT NULL,
+                mime            TEXT NOT NULL,
+                original_format TEXT CHECK (original_format IN ('paper','digital')),
+                byte_size       INTEGER NOT NULL,
+                sha256          TEXT NOT NULL,
+                created_at      TEXT NOT NULL
+            )""")
+        db.execute("INSERT INTO transaktion(direction, trans_date, status, created_at) "
+                   "VALUES ('in', '2026-01-01', 'pending', '2026-01-01')")
+        db.execute("INSERT INTO receipt(id, transaktion_id, filename, mime, "
+                   "original_format, byte_size, sha256, created_at) "
+                   "VALUES (7, 1, 'a.bin', 'image/png', 'paper', 12, 'abc', '2026-01-01')")
+        db.execute("PRAGMA user_version = 44")
+        db.commit()
+
+        assert S.migrate(db) == S.SCHEMA_VERSION
+        r = db.execute("SELECT * FROM receipt WHERE id=7").fetchone()
+        assert r["transaktion_id"] == 1 and r["filename"] == "a.bin"
+        assert r["original_format"] == "paper" and r["verifikation_id"] is None
+
+        # And a receipt may now hang on a verifikation instead.
+        db.execute("INSERT INTO verifikation(series, ver_number, ver_date, "
+                   "registration_date, text, posted, created_at) "
+                   "VALUES ('A', 1, '2026-01-01', '2026-01-01', 'Manuell', 1, '2026-01-01')")
+        db.execute("INSERT INTO receipt(verifikation_id, filename, mime, byte_size, "
+                   "sha256, created_at) VALUES (1, 'b.bin', 'application/pdf', 5, 'd', 'x')")
+        db.commit()
+
+        # But not on nothing at all.
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute("INSERT INTO receipt(filename, mime, byte_size, sha256, created_at) "
+                       "VALUES ('c.bin', 'image/png', 1, 'e', 'x')")

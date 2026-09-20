@@ -1852,3 +1852,62 @@ class TestOpeningBalances:
         assert ab["balanserar"] is True
         r = result_report(ops.conn, "2026-01-01", "2026-12-31")
         assert r["income_ore"] == 0 and r["expense_ore"] == 0
+
+
+class TestVerifikationReceipts:
+    """Underlag filed under a verifikation that has no transaktion."""
+
+    def _manual(self, ops: BookOps) -> int:
+        return ops.add_manual_verifikation(
+            "2026-01-20", "Överföring privat tillgång", [
+                {"bas_konto": 5410, "amount_ore": 201000, "account_name": "Förbrukningsinventarier"},
+                {"bas_konto": 2018, "amount_ore": -201000, "account_name": "Egna insättningar"},
+            ], egenupprattad=True,
+            motivering="RAM köpt privat, tas i bruk i verksamheten.")["verifikation_id"]
+
+    def test_attach_and_list(self, ops: BookOps):
+        vid = self._manual(ops)
+        r = ops.attach_verifikation_receipt(vid, b"%PDF-1.4 kvitto", "application/pdf",
+                                            original_format="digital")
+        assert r["verifikation_id"] == vid and r["transaktion_id"] is None
+        rows = ops.list_verifikation_receipts(vid)
+        assert len(rows) == 1 and rows[0]["original_format"] == "digital"
+        data, mime = ops.get_receipt(rows[0]["id"])
+        assert data == b"%PDF-1.4 kvitto" and mime == "application/pdf"
+
+    def test_the_grundbok_reports_the_count(self, ops: BookOps):
+        vid = self._manual(ops)
+        ops.attach_verifikation_receipt(vid, b"a", "image/png")
+        ops.attach_verifikation_receipt(vid, b"b", "image/png")
+        v = [x for x in ops.verifikationer_full() if x["id"] == vid][0]
+        assert v["receipt_count"] == 2
+
+    def test_it_cannot_be_deleted(self, ops: BookOps):
+        # A verifikation is posted the moment it exists, so its underlag is part of the
+        # immutable record — the correction is to upload the right document too.
+        vid = self._manual(ops)
+        rid = ops.attach_verifikation_receipt(vid, b"x", "image/png")["id"]
+        with pytest.raises(InvalidState, match="kan inte tas bort"):
+            ops.delete_receipt(rid)
+        assert len(ops.list_verifikation_receipts(vid)) == 1
+
+    def test_a_receipt_must_hang_on_exactly_one_thing(self, ops: BookOps):
+        with pytest.raises(ValueError, match="antingen"):
+            ops.attach_receipt(None, b"x", "image/png")
+        with pytest.raises(KeyError):
+            ops.attach_verifikation_receipt(99999, b"x", "image/png")
+
+    def test_transaktion_receipts_are_unaffected(self, ops: BookOps):
+        # The two live in the same table; a verifikation's underlag must not leak into a
+        # transaktion's list or vice versa.
+        cat = ops.create_category("Förbrukning", "expense", 5460)
+        tid = ops.record_expense(None, cat, [{"rate_code": "25", "amount_ore": 1250}],
+                                 "2026-01-05")["transaktion_id"]
+        ops.attach_receipt(tid, b"kvitto", "image/jpeg")
+        vid = self._manual(ops)
+        ops.attach_verifikation_receipt(vid, b"underlag", "application/pdf")
+        assert len(ops.list_receipts(tid)) == 1
+        assert len(ops.list_verifikation_receipts(vid)) == 1
+        # An unbooked transaktion's receipt is still deletable.
+        ops.delete_receipt(ops.list_receipts(tid)[0]["id"])
+        assert ops.list_receipts(tid) == []

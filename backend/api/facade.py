@@ -795,18 +795,32 @@ class AppFacade:
                           f"t.note NOT IN ({placeholders})) ORDER BY t.id", tuple(_SYN))
 
     # ---- receipts (encrypted photos) ----
-    def h_upload_receipt(self, p, b, q):
+    @staticmethod
+    def _receipt_bytes(b):
         import base64
         import binascii
-        ops = self._ops(p["book_id"])
         try:
             data = base64.b64decode(b["image_base64"], validate=True)
         except (binascii.Error, ValueError):
             raise ValueError("image_base64 is not valid base64")
         if not data:
             raise ValueError("empty image")
-        return ops.attach_receipt(int(p["transaktion_id"]), data, b["mime"],
-                                  b.get("original_format"))
+        return data
+
+    def h_upload_receipt(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        return ops.attach_receipt(int(p["transaktion_id"]), self._receipt_bytes(b),
+                                  b["mime"], b.get("original_format"))
+
+    def h_upload_verifikation_receipt(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        return ops.attach_verifikation_receipt(
+            int(p["verifikation_id"]), self._receipt_bytes(b), b["mime"],
+            b.get("original_format"))
+
+    def h_list_verifikation_receipts(self, p, b, q):
+        return self._ops(p["book_id"]).list_verifikation_receipts(
+            int(p["verifikation_id"]))
 
     def h_list_receipts(self, p, b, q):
         ops = self._ops(p["book_id"])
@@ -1175,6 +1189,8 @@ _route("GET", "/books/{book_id}/transaktioner", "h_list_transaktioner")
 
 _route("POST", "/books/{book_id}/transaktioner/{transaktion_id}/receipts", "h_upload_receipt", 201)
 _route("GET", "/books/{book_id}/transaktioner/{transaktion_id}/receipts", "h_list_receipts")
+_route("POST", "/books/{book_id}/verifikationer/{verifikation_id}/receipts", "h_upload_verifikation_receipt", 201)
+_route("GET", "/books/{book_id}/verifikationer/{verifikation_id}/receipts", "h_list_verifikation_receipts")
 _route("GET", "/books/{book_id}/receipts/{receipt_id}", "h_get_receipt")
 _route("DELETE", "/books/{book_id}/receipts/{receipt_id}", "h_delete_receipt")
 

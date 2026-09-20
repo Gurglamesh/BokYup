@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 44
+SCHEMA_VERSION = 45
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -274,16 +274,26 @@ CREATE TABLE period_lock (
 -- ----- receipt photos (encrypted; stored as files in <db>.photos/) ---------
 -- The file content is AES-256-GCM ciphertext (book DEK); this row is the index.
 -- A transaktion may carry several (e.g. multi-page) receipts.
+--
+-- A receipt hangs on EITHER a transaktion or a verifikation. Most underlag belong to a
+-- business transaction, but a verifikation entered by hand has no transaktion — and an
+-- EGENUPPRÄTTAD one (a private asset brought in, an opening balance, a depreciation)
+-- still has supporting documents: the original receipt proving what the asset cost
+-- privately, the NE-bilaga the opening balances were copied from, the listings behind a
+-- market-value assessment. Those had nowhere to live, so they ended up in a folder
+-- beside the book instead of inside it. The CHECK keeps a receipt from floating free.
 CREATE TABLE receipt (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    transaktion_id  INTEGER NOT NULL REFERENCES transaktion(id),
+    transaktion_id  INTEGER REFERENCES transaktion(id),
+    verifikation_id INTEGER REFERENCES verifikation(id),  -- set: underlag for a manual entry
     rut_claim_id    INTEGER REFERENCES rut_claim(id),  -- set: Skatteverket kvittens for a claim
     filename        TEXT NOT NULL,      -- name inside <db>.photos/ (ciphertext file)
     mime            TEXT NOT NULL,
     original_format TEXT CHECK (original_format IN ('paper','digital')),
     byte_size       INTEGER NOT NULL,   -- plaintext size, for display
     sha256          TEXT NOT NULL,      -- of the ciphertext file (integrity)
-    created_at      TEXT NOT NULL
+    created_at      TEXT NOT NULL,
+    CHECK (transaktion_id IS NOT NULL OR verifikation_id IS NOT NULL)
 );
 
 -- ----- seller/company profile (single row id=1) — frozen onto each invoice ---
@@ -614,6 +624,7 @@ CREATE INDEX idx_moms_line_trans     ON moms_line(transaktion_id);
 CREATE INDEX idx_rut_state           ON rut_claim(state);
 CREATE INDEX idx_customer_type       ON customer(type);
 CREATE INDEX idx_receipt_trans       ON receipt(transaktion_id);
+CREATE INDEX idx_receipt_ver         ON receipt(verifikation_id);
 CREATE INDEX idx_invoice_number      ON invoice(invoice_number);
 CREATE INDEX idx_invoice_line_inv    ON invoice_line(invoice_id);
 CREATE INDEX idx_rut_recipient_inv   ON rut_recipient(invoice_id);
@@ -1263,6 +1274,33 @@ _MIGRATIONS: dict[int, str] = {
     """,
     44: """
         INSERT OR IGNORE INTO config(key, value) VALUES ('account_eget_kapital', '2010');
+    """,
+    # A receipt may now hang on a VERIFIKATION instead of a transaktion, so a manual /
+    # egenupprättad entry can carry its underlag. SQLite cannot drop a NOT NULL, so the
+    # table is rebuilt; the rows carry over unchanged and the photo files are untouched.
+    45: """
+        DROP INDEX IF EXISTS idx_receipt_trans;
+        ALTER TABLE receipt RENAME TO receipt_old;
+        CREATE TABLE receipt (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaktion_id  INTEGER REFERENCES transaktion(id),
+            verifikation_id INTEGER REFERENCES verifikation(id),
+            rut_claim_id    INTEGER REFERENCES rut_claim(id),
+            filename        TEXT NOT NULL,
+            mime            TEXT NOT NULL,
+            original_format TEXT CHECK (original_format IN ('paper','digital')),
+            byte_size       INTEGER NOT NULL,
+            sha256          TEXT NOT NULL,
+            created_at      TEXT NOT NULL,
+            CHECK (transaktion_id IS NOT NULL OR verifikation_id IS NOT NULL)
+        );
+        INSERT INTO receipt (id, transaktion_id, verifikation_id, rut_claim_id, filename,
+            mime, original_format, byte_size, sha256, created_at)
+            SELECT id, transaktion_id, NULL, rut_claim_id, filename, mime,
+                   original_format, byte_size, sha256, created_at FROM receipt_old;
+        DROP TABLE receipt_old;
+        CREATE INDEX IF NOT EXISTS idx_receipt_trans ON receipt(transaktion_id);
+        CREATE INDEX IF NOT EXISTS idx_receipt_ver ON receipt(verifikation_id);
     """,
 }
 

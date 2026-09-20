@@ -2962,3 +2962,40 @@ class TestOpeningBalanceApi:
             "balances": [{"bas_konto": 1930, "amount_ore": 1292900},
                          {"bas_konto": 2010, "amount_ore": 1292800}]})
         assert r.status_code == 400 and "går inte ihop" in r.json()["detail"]
+
+
+class TestVerifikationReceiptApi:
+    def _manual(self, client, book):
+        return client.post(f"/books/{book}/verifikationer/manual", json={
+            "ver_date": "2026-01-20", "text": "Överföring privat tillgång",
+            "egenupprattad": True,
+            "motivering": "RAM köpt privat, tas i bruk i verksamheten.",
+            "postings": [{"bas_konto": 5410, "debit_ore": 201000, "account_name": "Förbrukningsinventarier"},
+                         {"bas_konto": 2018, "credit_ore": 201000, "account_name": "Egna insättningar"}],
+        }).json()["verifikation_id"]
+
+    def test_upload_list_and_fetch(self, client, book):
+        import base64
+        vid = self._manual(client, book)
+        r = client.post(f"/books/{book}/verifikationer/{vid}/receipts", json={
+            "image_base64": base64.b64encode(b"%PDF-1.4 kvitto").decode(),
+            "mime": "application/pdf", "original_format": "digital"})
+        assert r.status_code == 201 and r.json()["verifikation_id"] == vid
+
+        rows = client.get(f"/books/{book}/verifikationer/{vid}/receipts").json()
+        assert len(rows) == 1
+        raw = client.get(f"/books/{book}/receipts/{rows[0]['id']}")
+        assert raw.content == b"%PDF-1.4 kvitto"
+
+        ver = [v for v in client.get(f"/books/{book}/verifikationer-full").json()
+               if v["id"] == vid][0]
+        assert ver["receipt_count"] == 1
+
+    def test_delete_is_refused_with_409(self, client, book):
+        import base64
+        vid = self._manual(client, book)
+        rid = client.post(f"/books/{book}/verifikationer/{vid}/receipts", json={
+            "image_base64": base64.b64encode(b"x").decode(),
+            "mime": "image/png"}).json()["id"]
+        r = client.delete(f"/books/{book}/receipts/{rid}")
+        assert r.status_code == 409 and "kan inte tas bort" in r.json()["detail"]

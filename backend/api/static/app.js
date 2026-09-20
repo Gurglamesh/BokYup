@@ -1430,7 +1430,12 @@ const SECTION_RENDERERS = {
             v.rattelse_of ? el("span", { class: "pill", style: "margin-left:6px" }, "rättelse") : null,
             v.egenupprattad ? el("span", { class: "pill", style: "margin-left:6px",
               title: "Egenupprättad verifikation (BFL 5 kap.) — motiveringen är underlaget" },
-              "egenupprättad") : null));
+              "egenupprättad") : null,
+            el("button", { class: "btn small ghost", style: "margin-left:8px;font-weight:400",
+              title: "Underlag (kvitto, faktura, blankett) som hör till verifikatet",
+              onclick: () => guard(() => verifikationReceiptsFlow(
+                v.id, `${v.series}${v.ver_number}`)) },
+              v.receipt_count ? `📎 ${v.receipt_count}` : "📎")));
           // The motivation IS the legal underlag when no external document exists, so it
           // belongs in the grundbok view, not hidden behind a click.
           if (v.motivering) {
@@ -2681,43 +2686,95 @@ async function receiptsFlow(txId, isPending) {
   if (list.length === 0) {
     body.appendChild(el("p", { class: "muted" }, "Inga kvitton för denna transaktion."));
   } else {
-    for (const rc of list) {
-      const isImg = (rc.mime || "").startsWith("image/");
-      const ext = rc.mime === "application/pdf" ? ".pdf" : "";
-      const dlName = rc.filename || `kvitto-${rc.id}${ext}`;
-      let view;
-      if (isImg) {
-        view = el("img", { class: "receipt-view" });
-        receiptSrc(rc.id).then((src) => { view.src = src; });
-      } else {
-        // A PDF/document. The document viewer uses the shared modal (z-index below this
-        // overlay), so close this overlay first or the viewer opens hidden behind it.
-        view = el("button", { class: "btn small", onclick: () => {
-          ui.close();
-          guard(() => showPdf(`/books/${bid()}/receipts/${rc.id}`, dlName));
-        } }, "📄 Öppna dokument");
-      }
-      const meta = el("div", { class: "muted" },
-        `${rc.mime} · ${Math.round(rc.byte_size / 1024)} kB`
-        + (rc.original_format ? " · " + rc.original_format : ""));
-      const actions = el("div", { class: "modal-actions" });
-      // Always allow retrieving the original file (image or PDF).
-      const dl = el("a", { class: "btn small ghost", download: dlName }, "Ladda ner");
-      receiptSrc(rc.id).then((src) => { dl.href = src; });
-      actions.appendChild(dl);
-      if (isPending) {
-        actions.appendChild(el("button", { class: "btn small danger", onclick: () => guard(async () => {
-          await api("DELETE", `/books/${bid()}/receipts/${rc.id}`);
-          toast("Kvitto borttaget");
-          ui.close();
-          renderWorkspace();
-        }) }, "Ta bort"));
-      }
-      body.appendChild(el("div", { class: "receipt-card" }, view, meta, actions));
-    }
+    for (const rc of list) body.appendChild(receiptCard(rc, () => ui.close(), isPending));
   }
   const ui = overlay(el("h3", {}, "Kvitton"), body,
     el("div", { class: "modal-actions" }, el("button", { class: "btn", onclick: () => ui.close() }, "Stäng")));
+}
+
+// One stored underlag: preview (image) or an open-button (PDF), its metadata, download,
+// and — only where the record still allows it — a delete. `closeHost` shuts the overlay
+// first, because the document viewer uses the shared modal and would otherwise open
+// behind it.
+function receiptCard(rc, closeHost, deletable) {
+  const isImg = (rc.mime || "").startsWith("image/");
+  const ext = rc.mime === "application/pdf" ? ".pdf" : "";
+  const dlName = rc.filename || `kvitto-${rc.id}${ext}`;
+  let view;
+  if (isImg) {
+    view = el("img", { class: "receipt-view" });
+    receiptSrc(rc.id).then((src) => { view.src = src; });
+  } else {
+    view = el("button", { class: "btn small", onclick: () => {
+      closeHost();
+      guard(() => showPdf(`/books/${bid()}/receipts/${rc.id}`, dlName));
+    } }, "📄 Öppna dokument");
+  }
+  const meta = el("div", { class: "muted" },
+    `${rc.mime} · ${Math.round(rc.byte_size / 1024)} kB`
+    + (rc.original_format ? " · " + rc.original_format : ""));
+  const actions = el("div", { class: "modal-actions" });
+  const dl = el("a", { class: "btn small ghost", download: dlName }, "Ladda ner");
+  receiptSrc(rc.id).then((src) => { dl.href = src; });
+  actions.appendChild(dl);
+  if (deletable) {
+    actions.appendChild(el("button", { class: "btn small danger", onclick: () => guard(async () => {
+      await api("DELETE", `/books/${bid()}/receipts/${rc.id}`);
+      toast("Kvitto borttaget");
+      closeHost();
+      renderWorkspace();
+    }) }, "Ta bort"));
+  }
+  return el("div", { class: "receipt-card" }, view, meta, actions);
+}
+
+// Underlag filed directly under a VERIFIKATION. A manual or egenupprättad entry has no
+// transaktion to hang documents on, but it still has supporting material: the original
+// receipt for a privately bought tool, the NE-bilaga an opening balance came from, the
+// listings a market value was assessed against. The motivation is the underlag in the
+// legal sense; these are what make it checkable.
+//
+// They cannot be removed afterwards — a verifikation is posted the moment it exists, and
+// deleting its underlag would destroy räkenskapsinformation. Uploading the right document
+// alongside a wrong one is the correction.
+async function verifikationReceiptsFlow(verId, label) {
+  const list = await api("GET", `/books/${bid()}/verifikationer/${verId}/receipts`);
+  const body = el("div", {});
+  if (list.length === 0) {
+    body.appendChild(el("p", { class: "muted" }, "Inga underlag ännu."));
+  } else {
+    for (const rc of list) body.appendChild(receiptCard(rc, () => ui.close(), false));
+  }
+
+  const file = el("input", { type: "file", accept: "image/*,application/pdf" });
+  const fmt = el("select", {},
+    el("option", { value: "digital" }, "Digitalt original (PDF, e-postad faktura …)"),
+    el("option", { value: "paper" }, "Pappersoriginal (foto/skanning)"));
+  const upload = el("button", { class: "btn brand", onclick: () => guard(async () => {
+    const f = file.files && file.files[0];
+    if (!f) { toast("Välj en fil först", true); return; }
+    await api("POST", `/books/${bid()}/verifikationer/${verId}/receipts`, {
+      image_base64: await blobToBase64(f),
+      mime: f.type || "application/octet-stream",
+      original_format: fmt.value,
+    });
+    toast("Underlag sparat");
+    ui.close();
+    renderWorkspace();
+  }) }, "Ladda upp");
+
+  body.appendChild(el("div", { style: "margin-top:14px;border-top:1px solid var(--line);padding-top:12px" },
+    el("label", {}, "Lägg till underlag"),
+    el("p", { class: "muted", style: "margin:2px 0 8px;font-size:12px" },
+      "Kvitto, faktura, blankett eller prisjämförelse som styrker posten. Filen krypteras "
+      + "med bokens nyckel och följer med i säkerhetskopian. Den kan inte tas bort "
+      + "efteråt — verifikatet är bokfört."),
+    file, el("div", { style: "margin-top:8px" }, wrap("Originalformat", fmt)),
+    el("div", { class: "modal-actions", style: "margin-top:10px" }, upload)));
+
+  const ui = overlay(el("h3", {}, `Underlag — ${label}`), body,
+    el("div", { class: "modal-actions" },
+      el("button", { class: "btn", onclick: () => ui.close() }, "Stäng")));
 }
 
 // Betalsätt-förslag: hur betalningen gjordes (skrivs som kommentar i verifikatet). Fri text

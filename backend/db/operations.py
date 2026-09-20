@@ -2349,6 +2349,11 @@ class BookOps:
                 "SELECT p.bas_konto, a.name AS konto_namn, p.amount_ore, p.text "
                 "FROM posting p JOIN account a ON a.bas_konto = p.bas_konto "
                 "WHERE p.verifikation_id=? ORDER BY p.amount_ore DESC, p.id", (v["id"],))]
+            # Underlag filed directly under the verifikation (a manual/egenupprättad
+            # entry has no transaktion to hang them on), so the grundbok can show them.
+            v["receipt_count"] = self.conn.execute(
+                "SELECT COUNT(*) FROM receipt WHERE verifikation_id=?", (v["id"],)
+            ).fetchone()[0]
         return vers
 
     def huvudbok(self, start: Optional[str] = None, end: Optional[str] = None) -> list[dict]:
@@ -4709,19 +4714,30 @@ class BookOps:
         from backend.db import bundle  # local import avoids a circular dependency
         return bundle._photos_dir(Path(self.session.record.db_path))
 
-    def attach_receipt(self, transaktion_id: int, data: bytes, mime: str,
+    def attach_receipt(self, transaktion_id: Optional[int], data: bytes, mime: str,
                        original_format: Optional[str] = None,
-                       rut_claim_id: Optional[int] = None) -> dict:
+                       rut_claim_id: Optional[int] = None,
+                       verifikation_id: Optional[int] = None) -> dict:
         """
-        Store a receipt photo for a transaktion: the bytes are encrypted with the
-        book DEK and written as a file in `<db>.photos/`; a `receipt` row indexes it.
-        The plaintext never touches disk. Returns the new receipt's metadata.
-        `rut_claim_id` (set only by attach_rut_receipt) tags a Skatteverket kvittens.
+        Store a receipt photo: the bytes are encrypted with the book DEK and written as
+        a file in `<db>.photos/`; a `receipt` row indexes it. The plaintext never touches
+        disk. Returns the new receipt's metadata.
+
+        It hangs on EITHER a `transaktion_id` or a `verifikation_id` — a verifikation
+        entered by hand has no transaktion, but still has underlag (see the table comment
+        in schema.py). `rut_claim_id` (set only by attach_rut_receipt) tags a Skatteverket
+        kvittens.
         """
-        if self.conn.execute(
+        if (transaktion_id is None) == (verifikation_id is None):
+            raise ValueError("Ange antingen en transaktion eller en verifikation")
+        if transaktion_id is not None and self.conn.execute(
             "SELECT 1 FROM transaktion WHERE id=?", (transaktion_id,)
         ).fetchone() is None:
             raise KeyError(f"No transaktion {transaktion_id}")
+        if verifikation_id is not None and self.conn.execute(
+            "SELECT 1 FROM verifikation WHERE id=?", (verifikation_id,)
+        ).fetchone() is None:
+            raise KeyError(f"No verifikation {verifikation_id}")
         if original_format is not None and original_format not in S.RECEIPT_FORMATS:
             raise ValueError(f"Invalid receipt format: {original_format}")
 
@@ -4733,21 +4749,45 @@ class BookOps:
 
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO receipt(transaktion_id, rut_claim_id, filename, mime, "
-                "original_format, byte_size, sha256, created_at) VALUES (?,?,?,?,?,?,?,?)",
-                (transaktion_id, rut_claim_id, filename, mime, original_format,
-                 len(data), hashlib.sha256(enc).hexdigest(), _now()),
+                "INSERT INTO receipt(transaktion_id, verifikation_id, rut_claim_id, "
+                "filename, mime, original_format, byte_size, sha256, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (transaktion_id, verifikation_id, rut_claim_id, filename, mime,
+                 original_format, len(data), hashlib.sha256(enc).hexdigest(), _now()),
             )
         return {"id": cur.lastrowid, "transaktion_id": transaktion_id,
-                "rut_claim_id": rut_claim_id,
+                "verifikation_id": verifikation_id, "rut_claim_id": rut_claim_id,
                 "filename": filename, "mime": mime, "byte_size": len(data)}
+
+    def attach_verifikation_receipt(self, verifikation_id: int, data: bytes, mime: str,
+                                    original_format: Optional[str] = None) -> dict:
+        """
+        File an underlag under a verifikation that has no transaktion — a manual entry,
+        or an egenupprättad one (privat tillgång, ingående balans, avskrivning).
+
+        For an egenupprättad verifikation the motivation is the underlag in the legal
+        sense (BFL 5 kap.), but the documents BEHIND the motivation — the original
+        receipt showing what a privately bought tool cost, the NE-bilaga the opening
+        balances came from, the listings a market value was assessed against — are what
+        make it verifiable. They belong inside the book, where the .buyn bundle carries
+        them, not in a folder next to it.
+        """
+        return self.attach_receipt(None, data, mime, original_format=original_format,
+                                   verifikation_id=verifikation_id)
+
+    def list_verifikation_receipts(self, verifikation_id: int) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT id, verifikation_id, mime, original_format, byte_size, created_at "
+            "FROM receipt WHERE verifikation_id=? ORDER BY id", (verifikation_id,),
+        ).fetchall()]
 
     def list_receipts(self, transaktion_id: int) -> list[dict]:
         # Only the transaktion's own receipts; a Skatteverket kvittens (rut_claim_id set)
         # is listed via list_rut_receipts instead.
         return [dict(r) for r in self.conn.execute(
             "SELECT id, transaktion_id, mime, original_format, byte_size, created_at "
-            "FROM receipt WHERE transaktion_id=? AND rut_claim_id IS NULL ORDER BY id",
+            "FROM receipt WHERE transaktion_id=? AND rut_claim_id IS NULL "
+            "AND verifikation_id IS NULL ORDER BY id",
             (transaktion_id,),
         ).fetchall()]
 
@@ -4770,13 +4810,21 @@ class BookOps:
         immutable legal record.
         """
         row = self.conn.execute(
-            "SELECT r.filename, t.verifikation_id FROM receipt r "
-            "JOIN transaktion t ON t.id = r.transaktion_id WHERE r.id=?",
+            "SELECT r.filename, r.verifikation_id AS own_ver, t.verifikation_id AS trans_ver "
+            "FROM receipt r LEFT JOIN transaktion t ON t.id = r.transaktion_id "
+            "WHERE r.id=?",
             (receipt_id,),
         ).fetchone()
         if row is None:
             raise KeyError(f"No receipt {receipt_id}")
-        if row["verifikation_id"] is not None:
+        if row["own_ver"] is not None:
+            # Filed directly under a verifikation, which is posted the moment it exists.
+            # Attach the correct document instead — removing underlag from a posted entry
+            # destroys räkenskapsinformation.
+            raise InvalidState(
+                "Underlag på ett bokfört verifikat kan inte tas bort. Ladda upp rätt "
+                "dokument i stället — båda blir kvar och kedjan går att följa.")
+        if row["trans_ver"] is not None:
             raise InvalidState("Cannot delete a receipt once its transaktion is booked")
         with self.conn:
             self.conn.execute("DELETE FROM receipt WHERE id=?", (receipt_id,))
