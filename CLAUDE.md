@@ -1057,6 +1057,22 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       autentiserade media-vägen, så den fungerar även i servermode). SIE är fortfarande
       formatet att ge revisorn för import — CSV:en är till för att läsa och pivotera.
       Tester (497) + browser-smoke-testat (riktig nedladdning ur fliken).
+- [x] **Kvitto-/fakturanummer + öresavrundning i Bokför-fliken (2026-09).** The Bokför
+      form (record income/expense) lacked both fields the Inköp tab and the manual
+      verifikation already had. Added a **Kvitto-/fakturanummer** input for BOTH kinds —
+      on the income side that meant `record_income(ext_ref=)` (the transaktion column and
+      `register_payment`'s verifikation stamping already existed, so the number now reads
+      the same in grundboken whether the entry was an inköp, en inkomst or a manual
+      verifikat) — and an **öresavrundning** checkbox whose label follows the kind. The
+      plain-sale branch of `register_payment` previously booked exact by construction
+      ("no öresavrundning"); it now honours `transaktion.ores_rounding` the same way the
+      expense branch does: only the cash leg is rounded, beskattningsunderlag and moms
+      stay EXACT and the öre difference clears against 3740 (Skatteverkets
+      ställningstagande). A RUT/ROT sale still always rounds the kundens del — that is the
+      faktura rule and the flag adds nothing there. `RecordIncomeReq` gained `ext_ref` +
+      `ores_rounding` (without the Pydantic fields both are dropped silently — the trap
+      that has now bitten three times). Tests pass (501); browser-smoke-tested (1 250,49 kr
+      → 1930 1 250,00 / 3740 0,49 / 2610 −250,10 / 3001 −1 000,39, balanced).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

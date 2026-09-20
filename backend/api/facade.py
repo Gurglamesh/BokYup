@@ -634,6 +634,7 @@ class AppFacade:
         return ops.record_income(
             b["customer_id"], b["category_id"], b["lines"], b["trans_date"],
             rut_amount_ore=b.get("rut_amount_ore", 0), note=b.get("note"),
+            ext_ref=b.get("ext_ref"), ores_rounding=bool(b.get("ores_rounding")),
             paid_date=b.get("paid_date"),
         )
 

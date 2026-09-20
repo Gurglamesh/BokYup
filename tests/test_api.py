@@ -2288,6 +2288,67 @@ class TestManualVerifikationRefAndComment:
         ver = client.get(f"/books/{book}/verifikationer-full").json()[0]
         assert ver["ext_ref"] == "KVITTO-991"
 
+    def test_an_inkomsts_kvittonummer_reaches_transaktion_and_verifikation(self, client, book):
+        # The Bokför tab records income as well as expense, and a sale has an underlag
+        # with a number too. The field only works if RecordIncomeReq carries it —
+        # Pydantic drops an undeclared field silently, so assert it round-trips.
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Försäljning", "kind": "income",
+                                "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "ACME AB"}).json()["kundnummer"]
+        client.post(f"/books/{book}/incomes", json={
+            "customer_id": kid, "category_id": cat, "trans_date": "2026-02-10",
+            "paid_date": "2026-02-10", "ext_ref": "SALJ-77",
+            "lines": [{"rate_code": "25", "amount_ore": 125000}]})
+        row = client.get(f"/books/{book}/transaktioner").json()[0]
+        assert row["ext_ref"] == "SALJ-77"
+        ver = client.get(f"/books/{book}/verifikationer-full").json()[0]
+        assert ver["ext_ref"] == "SALJ-77"
+
+    def test_blank_income_kvittonummer_is_stored_as_null(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Försäljning", "kind": "income",
+                                "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "ACME AB"}).json()["kundnummer"]
+        client.post(f"/books/{book}/incomes", json={
+            "customer_id": kid, "category_id": cat, "trans_date": "2026-02-10",
+            "ext_ref": "   ", "lines": [{"rate_code": "25", "amount_ore": 125000}]})
+        assert client.get(f"/books/{book}/transaktioner").json()[0]["ext_ref"] is None
+
+
+class TestPlainSaleOresavrundning:
+    """A sale entered in the Bokför tab can be marked öresavrundad, like an inköp."""
+
+    def _sale(self, client, book, **extra):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Försäljning", "kind": "income",
+                                "bas_konto": 3001}).json()["id"]
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "ACME AB"}).json()["kundnummer"]
+        body = {"customer_id": kid, "category_id": cat, "trans_date": "2026-02-10",
+                "paid_date": "2026-02-10",
+                "lines": [{"rate_code": "25", "amount_ore": 125049, "inclusive": True}]}
+        body.update(extra)
+        client.post(f"/books/{book}/incomes", json=body)
+        return client.get(f"/books/{book}/verifikationer-full").json()[0]["postings"]
+
+    def test_plain_sale_books_exact_without_oresavrundning(self, client, book):
+        k = {p["bas_konto"]: p["amount_ore"] for p in self._sale(client, book)}
+        assert k[1930] == 125049
+        assert 3740 not in k
+
+    def test_plain_sale_oresavrundning_moves_only_the_cash_leg(self, client, book):
+        # 1 250,49 kr -> the customer pays 1 250 kr. Underlag and moms stay EXACT
+        # (Skatteverkets ställningstagande); the 49 öre clear against 3740.
+        posts = self._sale(client, book, ores_rounding=True)
+        k = {p["bas_konto"]: p["amount_ore"] for p in posts}
+        assert k[1930] == 125000
+        assert k[3740] == 49
+        assert k[3001] == -100039 and k[2610] == -25010   # unchanged by the rounding
+        assert sum(p["amount_ore"] for p in posts) == 0
+
 
 class TestAssetPurchase:
     """Inventarieinköp: the firma buys a tool. Deductible moms; konto depends on price."""

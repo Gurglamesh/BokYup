@@ -255,6 +255,11 @@ class RecordIncomeReq(BaseModel):
     trans_date: str
     rut_amount_ore: int = 0
     note: Optional[str] = None
+    # Kvitto-/fakturanummer for the underlag behind the sale. Without this field
+    # Pydantic drops it silently, so the number never reaches record_income.
+    ext_ref: Optional[str] = None
+    # The customer paid whole kronor: round the cash leg, keep underlag + moms exact.
+    ores_rounding: bool = False
     paid_date: Optional[str] = None
 
 

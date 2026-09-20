@@ -1416,11 +1416,24 @@ class BookOps:
     def record_income(self, customer_id: int, category_id: int,
                       lines: list[dict], trans_date: str, *,
                       rut_amount_ore: int = 0, note: Optional[str] = None,
+                      ext_ref: Optional[str] = None,
+                      ores_rounding: bool = False,
                       paid_date: Optional[str] = None) -> dict:
         """
         Record a sale (utgående moms, owed). Snapshots the customer onto the record
         (frozen at issue). If `rut_amount_ore` > 0 a RUT claim is opened (private
         customers only). If `paid_date` is given the customer payment is booked now.
+
+        `ext_ref` is the underlag's own number — a kvitto-/fakturanummer, exactly as on
+        an inköp. A sale entered here is usually backed by a receipt or a faktura raised
+        outside the app, and BFL requires the verifikation to identify that underlag;
+        register_payment carries it onto the verifikation, so it reads the same in the
+        grundbok whether the entry was an inköp, an inkomst or a manual verifikation.
+
+        `ores_rounding` books the received total to whole kronor (the customer paid a
+        rounded amount) with the öre diff to 3740 — underlag and moms stay exact, exactly
+        as on an inköp. A RUT/ROT sale always rounds the kundens del, so the flag adds
+        nothing there.
         """
         self._check_category(category_id, "income")
         # A line may override the entry's konto, but only with another INCOME konto.
@@ -1440,8 +1453,12 @@ class BookOps:
             direction="out", category_id=category_id, supplier_id=None,
             customer_id=customer_id, trans_date=trans_date, note=note,
             receipt_original_format=None, snapshot_enc=snapshot_enc,
+            ext_ref=(ext_ref.strip() if ext_ref and ext_ref.strip() else None),
         )
         self._insert_moms_lines(tid, lines)
+        if ores_rounding:
+            with self.conn:
+                self.conn.execute("UPDATE transaktion SET ores_rounding=1 WHERE id=?", (tid,))
 
         result: dict = {"transaktion_id": tid}
         if rut_amount_ore:
@@ -1828,12 +1845,22 @@ class BookOps:
                 postings.append((self._sys_account("account_ores_kronutjamning"),
                                  cust_exact - round_cust, "öresavrundning"))
             text = "Försäljning" + note_suffix
-        else:  # 'out' — plain sale (not a faktura): booked exact, no öresavrundning
-            postings = [(self._sys_account("account_bank"), inc, "inbetalning")]
+        else:  # 'out' — plain sale (not a faktura)
+            # Booked exact unless the entry is marked öresavrundad, the same flag an
+            # inköp carries: the customer paid whole kronor. Per Skatteverkets
+            # ställningstagande the avrundning may NEVER touch the beskattningsunderlag
+            # or the moms — only the cash leg moves, and the öre difference clears
+            # against 3740 Öres- och kronutjämning.
+            cash_exact = inc
+            round_cash = _round_to_krona(cash_exact) if t["ores_rounding"] else cash_exact
+            postings = [(self._sys_account("account_bank"), round_cash, "inbetalning")]
             postings.extend((k, -ex_k, "försäljning") for k, ex_k in income_splits)
             for rate_code, m in moms_by_rate.items():
                 if m and rate_code in _UTG_MOMS_KEY:
                     postings.append((self._sys_account(_UTG_MOMS_KEY[rate_code]), -m, f"utgående moms {rate_code}%"))
+            if round_cash != cash_exact:
+                postings.append((self._sys_account("account_ores_kronutjamning"),
+                                 cash_exact - round_cash, "öresavrundning"))
             text = "Försäljning" + note_suffix
 
         with self.conn:

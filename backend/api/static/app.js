@@ -782,7 +782,17 @@ const SECTION_RENDERERS = {
     const cat = el("select", {});
     const date = el("input", { type: "date", value: new Date().toISOString().slice(0, 10) });
     const paidNow = el("select", {}, el("option", { value: "yes" }, "Ja, betald nu"), el("option", { value: "no" }, "Nej, väntar"));
+    // The underlag's own number — the same kvitto-/fakturanummer field the Inköp tab and
+    // the manual verifikation have. It follows the transaktion onto its verifikation, so
+    // the grundbok reads the same however the entry was made.
+    const extRef = el("input", { type: "text", placeholder: "t.ex. kvitto 1234 / faktura FAKT-99" });
     const rut = el("input", { type: "text", value: "0,00" });
+    // Öresavrundning: only when the paid total was rounded to whole kronor. Off by
+    // default — underlag and moms always stay exact, only the bank leg moves (3740).
+    const ores = el("input", { type: "checkbox" });
+    const oresText = el("span", {});
+    const oresWrap = el("label", { style: "display:inline-flex;gap:6px;align-items:center;margin-top:10px" },
+      ores, oresText);
 
     // Multiple moms lines: a receipt can mix 6/12/25 %. Each row is rate + belopp.
     const linesEd = momsLinesEditor();
@@ -807,6 +817,9 @@ const SECTION_RENDERERS = {
       }
       rutRow.style.display = k === "income" ? "" : "none";
       receiptBlock.style.display = k === "expense" ? "" : "none";
+      oresText.textContent = k === "income"
+        ? "Kunden betalade jämna kronor (diff bokförs på 3740)"
+        : "Leverantören öresavrundar totalen (diff bokförs på 3740)";
       // Per-row konto override: same kind as the entry, so an expense row can never be
       // booked to an income konto.
       linesEd.setCategories(cats.filter((x) => x.kind === k && x.active !== 0));
@@ -816,13 +829,15 @@ const SECTION_RENDERERS = {
 
     const form = el("div", {},
       el("div", { class: "row" }, wrap("Typ", kind), wrap("Motpart", counter), wrap("Kategori", cat)),
-      el("div", { class: "row" }, wrap("Datum", date), wrap("Betald?", paidNow), rutRow),
+      el("div", { class: "row" }, wrap("Datum", date), wrap("Betald?", paidNow),
+        wrap("Kvitto-/fakturanummer", extRef), rutRow),
       el("div", { style: "margin-top:6px" },
         el("label", {}, "Belopp & moms (en rad per momssats)"),
         el("p", { class: "muted", style: "margin:2px 0 6px;font-size:12px" },
           "Varje rad bokförs på kategorin ovan. Sätt ett eget konto på en rad om samma "
           + "kvitto innehåller flera sorters saker."),
         linesEd.element),
+      oresWrap,
       receiptBlock,
       el("div", { style: "margin-top:14px" }, el("button", { class: "btn brand", onclick: () => guard(submit) }, "Bokför")),
     );
@@ -837,6 +852,7 @@ const SECTION_RENDERERS = {
         const res = await api("POST", `/books/${bid()}/incomes`, {
           customer_id: parseInt(counter.value, 10), category_id: parseInt(cat.value, 10),
           lines, trans_date: date.value, rut_amount_ore: toOre(rut.value) || 0, paid_date,
+          ext_ref: extRef.value.trim() || null, ores_rounding: ores.checked,
         });
         const cap = res && res.rut_cap;
         if (cap && cap.over_cap) {
@@ -848,6 +864,7 @@ const SECTION_RENDERERS = {
         const res = await api("POST", `/books/${bid()}/expenses`, {
           supplier_id: counter.value ? parseInt(counter.value, 10) : null,
           category_id: parseInt(cat.value, 10), lines, trans_date: date.value, paid_date,
+          ext_ref: extRef.value.trim() || null, ores_rounding: ores.checked,
         });
         const staged = receipt.getStaged();
         if (staged) {
