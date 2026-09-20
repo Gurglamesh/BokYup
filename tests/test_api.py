@@ -2607,3 +2607,89 @@ class TestPerLineExpenseKonto:
             "customer_id": kid, "category_id": sales, "trans_date": "2026-06-01",
             "lines": [{"rate_code": "25", "amount_ore": 12500,
                        "category_id": verktyg}]}).status_code in (400, 409)
+
+
+class TestResultReportOnPostings:
+    """The result report reads the raw postings, so it agrees with the årsbokslut."""
+
+    def _konto(self, client, book, name, kind, bas):
+        return client.post(f"/books/{book}/categories",
+                           json={"name": name, "kind": kind, "bas_konto": bas}).json()["id"]
+
+    def _result(self, client, book):
+        return client.get(f"/books/{book}/reports/result",
+                          params={"start": "2026-01-01", "end": "2026-12-31"}).json()
+
+    def _arsbokslut(self, client, book):
+        return client.get(f"/books/{book}/reports/arsbokslut",
+                          params={"start": "2026-01-01", "end": "2026-12-31"}).json()
+
+    def test_a_manual_verifikation_now_reaches_the_report(self, client, book):
+        # Nothing but a hand-written entry: it used to be invisible here.
+        client.post(f"/books/{book}/verifikationer/manual", json={
+            "ver_date": "2026-03-01", "text": "Bankavgift",
+            "postings": [{"bas_konto": 6570, "debit_ore": 25000, "credit_ore": 0},
+                         {"bas_konto": 1930, "debit_ore": 0, "credit_ore": 25000}]})
+        r = self._result(client, book)
+        assert r["expense_ore"] == 25000 and r["result_ore"] == -25000
+        assert {x["bas_konto"] for x in r["by_category"]} == {6570}
+        # and it matches the årsbokslut, which has always read the postings
+        assert self._arsbokslut(client, book)["arets_resultat_ore"] == r["result_ore"]
+
+    def test_depreciation_reaches_the_report(self, client, book):
+        client.post(f"/books/{book}/asset-purchase", json={
+            "description": "Maskin", "amount_ore": 5000000, "trans_date": "2026-04-01",
+            "paid_date": "2026-04-01", "mode": "aktivera"})
+        client.post(f"/books/{book}/depreciations", json={"fiscal_year_end": "2026-12-31"})
+        r = self._result(client, book)
+        # the purchase itself is a balance-sheet item; only the write-off is a cost
+        assert r["expense_ore"] == 800000
+        assert {x["bas_konto"] for x in r["by_category"]} == {7832}
+        assert self._arsbokslut(client, book)["arets_resultat_ore"] == r["result_ore"]
+
+    def test_ordinary_income_and_expense_still_read_the_same(self, client, book):
+        sales = self._konto(client, book, "Tjänster", "income", 3041)
+        cost = self._konto(client, book, "Förbrukning", "expense", 5460)
+        kid = client.post(f"/books/{book}/customers",
+                          json={"type": "business", "company_name": "K AB"}).json()["kundnummer"]
+        client.post(f"/books/{book}/incomes", json={
+            "customer_id": kid, "category_id": sales, "trans_date": "2026-02-01",
+            "paid_date": "2026-02-01",
+            "lines": [{"rate_code": "25", "amount_ore": 125000}]})
+        client.post(f"/books/{book}/expenses", json={
+            "category_id": cost, "trans_date": "2026-02-10", "paid_date": "2026-02-10",
+            "lines": [{"rate_code": "25", "amount_ore": 62500}]})
+        r = self._result(client, book)
+        assert r["income_ore"] == 100000 and r["expense_ore"] == 50000
+        assert r["result_ore"] == 50000
+        by = {x["bas_konto"]: x for x in r["by_category"]}
+        assert by[3041]["kind"] == "income" and by[3041]["name"] == "Tjänster"
+        assert by[5460]["kind"] == "expense" and by[5460]["amount_ore"] == 50000
+        # moms konton are balance-sheet and must never show up as income/cost
+        assert 2610 not in by and 2640 not in by
+        assert self._arsbokslut(client, book)["arets_resultat_ore"] == r["result_ore"]
+
+    def test_a_rattelse_nets_the_konto_out(self, client, book):
+        cost = self._konto(client, book, "Förbrukning", "expense", 5460)
+        res = client.post(f"/books/{book}/expenses", json={
+            "category_id": cost, "trans_date": "2026-02-10", "paid_date": "2026-02-10",
+            "lines": [{"rate_code": "25", "amount_ore": 62500}]}).json()
+        client.post(f"/books/{book}/verifikationer/{res['verifikation_id']}/reverse",
+                    json={"reason": "fel"})
+        r = self._result(client, book)
+        assert r["expense_ore"] == 0
+        assert all(x["bas_konto"] != 5460 for x in r["by_category"])   # nets to zero
+
+    def test_financial_income_and_cost_are_split_by_konto(self, client, book):
+        client.post(f"/books/{book}/verifikationer/manual", json={
+            "ver_date": "2026-03-01", "text": "Ränta",
+            "postings": [{"bas_konto": 1930, "debit_ore": 5000, "credit_ore": 0},
+                         {"bas_konto": 8310, "debit_ore": 0, "credit_ore": 5000}]})
+        client.post(f"/books/{book}/verifikationer/manual", json={
+            "ver_date": "2026-03-02", "text": "Räntekostnad",
+            "postings": [{"bas_konto": 8410, "debit_ore": 3000, "credit_ore": 0},
+                         {"bas_konto": 1930, "debit_ore": 0, "credit_ore": 3000}]})
+        r = self._result(client, book)
+        assert r["income_ore"] == 5000 and r["expense_ore"] == 3000
+        by = {x["bas_konto"]: x["kind"] for x in r["by_category"]}
+        assert by[8310] == "income" and by[8410] == "expense"

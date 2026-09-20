@@ -976,10 +976,8 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       `GET /depreciations/proposal`, `POST /depreciations`. UI: a register table + årets
       förslag + "Bokför avskrivningar" in **Bokslut**. Config `default_avskrivningstid_ar`
       (5) + `account_avskrivning_inventarier` (7832). Tests pass (477); browser-smoke-tested.
-      KNOWN LIMITATION (pre-existing, found here): `result_report` reads moms_lines, so a
-      pure verifikation — a depreciation or any manual entry — never appears in Rapporter →
-      resultat. Årsbokslut and Skatt read the raw postings and DO include it, so those are
-      correct. Moving the result report onto postings is the fix.
+      (The limitation found here — depreciation missing from the result report — is fixed
+      in the next entry.)
 - [x] **Per-rads kostnadskonto i Inköp OCH Bokför (2026-09).** One receipt often mixes
       verktyg (5410), förbrukningsmaterial (5460) and programvara (5420). Both entry forms
       now take a **default konto plus a per-line override**: the line's konto is carried on
@@ -997,6 +995,25 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       `momsLinesEditor` (hidden when no options are passed; `setCategories` re-fills it
       when the Bokför form switches inkomst/utgift). Tests pass (483); browser-smoke-tested
       both forms (one receipt → 5410/5460/5420 balanced, and 5410/5460 from Bokför).
+- [x] **Resultatrapporten läser råa konteringar (2026-09).** `result_report` byggde på
+      `moms_line`, alltså bara affärshändelser — så en **ren verifikation** (en avskrivning,
+      eller vad som helst som matats in för hand i Huvudbok) syntes aldrig i Rapporter →
+      resultat, medan `arsbokslut.py` (som alltid läst konteringarna) räknade med den. Samma
+      bok gav två olika svar för samma år. Rapporten läser nu **`posting`**, precis som
+      årsbokslutet, så de stämmer överens per konstruktion. Teckenkonvention som
+      bokföringen postar: kostnads-/tillgångskonto debiteras positivt, intäktskonto
+      krediteras negativt → intäkt = negerad summa över 3xxx. Bara **resultatkonton
+      (3000–8999)** räknas; 1xxx/2xxx är balanskonton (en aktiverad inventarie är ingen
+      årskostnad) och momskontona kan aldrig läcka in som intäkt/kostnad. **Klass 8 delas
+      per konto**: 83xx = finansiell intäkt, övriga 8xxx = finansiell kostnad.
+      `by_category` behåller sitt namn men är en rad **per BAS-konto** — den enda axel en
+      kontering faktiskt bär; `category_id`/`name` fylls i från kategorin när exakt en
+      mappar till kontot, annars kontots eget namn, så en bok med distinkta konton läser
+      precis som förut. Konton som nettar till noll (en rättelse) utelämnas. Rapporten
+      används inte i UI:t — den är ett API-byggblock — så bytet av grund var lågrisk.
+      Tester passerar (488), inkl. nya regressioner: manuellt verifikat + avskrivning syns
+      nu OCH matchar årsbokslutets `arets_resultat_ore`, rättelse nettar ut, 83xx/84xx
+      delas rätt.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
