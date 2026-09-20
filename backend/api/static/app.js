@@ -60,6 +60,17 @@ async function mediaError(resp) {
 // A usable src for binary media (PDF/receipt/logo). In server mode a plain URL can't carry
 // the bearer token, so fetch it authed and hand back a blob: URL; local same-origin uses
 // the URL directly; phone (WASM) returns a data: URL from the in-process call.
+// Fetch a server file through the authed path and save it. Used for CSV exports; works
+// in local, server (bearer token) and phone modes alike.
+async function downloadFile(path, filename) {
+  const { src, revoke } = await mediaUrl(path);
+  const a = el("a", { href: src, download: filename });
+  document.body.appendChild(a); a.click(); a.remove();
+  // A blob URL must outlive the click — revoking immediately cancels the download in
+  // some browsers — so release it well after.
+  if (revoke) setTimeout(() => URL.revokeObjectURL(revoke), 30000);
+}
+
 async function mediaUrl(path) {
   if (!isServer() && window.__BOKYUP_NATIVE__) {
     const r = await api("GET", path);
@@ -1340,8 +1351,26 @@ const SECTION_RENDERERS = {
       el("div", { style: "align-self:flex-end" },
         el("button", { class: "btn", onclick: () => guard(draw) }, "Visa")),
       el("div", { style: "align-self:flex-end" },
+        el("button", { class: "btn ghost", title:
+          "Ladda ner som CSV — öppnas direkt i Excel (semikolon, decimalkomma, BOM)",
+          onclick: () => guard(exportCsv) }, "⬇ CSV")),
+      el("div", { style: "align-self:flex-end" },
         el("button", { class: "btn brand", onclick: () => guard(() => manualVerForm(panel, accounts)) },
           "+ Ny manuell verifikation"))));
+    panel.appendChild(el("p", { class: "muted", style: "margin-top:4px;font-size:12px" },
+      "CSV laddar ner vyn du valt ovan (samma datumintervall). Behöver din revisor "
+      + "importera bokföringen är SIE-filen under Rapporter rätt format — CSV:en är "
+      + "till för att läsa, filtrera och pivotera."));
+
+    // The CSV goes through the authed media path so it works in server mode too.
+    async function exportCsv() {
+      const q = new URLSearchParams({ kind: viewSel.value });
+      if (start.value) q.set("start", start.value);
+      if (end.value) q.set("end", end.value);
+      const name = `${viewSel.value}-${start.value || "start"}-${end.value || "slut"}.csv`;
+      await downloadFile(`/books/${bid()}/huvudbok.csv?${q.toString()}`, name);
+      toast(`${name} nedladdad`);
+    }
     panel.appendChild(out);
 
     const qs = () => {

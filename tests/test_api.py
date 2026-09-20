@@ -2811,3 +2811,59 @@ class TestArsbokslutPriorYearResult:
                         params={"start": "2026-01-01", "end": "2026-12-31"}).json()
         assert ab["tidigare_resultat_ore"] == 0
         assert ab["balanserar"] is True and ab["arets_resultat_ore"] == -1600
+
+
+class TestHuvudbokCsv:
+    """CSV export of the ledger — for Excel (sv) and for a revisor."""
+
+    def _seed(self, client, book):
+        cid = client.post(f"/books/{book}/categories",
+                          json={"name": "Förbrukning", "kind": "expense",
+                                "bas_konto": 5460}).json()["id"]
+        client.post(f"/books/{book}/expenses", json={
+            "category_id": cid, "trans_date": "2026-02-10", "paid_date": "2026-02-10",
+            "ext_ref": "KV-7", "lines": [{"rate_code": "25", "amount_ore": 125000}]})
+
+    def test_huvudbok_csv_shape(self, client, book):
+        self._seed(client, book)
+        r = client.get(f"/books/{book}/huvudbok.csv")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/csv")
+        assert "huvudbok" in r.headers["content-disposition"] and ".csv" in r.headers["content-disposition"]
+        text = r.text
+        assert text.startswith("﻿"), "Excel behöver BOM för å/ä/ö"
+        rows = [l.split(";") for l in text.lstrip("﻿").strip().split("\r\n")]
+        assert rows[0][:2] == ["Konto", "Kontonamn"]
+        assert rows[0][6:9] == ["Debet", "Kredit", "Saldo"]
+        # decimal comma, no thousands separator, debit and credit in separate columns.
+        # Each konto gets its konterings-rader followed by a "Summa"-row.
+        def first(konto):
+            return next(r_ for r_ in rows[1:] if r_[0] == konto and r_[2])
+        def summa(konto):
+            return next(r_ for r_ in rows[1:] if r_[0] == konto and r_[4].startswith("Summa"))
+        assert first("5460")[6] == "1000,00" and first("5460")[7] == ""
+        assert first("1930")[7] == "1250,00" and first("1930")[6] == ""
+        assert summa("5460")[6:9] == ["1000,00", "0,00", "1000,00"]
+        assert first("5460")[2].startswith("A")        # verifikationsnummer
+        assert first("5460")[3] == "2026-02-10"
+
+    def test_grundbok_and_saldolista_kinds(self, client, book):
+        self._seed(client, book)
+        g = client.get(f"/books/{book}/huvudbok.csv", params={"kind": "grundbok"}).text
+        assert g.lstrip("﻿").startswith("Verifikat;Datum;Text;Kvitto/Fakturanr")
+        assert "KV-7" in g                    # the reference travels with the entry
+
+        s = client.get(f"/books/{book}/huvudbok.csv", params={"kind": "saldolista"}).text
+        rows = [l.split(";") for l in s.lstrip("﻿").strip().split("\r\n")]
+        assert rows[0] == ["Konto", "Kontonamn", "Debet", "Kredit", "Saldo"]
+        total = rows[-1]
+        # every verifikation balances, so the totals must match and the saldo be zero
+        assert total[1] == "Summa" and total[2] == total[3] and total[4] == "0,00"
+
+    def test_date_range_and_unknown_kind(self, client, book):
+        self._seed(client, book)
+        empty = client.get(f"/books/{book}/huvudbok.csv",
+                           params={"start": "2026-06-01", "end": "2026-06-30"}).text
+        assert empty.lstrip("﻿").strip().count("\r\n") == 0   # header only
+        assert client.get(f"/books/{book}/huvudbok.csv",
+                          params={"kind": "nonsens"}).status_code == 400

@@ -1042,6 +1042,21 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       Därmed stämmer de två summarutorna för VILKET räkenskapsår som helst, inte bara
       bokens första. Tester: ett 2025-daterat verifikat ger balanserar=True med beloppet i
       B10; första året oförändrat.
+- [x] **CSV-export av huvudbok/grundbok/saldolista (2026-09).**
+      `backend/reports/csv_export.py` + `GET /huvudbok.csv?kind=&start=&end=`
+      (`huvudbok` | `grundbok` | `saldolista`, samma datumintervall som vyn). Skrivet för
+      **Excel i svensk locale**, som är där filerna faktiskt öppnas: **semikolon** som
+      separator (kommaseparerat med decimalkomma går inte att tolka entydigt),
+      **decimalkomma**, **UTF-8 BOM** så å/ä/ö överlever en dubbelklick, och belopp utan
+      tusentalsavgränsare så Excel läser dem som tal. **Debet och kredit i skilda
+      kolumner**, aldrig en teckenförsedd kolumn — så en bokförare känner igen sig.
+      Huvudboken ger konteringar per konto med löpande saldo + en Summa-rad per konto;
+      grundboken en rad per kontering i verifikationsordning (med kvitto-/fakturanr och
+      kommentar); saldolistan en rad per konto med en slutsumma där debet måste vara lika
+      med kredit. "⬇ CSV"-knapp i **Huvudbok**-fliken via `downloadFile` (går genom den
+      autentiserade media-vägen, så den fungerar även i servermode). SIE är fortfarande
+      formatet att ge revisorn för import — CSV:en är till för att läsa och pivotera.
+      Tester (497) + browser-smoke-testat (riktig nedladdning ur fliken).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

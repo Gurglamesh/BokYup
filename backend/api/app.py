@@ -609,6 +609,13 @@ def _build_router():
     def huvudbok(book_id: str, request: Request, start: str = None, end: str = None):
         return fac(request).h_huvudbok({"book_id": book_id}, {}, {"start": start, "end": end})
 
+    @r.get("/books/{book_id}/huvudbok.csv")
+    def huvudbok_csv(book_id: str, request: Request, start: str = None, end: str = None,
+                     kind: str = "huvudbok"):
+        res = fac(request).h_huvudbok_csv({"book_id": book_id}, {},
+                                          {"start": start, "end": end, "kind": kind})
+        return _raw_response(res)
+
     @r.post("/books/{book_id}/verifikationer/manual", status_code=201)
     def manual_verifikation(book_id: str, body: sc.ManualVerifikationReq, request: Request):
         return fac(request).h_manual_verifikation({"book_id": book_id}, body.model_dump(), {})

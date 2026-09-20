@@ -725,6 +725,23 @@ class AppFacade:
         ops = self._ops(p["book_id"])
         return ops.huvudbok(q.get("start"), q.get("end"))
 
+    def h_huvudbok_csv(self, p, b, q):
+        """Huvudbok / grundbok / saldolista as CSV for Excel or a revisor."""
+        from backend.reports import csv_export
+        ops = self._ops(p["book_id"])
+        start, end = q.get("start"), q.get("end")
+        kind = (q.get("kind") or "huvudbok").lower()
+        span = f"_{start or 'start'}_{end or 'slut'}"
+        if kind == "grundbok":
+            text = csv_export.grundbok_csv(ops.verifikationer_full(start, end))
+        elif kind == "saldolista":
+            text = csv_export.saldolista_csv(ops.huvudbok(start, end))
+        elif kind == "huvudbok":
+            text = csv_export.huvudbok_csv(ops.huvudbok(start, end))
+        else:
+            raise ValueError("kind måste vara huvudbok, grundbok eller saldolista")
+        return RawResult(text, "text/csv; charset=utf-8", f"{kind}{span}.csv")
+
     def h_manual_verifikation(self, p, b, q):
         ops = self._ops(p["book_id"])
         # The UI works in debit/credit columns; the ledger stores signed amounts.
@@ -1139,6 +1156,7 @@ _route("POST", "/books/{book_id}/year-end-accruals", "h_year_end_accruals", 201)
 _route("GET", "/books/{book_id}/verifikationer", "h_list_verifikationer")
 _route("GET", "/books/{book_id}/verifikationer-full", "h_verifikationer_full")
 _route("GET", "/books/{book_id}/huvudbok", "h_huvudbok")
+_route("GET", "/books/{book_id}/huvudbok.csv", "h_huvudbok_csv")
 _route("POST", "/books/{book_id}/verifikationer/manual", "h_manual_verifikation", 201)
 _route("GET", "/books/{book_id}/transaktioner", "h_list_transaktioner")
 
