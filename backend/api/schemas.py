@@ -319,6 +319,30 @@ class AssetPurchaseReq(BaseModel):
     paid_account: str = "bank"
 
 
+class FixedAssetReq(BaseModel):
+    """Register an asset that is capitalised and written off over its useful life."""
+    description: str
+    acquisition_ore: int                   # anskaffningsvärde EXKL. moms
+    acquired_date: str
+    asset_konto: Optional[int] = None      # default 1220
+    useful_life_years: Optional[int] = None   # default from config (5 år)
+    note: Optional[str] = None
+
+
+class FixedAssetUpdateReq(BaseModel):
+    description: Optional[str] = None
+    useful_life_years: Optional[int] = None
+    note: Optional[str] = None
+    disposed_date: Optional[str] = None    # sold/scrapped -> stop depreciating
+
+
+class DepreciationReq(BaseModel):
+    fiscal_year_end: str
+    # fixed_asset_id -> amount in ören for a year you want written off by another amount
+    # (0 skips that asset). Omitted assets take the proposal.
+    overrides: Optional[dict[int, int]] = None
+
+
 class PrivateAssetReq(BaseModel):
     """A privately-owned asset brought into the business (tillskott): debited to the
     cost/asset konto against 2018 Egna insättningar. No moms, no money."""

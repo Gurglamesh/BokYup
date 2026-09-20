@@ -959,6 +959,27 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       `POST /asset-purchase`. Tester passerar (468); browser-smoke-testat (50 000 kr →
       1220/2640/1930 balanserat, 0 kr i resultatrapporten OCH i årsbokslutet, treårs-
       regeln växlar till direktavdrag live).
+- [x] **Anläggningsregister + avskrivningsrutin (schema v43, 2026-09).** Capitalising an
+      asset was only half the job — without depreciation the cost never reaches the result.
+      `fixed_asset` (anskaffningsvärde ex moms, asset/ackumulerat/kostnadskonto, livslängd,
+      disposed_date) + `depreciation` (UNIQUE per asset & fiscal year, so a year can never
+      be booked twice). `book_asset_purchase` registers the asset automatically when it
+      capitalises; `add_fixed_asset` enters one bought before the app was used.
+      `depreciation_proposal(fiscal_year_end)` proposes straight-line over the useful life,
+      skipping assets acquired after the year end, disposed, fully written off or already
+      booked; **the last year takes the remainder** (`_year_amount`) so 10 000 kr over 3 år
+      sums to exactly 10 000 instead of stranding an öre. `book_depreciations` posts ONE
+      balanced verifikation dated the year end (7832 debet / 1229 kredit per konto), marked
+      **egenupprättad** with a motivation listing each asset — and it respects period locks.
+      `overrides` lets a single asset be written off by another amount (never above its book
+      value). API `GET/POST /fixed-assets`, `PATCH|DELETE /fixed-assets/{id}`,
+      `GET /depreciations/proposal`, `POST /depreciations`. UI: a register table + årets
+      förslag + "Bokför avskrivningar" in **Bokslut**. Config `default_avskrivningstid_ar`
+      (5) + `account_avskrivning_inventarier` (7832). Tests pass (477); browser-smoke-tested.
+      KNOWN LIMITATION (pre-existing, found here): `result_report` reads moms_lines, so a
+      pure verifikation — a depreciation or any manual entry — never appears in Rapporter →
+      resultat. Årsbokslut and Skatt read the raw postings and DO include it, so those are
+      correct. Moving the result report onto postings is the fix.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

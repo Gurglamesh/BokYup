@@ -2567,9 +2567,216 @@ class BookOps:
                   **{k: plan[k] for k in ("treatment", "bas_konto", "konto_namn",
                                           "ex_moms_ore", "moms_ore", "inc_moms_ore",
                                           "threshold_ore", "notes")}}
+        if plan["treatment"] == "aktivera":
+            # Into the anläggningsregister, so the yearly avskrivning can find it.
+            result["fixed_asset_id"] = self.add_fixed_asset(
+                description, plan["ex_moms_ore"], trans_date,
+                asset_konto=plan["bas_konto"], useful_life_years=life,
+                transaktion_id=tid, note=(note.strip() if note and note.strip() else None))
         if paid_date:
             result.update(self.register_payment(tid, paid_date, paid_account=paid_account))
         return result
+
+    # ------------------------------------------------------------------
+    # Anläggningsregister + avskrivningar
+    # ------------------------------------------------------------------
+    #
+    # Capitalising an asset is only half the job: it has to be written off over its useful
+    # life, or the cost never reaches the result at all. The register makes the 1220
+    # balance followable (what it consists of, how much is already written off) and the
+    # yearly routine turns that into a balanced verifikation: 7832 debet / 1229 kredit.
+    #
+    # Straight-line over `useful_life_years`, with a FULL year in the year of acquisition
+    # (which is how the tax rules treat inventarier — the deduction does not depend on the
+    # month you bought it). The final year takes the remainder, so the accumulated
+    # depreciation lands exactly on the anskaffningsvärde and never overshoots it.
+
+    @staticmethod
+    def _accumulated_konto_for(asset_konto: int) -> int:
+        """BAS convention: the group's '9' konto holds the accumulated depreciation
+        (1220 -> 1229, 1250 -> 1259)."""
+        return (int(asset_konto) // 10) * 10 + 9
+
+    def add_fixed_asset(self, description: str, acquisition_ore: int, acquired_date: str, *,
+                        asset_konto: Optional[int] = None,
+                        useful_life_years: Optional[int] = None,
+                        accumulated_konto: Optional[int] = None,
+                        expense_konto: Optional[int] = None,
+                        transaktion_id: Optional[int] = None,
+                        note: Optional[str] = None) -> int:
+        """
+        Put an asset in the register. `book_asset_purchase` calls this automatically when
+        it capitalises; call it by hand for an asset bought before you started using the
+        app (that only registers it — its 1220 balance must already be in the books).
+        """
+        description = (description or "").strip()
+        if not description:
+            raise ValueError("Beskriv tillgången")
+        acquisition_ore = int(acquisition_ore)
+        if acquisition_ore <= 0:
+            raise ValueError("Anskaffningsvärdet måste vara större än noll")
+        life = int(useful_life_years or self._config("default_avskrivningstid_ar"))
+        if life < 1:
+            raise ValueError("Avskrivningstiden måste vara minst 1 år")
+        asset_konto = int(asset_konto or self._sys_account("account_inventarier"))
+        acc_konto = int(accumulated_konto or self._accumulated_konto_for(asset_konto))
+        exp_konto = int(expense_konto or self._sys_account("account_avskrivning_inventarier"))
+        self.ensure_account(acc_konto, self._account_name(acc_konto)
+                            or f"Ackumulerade avskrivningar ({acc_konto})")
+        self.ensure_account(exp_konto, self._account_name(exp_konto) or "Avskrivningar")
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO fixed_asset(transaktion_id, description, acquired_date, "
+                "acquisition_ore, asset_konto, accumulated_konto, expense_konto, "
+                "useful_life_years, note, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (transaktion_id, description, acquired_date, acquisition_ore, asset_konto,
+                 acc_konto, exp_konto, life, note, _now()))
+        return cur.lastrowid
+
+    def _asset_row(self, row) -> dict:
+        d = dict(row)
+        acc = self.conn.execute(
+            "SELECT COALESCE(SUM(amount_ore), 0) FROM depreciation WHERE fixed_asset_id=?",
+            (d["id"],)).fetchone()[0]
+        d["accumulated_ore"] = acc
+        d["book_value_ore"] = d["acquisition_ore"] - acc
+        d["annual_ore"] = round(d["acquisition_ore"] / d["useful_life_years"])
+        d["years_booked"] = self.conn.execute(
+            "SELECT COUNT(*) FROM depreciation WHERE fixed_asset_id=?", (d["id"],)).fetchone()[0]
+        d["fully_depreciated"] = d["book_value_ore"] <= 0
+        return d
+
+    @staticmethod
+    def _year_amount(asset: dict) -> int:
+        """This year's straight-line instalment. The LAST year takes whatever is left, so
+        the instalments sum to the anskaffningsvärde exactly — 10 000 kr over 3 years is
+        3 333,33 three times, which would otherwise leave an öre stranded forever."""
+        remaining = asset["book_value_ore"]
+        if asset["years_booked"] + 1 >= asset["useful_life_years"]:
+            return remaining
+        return min(asset["annual_ore"], remaining)
+
+    def list_fixed_assets(self, include_disposed: bool = True) -> list[dict]:
+        """The asset register with accumulated depreciation and remaining book value."""
+        where = "" if include_disposed else " WHERE disposed_date IS NULL"
+        return [self._asset_row(r) for r in self.conn.execute(
+            f"SELECT * FROM fixed_asset{where} ORDER BY acquired_date, id")]
+
+    def update_fixed_asset(self, fixed_asset_id: int, **changes) -> None:
+        """Correct the register (description, life, note) — reference data, no ledger
+        effect. Already-booked depreciations are verifikationer and never move; a changed
+        life only affects the years not yet written off."""
+        row = self.conn.execute("SELECT id FROM fixed_asset WHERE id=?",
+                                (fixed_asset_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"No fixed asset {fixed_asset_id}")
+        sets = {}
+        for f in ("description", "useful_life_years", "note", "disposed_date"):
+            if changes.get(f) is not None:
+                sets[f] = changes[f]
+        if "useful_life_years" in sets and int(sets["useful_life_years"]) < 1:
+            raise ValueError("Avskrivningstiden måste vara minst 1 år")
+        if not sets:
+            return
+        cols = ", ".join(f"{k}=?" for k in sets)
+        with self.conn:
+            self.conn.execute(f"UPDATE fixed_asset SET {cols} WHERE id=?",
+                              (*sets.values(), fixed_asset_id))
+
+    def delete_fixed_asset(self, fixed_asset_id: int) -> dict:
+        """Remove a register entry that has never been depreciated (a mistyped one).
+        Once a year is booked the entry is part of the audit trail and stays."""
+        if self.conn.execute("SELECT 1 FROM depreciation WHERE fixed_asset_id=? LIMIT 1",
+                             (fixed_asset_id,)).fetchone():
+            raise InvalidState(
+                "Tillgången har bokförda avskrivningar och kan inte tas bort — märk den "
+                "som avyttrad istället")
+        with self.conn:
+            self.conn.execute("DELETE FROM fixed_asset WHERE id=?", (fixed_asset_id,))
+        return {"deleted": True, "id": fixed_asset_id}
+
+    def depreciation_proposal(self, fiscal_year_end: str) -> dict:
+        """
+        What should be written off for the year ending `fiscal_year_end`, WITHOUT booking
+        anything. Skips assets acquired after the year end, disposed ones, already fully
+        written-off ones, and any year already booked.
+        """
+        year_start = f"{int(fiscal_year_end[:4])}-01-01"
+        items, total = [], 0
+        for a in self.list_fixed_assets():
+            already = self.conn.execute(
+                "SELECT amount_ore FROM depreciation WHERE fixed_asset_id=? AND "
+                "fiscal_year_end=?", (a["id"], fiscal_year_end)).fetchone()
+            reason = None
+            amount = 0
+            if a["acquired_date"] > fiscal_year_end:
+                reason = "Anskaffad efter räkenskapsårets slut"
+            elif a["disposed_date"] and a["disposed_date"] < year_start:
+                reason = "Avyttrad före räkenskapsåret"
+            elif already is not None:
+                reason = "Redan avskriven för det här året"
+                amount = already["amount_ore"]
+            elif a["fully_depreciated"]:
+                reason = "Helt avskriven"
+            else:
+                amount = self._year_amount(a)
+                total += amount
+            items.append({**a, "proposed_ore": amount, "skipped": reason is not None,
+                          "reason": reason,
+                          "already_booked": already is not None})
+        return {"fiscal_year_end": fiscal_year_end, "total_ore": total, "items": items}
+
+    def book_depreciations(self, fiscal_year_end: str,
+                           overrides: Optional[dict] = None) -> dict:
+        """
+        Book the year's depreciation as ONE verifikation dated the last day of the year:
+        7832 debet for the total, each asset's ackumulerade-avskrivningskonto kredit.
+
+        `overrides` maps fixed_asset_id -> amount in ören, for an asset you want written
+        off by a different amount this year (0 skips it). An amount may never exceed the
+        remaining book value.
+        """
+        proposal = self.depreciation_proposal(fiscal_year_end)
+        overrides = {int(k): int(v) for k, v in (overrides or {}).items()}
+        rows = []
+        for it in proposal["items"]:
+            if it["already_booked"]:
+                continue
+            amount = overrides.get(it["id"], it["proposed_ore"] if not it["skipped"] else 0)
+            if amount <= 0:
+                continue
+            if amount > it["book_value_ore"]:
+                raise ValueError(
+                    f"{it['description']}: {self._kr(amount)} överstiger det bokförda "
+                    f"värdet {self._kr(it['book_value_ore'])}")
+            rows.append((it, amount))
+        if not rows:
+            raise InvalidState("Inget att skriva av för det här räkenskapsåret")
+
+        total = sum(a for _, a in rows)
+        by_acc: dict[int, int] = {}
+        by_exp: dict[int, int] = {}
+        for it, amount in rows:
+            by_acc[it["accumulated_konto"]] = by_acc.get(it["accumulated_konto"], 0) + amount
+            by_exp[it["expense_konto"]] = by_exp.get(it["expense_konto"], 0) + amount
+        postings = [(k, v, "avskrivning") for k, v in sorted(by_exp.items())]
+        postings += [(k, -v, "ackumulerad avskrivning") for k, v in sorted(by_acc.items())]
+
+        with self.conn:
+            vid, number = self._post_verifikation(
+                fiscal_year_end, _now()[:10],
+                f"Avskrivningar {fiscal_year_end[:4]}", postings,
+                egenupprattad=True,
+                motivering="Planenlig avskrivning enligt anläggningsregistret: "
+                           + "; ".join(f"{it['description']} {self._kr(a)} "
+                                       f"({it['useful_life_years']} år)" for it, a in rows))
+            for it, amount in rows:
+                self.conn.execute(
+                    "INSERT INTO depreciation(fixed_asset_id, fiscal_year_end, amount_ore, "
+                    "verifikation_id, created_at) VALUES (?,?,?,?,?)",
+                    (it["id"], fiscal_year_end, amount, vid, _now()))
+        return {"verifikation_id": vid, "ver_number": number, "total_ore": total,
+                "count": len(rows)}
 
     def is_asset_purchase(self, transaktion_id: int) -> bool:
         """An inköp booked straight to a konto instead of a category (no category_id)."""

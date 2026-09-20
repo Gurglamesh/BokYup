@@ -1662,6 +1662,115 @@ const SECTION_RENDERERS = {
         el("button", { class: "btn brand", onclick: () => guard(yearEnd) }, "Bokför periodiseringar")),
     ));
 
+    // ---- Avskrivningar (anläggningsregister) ----
+    panel.appendChild(el("h3", { style: "margin-top:26px" }, "Avskrivningar på inventarier"));
+    panel.appendChild(el("p", { class: "muted" },
+      "En aktiverad inventarie är ingen kostnad när du köper den — den kostnadsförs "
+      + "genom avskrivning över sin nyttjandeperiod. Här listas registret och årets "
+      + "förslag (rakt av över antal år, sista året tar resten). Bokförs som ETT "
+      + "verifikat: 7832 debet, ackumulerade avskrivningar kredit."));
+    const depYear = el("input", { type: "date", value: "2026-12-31" });
+    const depBox = el("div", {});
+    panel.appendChild(el("div", { class: "row" },
+      wrap("Räkenskapsårets sista dag", depYear),
+      el("div", { style: "align-self:flex-end" },
+        el("button", { class: "btn", onclick: () => guard(drawDep) }, "Visa förslag")),
+      el("div", { style: "align-self:flex-end" },
+        el("button", { class: "btn ghost", onclick: () => guard(addFixedAssetFlow) },
+          "+ Lägg till i registret"))));
+    panel.appendChild(depBox);
+
+    async function drawDep() {
+      const prop = await api("GET", `/books/${bid()}/depreciations/proposal`
+        + `?fiscal_year_end=${depYear.value}`);
+      depBox.innerHTML = "";
+      if (!prop.items.length) {
+        depBox.appendChild(el("p", { class: "muted", style: "margin-top:12px" },
+          "Inga aktiverade inventarier i registret. De hamnar här automatiskt när ett "
+          + "inventarieinköp aktiveras."));
+        return;
+      }
+      depBox.appendChild(simpleTable(
+        ["Tillgång", "Anskaffad", "Anskaffningsvärde", "Avskrivet", "Bokfört värde",
+         "År", "Årets avskrivning", ""],
+        prop.items.map((a) => [
+          a.description,
+          a.acquired_date,
+          toKr(a.acquisition_ore) + " kr",
+          toKr(a.accumulated_ore) + " kr",
+          toKr(a.book_value_ore) + " kr",
+          String(a.useful_life_years),
+          a.skipped
+            ? el("span", { class: "muted", title: a.reason || "" },
+                a.already_booked ? toKr(a.proposed_ore) + " kr" : "—")
+            : el("strong", {}, toKr(a.proposed_ore) + " kr"),
+          el("span", { style: "display:inline-flex;gap:4px;flex-wrap:wrap" },
+            a.skipped ? el("span", { class: "pill" }, a.reason || "") : null,
+            a.disposed_date ? null : el("button", { class: "btn small ghost",
+              onclick: () => guard(() => editFixedAssetFlow(a)) }, "Ändra"))]),
+      ));
+      depBox.appendChild(el("p", { style: "margin-top:10px;font-weight:600" },
+        `Att skriva av för ${depYear.value.slice(0, 4)}: ${toKr(prop.total_ore)} kr`));
+      if (prop.total_ore > 0) {
+        depBox.appendChild(el("button", { class: "btn brand",
+          onclick: () => guard(() => bookDepreciations(prop)) }, "Bokför avskrivningar"));
+      }
+    }
+
+    async function bookDepreciations(prop) {
+      const ok = await modal(
+        `Bokför ${toKr(prop.total_ore)} kr i avskrivningar per ${depYear.value}? `
+        + "Verifikatet är immutabelt när det väl är bokfört — en felaktig avskrivning "
+        + "rättas med en rättelse.", [], "Bokför");
+      if (!ok) return;
+      const res = await api("POST", `/books/${bid()}/depreciations`,
+        { fiscal_year_end: depYear.value });
+      toast(`Verifikat A${res.ver_number} — ${toKr(res.total_ore)} kr avskrivet `
+        + `på ${res.count} tillgång${res.count === 1 ? "" : "ar"}`);
+      await drawDep();
+    }
+
+    async function addFixedAssetFlow() {
+      const f = await modal("Lägg till i anläggningsregistret", [
+        { name: "description", label: "Vad är det?", value: "" },
+        { name: "acquisition_ore", label: "Anskaffningsvärde EXKL. moms (kr)", value: "" },
+        { name: "acquired_date", label: "Anskaffad", type: "date",
+          value: new Date().toISOString().slice(0, 10) },
+        { name: "useful_life_years", label: "Avskrivningstid (år)", value: "5" },
+        { name: "note", label: "Notering (valfri)", value: "" },
+      ], "Lägg till");
+      if (!f || !f.description.trim()) return;
+      if (!toOre(f.acquisition_ore)) { toast("Ange anskaffningsvärdet", true); return; }
+      await api("POST", `/books/${bid()}/fixed-assets`, {
+        description: f.description.trim(), acquisition_ore: toOre(f.acquisition_ore),
+        acquired_date: f.acquired_date,
+        useful_life_years: parseInt(f.useful_life_years, 10) || null,
+        note: f.note.trim() || null });
+      toast("Tillagd i registret — kontrollera att dess värde redan finns i bokföringen");
+      await drawDep();
+    }
+
+    async function editFixedAssetFlow(a) {
+      const f = await modal(`Ändra "${a.description}"`, [
+        { name: "description", label: "Beskrivning", value: a.description },
+        { name: "useful_life_years", label: "Avskrivningstid (år) — gäller framåt",
+          value: String(a.useful_life_years) },
+        { name: "disposed_date", label: "Avyttrad/utrangerad (lämna tom om den finns kvar)",
+          type: "date", value: a.disposed_date || "" },
+        { name: "note", label: "Notering", value: a.note || "" },
+      ], "Spara");
+      if (!f) return;
+      await api("PATCH", `/books/${bid()}/fixed-assets/${a.id}`, {
+        description: f.description.trim() || null,
+        useful_life_years: parseInt(f.useful_life_years, 10) || null,
+        disposed_date: f.disposed_date || null,
+        note: f.note.trim() || null });
+      toast("Registret uppdaterat");
+      await drawDep();
+    }
+
+    await drawDep();
+
     async function lockPeriod() {
       await api("POST", `/books/${bid()}/period-locks`, {
         period_start: lockStart.value, period_end: lockEnd.value, kind: "moms",

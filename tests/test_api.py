@@ -2395,3 +2395,124 @@ class TestAssetPurchase:
                              json={**base, "paid_date": "2026-04-01"}).json()["transaktion_id"]
         assert client.post(f"/books/{book}/transaktioner/{booked}/rebook",
                            json={"corrections": {}}).status_code == 409
+
+
+class TestDepreciation:
+    """Anläggningsregister + årets avskrivning (7832 debet / 1229 kredit)."""
+
+    def _buy(self, client, book, amount_ore=5000000, date="2026-04-01", life=None):
+        body = {"description": "Lödstation JBC", "amount_ore": amount_ore,
+                "trans_date": date, "paid_date": date, "mode": "aktivera"}
+        if life:
+            body["useful_life_years"] = life
+        return client.post(f"/books/{book}/asset-purchase", json=body).json()
+
+    def test_capitalising_registers_the_asset(self, client, book):
+        res = self._buy(client, book)
+        assert res["fixed_asset_id"]
+        a = client.get(f"/books/{book}/fixed-assets").json()[0]
+        assert a["acquisition_ore"] == 4000000        # ex moms
+        assert a["asset_konto"] == 1220 and a["accumulated_konto"] == 1229
+        assert a["expense_konto"] == 7832
+        assert a["useful_life_years"] == 5            # config default
+        assert a["book_value_ore"] == 4000000 and a["accumulated_ore"] == 0
+
+    def test_a_direct_deduction_is_not_registered(self, client, book):
+        res = client.post(f"/books/{book}/asset-purchase", json={
+            "description": "Skruvdragare", "amount_ore": 250000,
+            "trans_date": "2026-02-01", "paid_date": "2026-02-01"}).json()
+        assert "fixed_asset_id" not in res
+        assert client.get(f"/books/{book}/fixed-assets").json() == []
+
+    def test_proposal_and_booking(self, client, book):
+        self._buy(client, book)                        # 40 000 kr ex moms, 5 år
+        prop = client.get(f"/books/{book}/depreciations/proposal",
+                          params={"fiscal_year_end": "2026-12-31"}).json()
+        assert prop["total_ore"] == 800000             # 40 000 / 5 = 8 000 kr
+        assert prop["items"][0]["skipped"] is False
+
+        res = client.post(f"/books/{book}/depreciations",
+                          json={"fiscal_year_end": "2026-12-31"})
+        assert res.status_code == 201 and res.json()["total_ore"] == 800000
+
+        hb = {a["bas_konto"]: a["saldo_ore"] for a in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[7832] == 800000 and hb[1229] == -800000
+        assert hb[1220] == 4000000                     # the asset itself is untouched
+        assert sum(hb.values()) == 0
+
+        # Now it IS a cost of the year, unlike the purchase itself. The årsbokslut (and
+        # therefore the Skatt tab) reads the raw postings, so it picks the depreciation up.
+        ab = client.get(f"/books/{book}/reports/arsbokslut",
+                        params={"start": "2026-01-01", "end": "2026-12-31"}).json()
+        assert ab["arets_resultat_ore"] == -800000 and ab["balanserar"] is True
+
+        a = client.get(f"/books/{book}/fixed-assets").json()[0]
+        assert a["accumulated_ore"] == 800000 and a["book_value_ore"] == 3200000
+
+    def test_a_year_cannot_be_booked_twice(self, client, book):
+        self._buy(client, book)
+        client.post(f"/books/{book}/depreciations", json={"fiscal_year_end": "2026-12-31"})
+        prop = client.get(f"/books/{book}/depreciations/proposal",
+                          params={"fiscal_year_end": "2026-12-31"}).json()
+        assert prop["total_ore"] == 0
+        assert prop["items"][0]["already_booked"] is True
+        assert client.post(f"/books/{book}/depreciations",
+                           json={"fiscal_year_end": "2026-12-31"}).status_code == 409
+
+    def test_last_year_takes_the_remainder_and_then_stops(self, client, book):
+        # 10 000 kr ex moms over 3 years -> 3333,33... so the years must still sum exactly.
+        self._buy(client, book, amount_ore=1250000, life=3)
+        booked = []
+        for year in ("2026-12-31", "2027-12-31", "2028-12-31"):
+            booked.append(client.post(f"/books/{book}/depreciations",
+                                      json={"fiscal_year_end": year}).json()["total_ore"])
+        assert sum(booked) == 1000000                  # exactly the anskaffningsvärde
+        a = client.get(f"/books/{book}/fixed-assets").json()[0]
+        assert a["book_value_ore"] == 0 and a["fully_depreciated"] is True
+        hb = {x["bas_konto"]: x["saldo_ore"] for x in client.get(f"/books/{book}/huvudbok").json()}
+        assert hb[1220] + hb[1229] == 0                # net book value in the ledger is 0
+        # a fourth year has nothing left to write off
+        assert client.post(f"/books/{book}/depreciations",
+                           json={"fiscal_year_end": "2029-12-31"}).status_code == 409
+
+    def test_override_and_skip(self, client, book):
+        a = self._buy(client, book)["fixed_asset_id"]
+        res = client.post(f"/books/{book}/depreciations", json={
+            "fiscal_year_end": "2026-12-31", "overrides": {str(a): 500000}}).json()
+        assert res["total_ore"] == 500000
+        # an override above the remaining book value is refused
+        b = self._buy(client, book, date="2027-01-05")["fixed_asset_id"]
+        assert client.post(f"/books/{book}/depreciations", json={
+            "fiscal_year_end": "2027-12-31",
+            "overrides": {str(b): 99000000}}).status_code == 400
+
+    def test_asset_bought_after_year_end_and_disposed_are_skipped(self, client, book):
+        late = self._buy(client, book, date="2027-03-01")["fixed_asset_id"]
+        prop = client.get(f"/books/{book}/depreciations/proposal",
+                          params={"fiscal_year_end": "2026-12-31"}).json()
+        item = [i for i in prop["items"] if i["id"] == late][0]
+        assert item["skipped"] and "efter" in item["reason"]
+
+        client.patch(f"/books/{book}/fixed-assets/{late}", json={"disposed_date": "2027-06-01"})
+        prop = client.get(f"/books/{book}/depreciations/proposal",
+                          params={"fiscal_year_end": "2028-12-31"}).json()
+        assert [i for i in prop["items"] if i["id"] == late][0]["skipped"]
+
+    def test_manual_register_entry_and_delete_guard(self, client, book):
+        aid = client.post(f"/books/{book}/fixed-assets", json={
+            "description": "Gammal maskin", "acquisition_ore": 3000000,
+            "acquired_date": "2024-01-01", "useful_life_years": 10}).json()["id"]
+        assert client.get(f"/books/{book}/fixed-assets").json()[0]["annual_ore"] == 300000
+        assert client.delete(f"/books/{book}/fixed-assets/{aid}").status_code == 200
+        aid2 = client.post(f"/books/{book}/fixed-assets", json={
+            "description": "M2", "acquisition_ore": 3000000,
+            "acquired_date": "2024-01-01"}).json()["id"]
+        client.post(f"/books/{book}/depreciations", json={"fiscal_year_end": "2026-12-31"})
+        assert client.delete(f"/books/{book}/fixed-assets/{aid2}").status_code == 409
+
+    def test_depreciation_respects_a_locked_period(self, client, book):
+        self._buy(client, book)
+        client.post(f"/books/{book}/period-locks",
+                    json={"period_start": "2026-01-01", "period_end": "2026-12-31"})
+        assert client.post(f"/books/{book}/depreciations",
+                           json={"fiscal_year_end": "2026-12-31"}).status_code == 409

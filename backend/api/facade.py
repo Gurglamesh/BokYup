@@ -353,6 +353,32 @@ class AppFacade:
             ores_rounding=bool(b.get("ores_rounding")),
             paid_date=b.get("paid_date"), paid_account=b.get("paid_account") or "bank")
 
+    # ---- anläggningsregister + avskrivningar ----
+    def h_list_fixed_assets(self, p, b, q):
+        return self._ops(p["book_id"]).list_fixed_assets()
+
+    def h_add_fixed_asset(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        return {"id": ops.add_fixed_asset(
+            b.get("description"), int(b.get("acquisition_ore") or 0), b["acquired_date"],
+            asset_konto=b.get("asset_konto"),
+            useful_life_years=b.get("useful_life_years"), note=b.get("note"))}
+
+    def h_update_fixed_asset(self, p, b, q):
+        ops = self._ops(p["book_id"])
+        ops.update_fixed_asset(int(p["fixed_asset_id"]), **_clean(b))
+        return {"id": int(p["fixed_asset_id"])}
+
+    def h_delete_fixed_asset(self, p, b, q):
+        return self._ops(p["book_id"]).delete_fixed_asset(int(p["fixed_asset_id"]))
+
+    def h_depreciation_proposal(self, p, b, q):
+        return self._ops(p["book_id"]).depreciation_proposal(q["fiscal_year_end"])
+
+    def h_book_depreciations(self, p, b, q):
+        return self._ops(p["book_id"]).book_depreciations(
+            b["fiscal_year_end"], b.get("overrides"))
+
     def h_reverse_charge_kinds(self, p, b, q):
         """The omvänd-betalningsskyldighet options + which momsdeklaration box each fills."""
         from backend.models.schema import REVERSE_CHARGE_BOXES, REVERSE_CHARGE_RATES
@@ -1033,6 +1059,12 @@ _route("GET", "/books/{book_id}/bas-katalog", "h_bas_catalog")
 _route("GET", "/books/{book_id}/reverse-charge-kinds", "h_reverse_charge_kinds")
 _route("GET", "/books/{book_id}/private-asset/preview", "h_private_asset_preview")
 _route("GET", "/books/{book_id}/asset-purchase/preview", "h_asset_purchase_preview")
+_route("GET", "/books/{book_id}/fixed-assets", "h_list_fixed_assets")
+_route("POST", "/books/{book_id}/fixed-assets", "h_add_fixed_asset", 201)
+_route("PATCH", "/books/{book_id}/fixed-assets/{fixed_asset_id}", "h_update_fixed_asset")
+_route("DELETE", "/books/{book_id}/fixed-assets/{fixed_asset_id}", "h_delete_fixed_asset")
+_route("GET", "/books/{book_id}/depreciations/proposal", "h_depreciation_proposal")
+_route("POST", "/books/{book_id}/depreciations", "h_book_depreciations", 201)
 _route("POST", "/books/{book_id}/asset-purchase", "h_book_asset_purchase", 201)
 _route("POST", "/books/{book_id}/private-asset", "h_book_private_asset", 201)
 _route("GET", "/books/{book_id}/recurring", "h_list_recurring")

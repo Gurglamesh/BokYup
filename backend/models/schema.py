@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 42
+SCHEMA_VERSION = 43
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -463,6 +463,38 @@ CREATE TABLE stock_adjustment (
     created_at      TEXT NOT NULL
 );
 
+-- ----- Anläggningsregister (capitalised assets + their depreciation) ---------
+-- An inventarie over the threshold is NOT a cost of the year: it is capitalised here and
+-- written off over its useful life. This register is what makes that possible to follow —
+-- without it the 1220 balance is a lump with no history of what it consists of.
+-- Purely a register + a log; the ledger effect is the verifikation each depreciation
+-- posts (7832 debet / 1229 kredit).
+CREATE TABLE fixed_asset (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaktion_id    INTEGER REFERENCES transaktion(id),  -- the purchase (NULL = entered by hand)
+    description       TEXT NOT NULL,
+    acquired_date     TEXT NOT NULL,
+    acquisition_ore   INTEGER NOT NULL,   -- anskaffningsvärde EXKL. moms
+    asset_konto       INTEGER NOT NULL,   -- 1220 / 1250 …
+    accumulated_konto INTEGER NOT NULL,   -- 1229 / 1259 … (ackumulerade avskrivningar)
+    expense_konto     INTEGER NOT NULL,   -- 7832 Avskrivningar
+    useful_life_years INTEGER NOT NULL CHECK (useful_life_years > 0),
+    disposed_date     TEXT,               -- sold/scrapped -> stop depreciating
+    note              TEXT,
+    created_at        TEXT NOT NULL
+);
+
+-- One row per asset and fiscal year, so a year can never be depreciated twice.
+CREATE TABLE depreciation (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    fixed_asset_id  INTEGER NOT NULL REFERENCES fixed_asset(id),
+    fiscal_year_end TEXT NOT NULL,
+    amount_ore      INTEGER NOT NULL,
+    verifikation_id INTEGER REFERENCES verifikation(id),
+    created_at      TEXT NOT NULL,
+    UNIQUE (fixed_asset_id, fiscal_year_end)
+);
+
 -- ----- Återkommande betalningar (recurring templates) ------------------------
 -- A subscription/rent/insurance you pay on a schedule. The template books NOTHING on
 -- its own: when an occurrence falls due the user CONFIRMS it (optionally adjusting the
@@ -674,6 +706,10 @@ _DEFAULT_CONFIG = {
     # Privat tillgång som förs in i verksamheten books to one of these against 2018.
     "account_forbrukningsinventarier": "5410",  # direktavdrag (under halva prisbasbeloppet)
     "account_inventarier": "1220",          # aktiveras + skrivs av (över halva prisbasbeloppet)
+    "account_avskrivning_inventarier": "7832",   # Avskrivningar på inventarier och verktyg
+    # Avskrivningstid när inget annat anges. 5 år (20 %/år) är den vanliga planmässiga
+    # avskrivningen för inventarier — ändra den om din verksamhet har en annan bedömning.
+    "default_avskrivningstid_ar": "5",
     # When Skatteverket's husavdrag payout differs from the claimed amount by no more
     # than this many ören, treat it as pure rounding and book the diff to 3740. A
     # larger underpayment is a partial payout (a follow-up receivable on the customer).
@@ -1189,6 +1225,36 @@ _MIGRATIONS: dict[int, str] = {
     42: """
         ALTER TABLE verifikation ADD COLUMN ext_ref TEXT;
         ALTER TABLE verifikation ADD COLUMN kommentar TEXT;
+    """,
+    # v43: anläggningsregister — capitalised assets and the years already written off.
+    43: """
+        INSERT OR IGNORE INTO config(key, value) VALUES ('account_avskrivning_inventarier', '7832');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('default_avskrivningstid_ar', '5');
+
+        CREATE TABLE IF NOT EXISTS fixed_asset (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaktion_id    INTEGER REFERENCES transaktion(id),
+            description       TEXT NOT NULL,
+            acquired_date     TEXT NOT NULL,
+            acquisition_ore   INTEGER NOT NULL,
+            asset_konto       INTEGER NOT NULL,
+            accumulated_konto INTEGER NOT NULL,
+            expense_konto     INTEGER NOT NULL,
+            useful_life_years INTEGER NOT NULL CHECK (useful_life_years > 0),
+            disposed_date     TEXT,
+            note              TEXT,
+            created_at        TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS depreciation (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            fixed_asset_id  INTEGER NOT NULL REFERENCES fixed_asset(id),
+            fiscal_year_end TEXT NOT NULL,
+            amount_ore      INTEGER NOT NULL,
+            verifikation_id INTEGER REFERENCES verifikation(id),
+            created_at      TEXT NOT NULL,
+            UNIQUE (fixed_asset_id, fiscal_year_end)
+        );
     """,
 }
 

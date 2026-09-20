@@ -261,6 +261,34 @@ def _build_router():
     def book_asset_purchase(book_id: str, body: sc.AssetPurchaseReq, request: Request):
         return fac(request).h_book_asset_purchase({"book_id": book_id}, body.model_dump(), {})
 
+    @r.get("/books/{book_id}/fixed-assets")
+    def list_fixed_assets(book_id: str, request: Request):
+        return fac(request).h_list_fixed_assets({"book_id": book_id}, {}, {})
+
+    @r.post("/books/{book_id}/fixed-assets", status_code=201)
+    def add_fixed_asset(book_id: str, body: sc.FixedAssetReq, request: Request):
+        return fac(request).h_add_fixed_asset({"book_id": book_id}, body.model_dump(), {})
+
+    @r.patch("/books/{book_id}/fixed-assets/{fixed_asset_id}")
+    def update_fixed_asset(book_id: str, fixed_asset_id: int,
+                           body: sc.FixedAssetUpdateReq, request: Request):
+        return fac(request).h_update_fixed_asset(
+            {"book_id": book_id, "fixed_asset_id": fixed_asset_id}, body.model_dump(), {})
+
+    @r.delete("/books/{book_id}/fixed-assets/{fixed_asset_id}")
+    def delete_fixed_asset(book_id: str, fixed_asset_id: int, request: Request):
+        return fac(request).h_delete_fixed_asset(
+            {"book_id": book_id, "fixed_asset_id": fixed_asset_id}, {}, {})
+
+    @r.get("/books/{book_id}/depreciations/proposal")
+    def depreciation_proposal(book_id: str, fiscal_year_end: str, request: Request):
+        return fac(request).h_depreciation_proposal(
+            {"book_id": book_id}, {}, {"fiscal_year_end": fiscal_year_end})
+
+    @r.post("/books/{book_id}/depreciations", status_code=201)
+    def book_depreciations(book_id: str, body: sc.DepreciationReq, request: Request):
+        return fac(request).h_book_depreciations({"book_id": book_id}, body.model_dump(), {})
+
     @r.get("/books/{book_id}/private-asset/preview")
     def private_asset_preview(book_id: str, request: Request, amount_ore: int = 0,
                               mode: str = "auto", business_pct_centi: int = 10000,
