@@ -1101,6 +1101,18 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       helper, and a källa-field that goes into the motivation. Tests pass (513);
       browser-smoke-tested (12 929 kr → 1930/2010 balanced, B9+B10 in the årsbokslut,
       0 kr in the result report).
+- [x] **Datumfält läses i svenskt format (frontend, 2026-09).** Chromium renders
+      `<input type="date">` in the BROWSER's locale, not the page's — on an en-US browser
+      a date shows as `04/11/2026`, which in a Swedish book is unreadable (4 november or
+      11 april?). Verified in Chromium: `lang="sv"` on the element, on its parent or on
+      the document changes nothing; only the browser's own UI language does, and the app
+      cannot set that. So every date input now echoes its value underneath in **ISO form**
+      (`2026-04-11`) — the Swedish standard and unambiguous in any locale.
+      `decorateDateInput`/`watchDateInputs` do it from a single **MutationObserver** on
+      `document.body` rather than at the ~40 call sites: every field is covered including
+      the ones line editors add at runtime, and the native element keeps its API (callers
+      still read `.value` and get `YYYY-MM-DD`), so no other code changes. `.date-hint` in
+      styles.css. Browser-smoke-tested (hint renders and follows the value on change).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

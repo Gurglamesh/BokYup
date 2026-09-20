@@ -222,3 +222,15 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .cam-video { width: 100%; max-height: 60vh; background: #000; border-radius: 8px; }
 .receipt-card { margin-bottom: 14px; }
 .receipt-view { max-width: 100%; border: 1px solid var(--line); border-radius: 8px; }
+
+/* Date fields echo their value in ISO form: Chromium renders the input itself in the
+   browser's locale (04/11/2026 on an en-US browser), which is ambiguous in a Swedish
+   book. See decorateDateInput() in app.js. */
+.date-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .02em;
+  opacity: .65;
+}

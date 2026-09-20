@@ -5329,6 +5329,45 @@ function editBtn(onClick) {
 }
 function wrap(label, input) { return el("div", {}, el("label", {}, label), input); }
 
+// ---- Datumfält i svenskt format ------------------------------------------
+// Chromium renders <input type="date"> in the BROWSER's locale, not the page's. On an
+// en-US browser that is 04/11/2026 — unreadable in a Swedish book, since it could be
+// 4 November or 11 April. lang="sv" on the element, its parent or the document does NOT
+// change it (verified in Chromium); only the browser's own UI language does, which the
+// app cannot set. So the picked date is echoed under every date field in ISO form —
+// which is the Swedish standard format and unambiguous in any locale.
+//
+// Done with a MutationObserver rather than at the ~40 call sites: every date input is
+// covered, including the ones line editors add at runtime, and the native element keeps
+// its API (callers still read `.value` and get "YYYY-MM-DD") so nothing else changes.
+function decorateDateInput(inp) {
+  if (inp.dataset.svDate) return;
+  inp.dataset.svDate = "1";
+  const hint = el("span", { class: "date-hint" });
+  const sync = () => { hint.textContent = inp.value || "—"; };
+  inp.addEventListener("input", sync);
+  inp.addEventListener("change", sync);
+  sync();
+  // The hint follows the input wherever it sits; a wrapper would break layouts that
+  // style the input's own parent.
+  if (inp.parentNode) inp.parentNode.insertBefore(hint, inp.nextSibling);
+}
+
+function decorateDateInputs(root) {
+  if (!root || root.nodeType !== 1) return;
+  if (root.matches && root.matches('input[type="date"]')) decorateDateInput(root);
+  for (const i of root.querySelectorAll ? root.querySelectorAll('input[type="date"]') : []) {
+    decorateDateInput(i);
+  }
+}
+
+function watchDateInputs() {
+  decorateDateInputs(document.body);
+  new MutationObserver((records) => {
+    for (const r of records) for (const n of r.addedNodes) decorateDateInputs(n);
+  }).observe(document.body, { childList: true, subtree: true });
+}
+
 // A <select> with a free-text filter above it (for long customer/article lists).
 // options: [{value, label}]. Returns {element, select}; the select keeps the native
 // API so callers can read .value / set .onchange as before.
@@ -5447,6 +5486,8 @@ async function afterConnect() {
   await loadBooks();
   renderHome();
 }
+
+watchDateInputs();
 
 (async function boot() {
   state.conn = loadConn();
