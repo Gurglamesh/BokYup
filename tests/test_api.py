@@ -2693,3 +2693,121 @@ class TestResultReportOnPostings:
         assert r["income_ore"] == 5000 and r["expense_ore"] == 3000
         by = {x["bas_konto"]: x["kind"] for x in r["by_category"]}
         assert by[8310] == "income" and by[8410] == "expense"
+
+
+class TestRebookNeverErasesTheEntry:
+    """Regressions for a rebook that reversed the entry and then failed to re-book it,
+    leaving the amount erased from the books (both halves netted to zero)."""
+
+    def _setup(self, client, book, *, paid_account="bank"):
+        wrong = client.post(f"/books/{book}/categories",
+                            json={"name": "Fel (3003)", "kind": "expense",
+                                  "bas_konto": 3003}).json()["id"]
+        right = client.post(f"/books/{book}/categories",
+                            json={"name": "Varor", "kind": "expense",
+                                  "bas_konto": 4010}).json()["id"]
+        tid = client.post(f"/books/{book}/expenses", json={
+            "category_id": wrong, "trans_date": "2026-02-25",
+            "lines": [{"rate_code": "25", "amount_ore": 402040}]}).json()["transaktion_id"]
+        client.post(f"/books/{book}/transaktioner/{tid}/pay",
+                    json={"payment_date": "2026-02-25", "paid_account": paid_account})
+        mlid = client.get(f"/books/{book}/transaktioner/{tid}/lines").json()[0]["id"]
+        return tid, mlid, right
+
+    def _hb(self, client, book):
+        return {a["bas_konto"]: a["saldo_ore"]
+                for a in client.get(f"/books/{book}/huvudbok").json()}
+
+    def test_rebook_of_a_purchase_paid_privately_keeps_the_settlement(self, client, book):
+        # 2018 Egna insättningar was dropped by the old whitelist, so the re-booking
+        # could not balance and the whole purchase vanished.
+        tid, mlid, right = self._setup(client, book, paid_account="privat")
+        r = client.post(f"/books/{book}/transaktioner/{tid}/rebook",
+                        json={"corrections": {str(mlid): {"category_id": right}}})
+        assert r.status_code == 201
+        hb = self._hb(client, book)
+        assert hb.get(3003, 0) == 0            # the wrong konto is cleared
+        assert hb[4010] == 321632              # ...and the cost really moved
+        assert hb[2640] == 80408               # moms still deducted
+        assert hb[2018] == -402040             # settlement preserved, NOT erased
+        assert sum(hb.values()) == 0
+
+    def test_rebook_into_a_locked_period_changes_nothing(self, client, book):
+        # The reversal is dated today and passes; the re-booking used to be dated back to
+        # the original and hit the lock AFTER the reversal had committed.
+        tid, mlid, right = self._setup(client, book)
+        before = self._hb(client, book)
+        client.post(f"/books/{book}/period-locks",
+                    json={"period_start": "2026-01-01", "period_end": "2026-12-31"})
+        r = client.post(f"/books/{book}/transaktioner/{tid}/rebook",
+                        json={"corrections": {str(mlid): {"category_id": right}}})
+        assert r.status_code == 409
+        # nothing reversed, nothing lost — the books are exactly as before
+        assert self._hb(client, book) == before
+        assert before[3003] == 321632
+
+    def test_both_halves_land_in_the_same_period(self, client, book):
+        tid, mlid, right = self._setup(client, book)
+        feb_before = client.get(f"/books/{book}/reports/result",
+                                params={"start": "2026-02-01", "end": "2026-02-28"}).json()
+        client.post(f"/books/{book}/transaktioner/{tid}/rebook",
+                    json={"corrections": {str(mlid): {"category_id": right}}})
+        vers = client.get(f"/books/{book}/verifikationer-full").json()
+        rattelse = [v for v in vers if v["text"].startswith("Rättelse")][0]
+        ombok = [v for v in vers if v["text"].startswith("Ombokföring")][0]
+        assert rattelse["ver_date"] == ombok["ver_date"], "paret måste netta i samma period"
+
+        # The original period is untouched — the original verifikation is immutable and
+        # the correction lands wholly in the period it was made in. Previously the
+        # re-booking was dated back here while the reversal was not, so this period ended
+        # up carrying the cost twice.
+        feb_after = client.get(f"/books/{book}/reports/result",
+                               params={"start": "2026-02-01", "end": "2026-02-28"}).json()
+        assert feb_after["by_category"] == feb_before["by_category"]
+
+        # In the correction's own period the amount moves off 3003 and onto 4010. 3003 is
+        # an INCOME konto — booking a cost there is exactly the mistake being corrected —
+        # so undoing it reads as +income while the cost appears on 4010. The two cancel:
+        # a pure reclassification must not change any period's result.
+        korr = client.get(f"/books/{book}/reports/result",
+                          params={"start": ombok["ver_date"], "end": ombok["ver_date"]}).json()
+        by = {x["bas_konto"]: x["amount_ore"] for x in korr["by_category"]}
+        assert by[3003] == 321632 and by[4010] == 321632
+        assert korr["result_ore"] == 0
+
+    def test_an_imbalanced_rebook_is_refused_before_reversing(self, client, book):
+        tid, mlid, right = self._setup(client, book)
+        before = self._hb(client, book)
+        # a bogus konto id cannot be corrected to -> refused, nothing touched
+        r = client.post(f"/books/{book}/transaktioner/{tid}/rebook",
+                        json={"corrections": {str(mlid): {"category_id": 999999}}})
+        assert r.status_code in (400, 404, 409)
+        assert self._hb(client, book) == before
+
+
+class TestArsbokslutPriorYearResult:
+    """A result-konto posting dated before the fiscal year sits in the balance sheet
+    through its counter-posting; its result side belongs in eget kapital."""
+
+    def test_earlier_years_result_is_carried_into_eget_kapital(self, client, book):
+        client.post(f"/books/{book}/verifikationer/manual", json={
+            "ver_date": "2025-12-20", "text": "Bankavgift 2025",
+            "postings": [{"bas_konto": 6570, "debit_ore": 1600, "credit_ore": 0},
+                         {"bas_konto": 1930, "debit_ore": 0, "credit_ore": 1600}]})
+        ab = client.get(f"/books/{book}/reports/arsbokslut",
+                        params={"start": "2026-01-01", "end": "2026-12-31"}).json()
+        assert ab["tidigare_resultat_ore"] == -1600      # last year's loss
+        assert ab["diff_ore"] == 0 and ab["balanserar"] is True
+        assert ab["arets_resultat_ore"] == 0            # nothing happened in 2026
+        b10 = ab["balans"]["B10"]
+        assert any(a["name"].startswith("Balanserat resultat") for a in b10["accounts"])
+
+    def test_the_first_year_is_unaffected(self, client, book):
+        client.post(f"/books/{book}/verifikationer/manual", json={
+            "ver_date": "2026-03-01", "text": "Bankavgift",
+            "postings": [{"bas_konto": 6570, "debit_ore": 1600, "credit_ore": 0},
+                         {"bas_konto": 1930, "debit_ore": 0, "credit_ore": 1600}]})
+        ab = client.get(f"/books/{book}/reports/arsbokslut",
+                        params={"start": "2026-01-01", "end": "2026-12-31"}).json()
+        assert ab["tidigare_resultat_ore"] == 0
+        assert ab["balanserar"] is True and ab["arets_resultat_ore"] == -1600

@@ -2145,7 +2145,8 @@ class BookOps:
                                  (row["verifikation_id"],)).fetchone() is not None
 
     def rebook_transaktion(self, transaktion_id: int, corrections: dict,
-                           reason: str = "Rättat baskonto") -> dict:
+                           reason: str = "Rättat baskonto",
+                           reg_date: Optional[str] = None) -> dict:
         """
         Correct the BAS-konton / moms of a booked PLAIN income or expense by re-picking
         the category (and optionally the moms rate) per line, WITHOUT retyping the
@@ -2196,17 +2197,15 @@ class BookOps:
             corrected.append({"category_id": new_cat, "rate_code": new_rate,
                               "ex": ex, "moms": moms, "inc": inc})
 
-        ver_date = self.conn.execute("SELECT ver_date FROM verifikation WHERE id=?",
-                                     (vid,)).fetchone()["ver_date"]
-        # 1) reverse the current booking (rättelse: negates postings + report moms_lines).
-        self.reverse_verifikation(vid, reason)
-        # 2) re-book: keep the settlement postings (bank / öresavrundning), rebuild the
-        #    income/expense + moms postings from the corrected lines.
-        bank = self._sys_account("account_bank")
-        ores = self._sys_account("account_ores_kronutjamning")
-        keep = [(p["bas_konto"], p["amount_ore"], p["text"]) for p in self.conn.execute(
-            "SELECT bas_konto, amount_ore, text FROM posting WHERE verifikation_id=?", (vid,))
-            if p["bas_konto"] in (bank, ores)]
+        # BOTH halves are dated the day the correction is made — the same date
+        # `reverse_verifikation` uses. Dating the re-booking back to the original's date
+        # (what this used to do) put the reversal in one period and the re-booking in
+        # another, which double-counted the cost in the original period AND walked
+        # straight into a PeriodLocked when that period had been closed by a filed
+        # momsdeklaration — after the reversal had already committed.
+        korr_date = reg_date or _now()[:10]
+
+        # Build the corrected income/expense + moms postings.
         op = 1 if t["direction"] == "in" else -1        # expense debits, income credits
         fb = t["category_id"]
         inc_agg: dict[int, int] = {}
@@ -2214,13 +2213,32 @@ class BookOps:
             cat = cl["category_id"] if cl["category_id"] is not None else fb
             cl["bas_konto"] = self._category_konto(cat)
             inc_agg[cl["bas_konto"]] = inc_agg.get(cl["bas_konto"], 0) + cl["ex"]
-        postings = list(keep)
-        for konto, ex in sorted(inc_agg.items()):
-            postings.append((konto, op * ex, "omkontering"))
         moms_agg: dict[str, int] = {}
         for cl in corrected:
             if cl["moms"]:
                 moms_agg[cl["rate_code"]] = moms_agg.get(cl["rate_code"], 0) + cl["moms"]
+
+        # Carry over EVERY posting the ombokföring does not itself recompute — that is the
+        # settlement side, whatever it happens to be: bank, 2018 egna insättningar (paid
+        # with private money), leverantörsskuld, öresavrundning, husavdragsfordran …
+        # Whitelisting only bank+öresavrundning used to DROP the settlement posting of a
+        # purchase paid privately, so the new verifikation could not balance — and since
+        # the reversal had already been committed, the entry was left erased from the
+        # books. The konton that ARE recomputed are the old and new category konton plus
+        # every moms konto.
+        recomputed = set(inc_agg)
+        for ln in orig:
+            cat = ln["category_id"] if ln["category_id"] is not None else fb
+            if cat is not None:
+                recomputed.add(self._category_konto(cat))
+        recomputed |= self._moms_konton()
+        keep = [(p["bas_konto"], p["amount_ore"], p["text"]) for p in self.conn.execute(
+            "SELECT bas_konto, amount_ore, text FROM posting WHERE verifikation_id=?", (vid,))
+            if p["bas_konto"] not in recomputed]
+
+        postings = list(keep)
+        for konto, ex in sorted(inc_agg.items()):
+            postings.append((konto, op * ex, "omkontering"))
         for rate, moms in sorted(moms_agg.items()):
             if t["direction"] == "in":
                 postings.append((self._sys_account("account_ingaende_moms"), moms,
@@ -2228,10 +2246,26 @@ class BookOps:
             elif rate in _UTG_MOMS_KEY:
                 postings.append((self._sys_account(_UTG_MOMS_KEY[rate]), -moms,
                                  f"utgående moms {rate}%"))
+
+        # Check the re-booking balances BEFORE reversing anything. The reversal commits on
+        # its own, so a failure after it would leave the entry reversed and never re-booked
+        # — the books would silently lose the whole amount.
+        imbalance = sum(a for _, a, _ in postings)
+        if imbalance != 0:
+            raise ImbalancedPostings(
+                f"Ombokföringen balanserar inte (differens {imbalance} öre) — "
+                "inget har ändrats. Rätta verifikatet manuellt istället.")
+        if self.is_period_locked(korr_date):
+            raise PeriodLocked(
+                f"Perioden som innehåller {korr_date} är låst — inget har ändrats. "
+                "Lås upp perioden eller rätta i en öppen period.")
+
+        # 1) reverse the current booking (rättelse: negates postings + report moms_lines).
+        self.reverse_verifikation(vid, reason, reg_date=korr_date)
         with self.conn:
             new_vid, new_num = self._post_verifikation(
-                ver_date, _now()[:10], f"Ombokföring (rättat baskonto) av ver {vid}: {reason}",
-                postings)
+                korr_date, _now()[:10],
+                f"Ombokföring (rättat baskonto) av ver {vid}: {reason}", postings)
             # Report clone with the CORRECTED lines (positive) so the momsdeklaration +
             # result report attribute the corrected accounts/moms to the new verifikation.
             src = self.conn.execute(
@@ -2242,7 +2276,7 @@ class BookOps:
                 "trans_date, status, verifikation_id, note, created_at) "
                 "VALUES (?,?,?,?,?, 'paid', ?, ?, ?)",
                 (src["direction"], src["category_id"], src["supplier_id"], src["customer_id"],
-                 ver_date, new_vid, "ombokföring", _now()))
+                 korr_date, new_vid, "ombokföring", _now()))
             rid = cur.lastrowid
             for cl in corrected:
                 self.conn.execute(
@@ -4713,6 +4747,12 @@ class BookOps:
         for r in rows:
             moms_by_rate[r["rate_code"]] = moms_by_rate.get(r["rate_code"], 0) + r["moms_ore"]
         return ex, moms_by_rate, inc
+
+    def _moms_konton(self) -> set:
+        """Every BAS-konto the moms side of a booking can land on."""
+        keys = ("account_ingaende_moms", "account_ing_moms_utland",
+                *_UTG_MOMS_KEY.values(), *_UTG_MOMS_OMVAND_KEY.values())
+        return {self._sys_account(k) for k in keys}
 
     def _reverse_charge_moms(self, transaktion_id: int) -> dict[str, int]:
         """{rate_code: moms} for the transaktion's omvänd-betalningsskyldighet lines only

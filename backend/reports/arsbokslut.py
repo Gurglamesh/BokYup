@@ -16,7 +16,9 @@ Sign conventions (posting.amount_ore is signed: debit > 0, credit < 0):
   * Income (R1–R4)            display = −saldo           (credit-positive)
   * Costs (R5–R10)            display = saldo            (debit-positive)
 Balansräkningen use the CUMULATIVE saldo up to the fiscal year end (UB);
-resultaträkningen use the movement within the fiscal year.
+resultaträkningen use the movement within the fiscal year. Earlier years' accumulated
+result is added to eget kapital (B10) — it is already in the balance sheet through its
+counter-postings, so leaving it out made the two summa boxes differ by that amount.
 """
 
 from __future__ import annotations
@@ -126,6 +128,15 @@ def forenklat_arsbokslut(conn: sqlite3.Connection, fy_start: str, fy_end: str) -
         "JOIN account a ON a.bas_konto = p.bas_konto "
         "WHERE v.ver_date BETWEEN ? AND ? AND p.bas_konto >= 3000 "
         "GROUP BY p.bas_konto ORDER BY p.bas_konto", (fy_start, fy_end)).fetchall()
+    # Result of EARLIER years. The balansräkning is cumulative, so a result-konto posting
+    # dated before this fiscal year already sits in the balance sheet through its
+    # counter-posting — but its result side is not in R11. For an enskild näringsidkare
+    # previous years' results are rolled into eget kapital, so that is where it belongs;
+    # without it the balansräkning fails to reconcile by exactly that amount.
+    tidigare_resultat = -(conn.execute(
+        "SELECT COALESCE(SUM(p.amount_ore), 0) "
+        "FROM posting p JOIN verifikation v ON v.id = p.verifikation_id "
+        "WHERE v.ver_date < ? AND p.bas_konto >= 3000", (fy_start,)).fetchone()[0])
 
     def _box(label_map):
         return {b: {"box": b, "label": label_map[b], "value_ore": 0, "accounts": []}
@@ -178,10 +189,16 @@ def forenklat_arsbokslut(conn: sqlite3.Connection, fy_start: str, fy_end: str) -
         for konto, name, saldo in moms_accounts:
             _add(balans, moms_box, konto, name, sign * saldo)
 
-    # Eget kapital includes the year's result (so the balansräkning reconciles).
+    # Eget kapital includes the year's result AND earlier years' accumulated result, so
+    # the balansräkning reconciles for any fiscal year, not only a book's first one.
     balans["B10"]["value_ore"] += arets_resultat
     balans["B10"]["accounts"].append(
         {"bas_konto": None, "name": "Årets resultat (R11)", "amount_ore": arets_resultat})
+    if tidigare_resultat:
+        balans["B10"]["value_ore"] += tidigare_resultat
+        balans["B10"]["accounts"].append(
+            {"bas_konto": None, "name": "Balanserat resultat (tidigare år)",
+             "amount_ore": tidigare_resultat})
 
     summa_tillgangar = sum(balans[b]["value_ore"] for b in _ASSET_BOXES)
     summa_ek_skulder = sum(balans[b]["value_ore"] for b in _EK_SKULD_BOXES)
@@ -203,6 +220,7 @@ def forenklat_arsbokslut(conn: sqlite3.Connection, fy_start: str, fy_end: str) -
         "resultat": resultat,
         "balans": balans,
         "arets_resultat_ore": arets_resultat,
+        "tidigare_resultat_ore": tidigare_resultat,
         "summa_tillgangar_ore": summa_tillgangar,
         "summa_ek_skulder_ore": summa_ek_skulder,
         "diff_ore": summa_tillgangar - summa_ek_skulder,

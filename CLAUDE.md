@@ -1014,6 +1014,34 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       Tester passerar (488), inkl. nya regressioner: manuellt verifikat + avskrivning syns
       nu OCH matchar årsbokslutets `arets_resultat_ore`, rättelse nettar ut, 83xx/84xx
       delas rätt.
+- [x] **KRITISK BUGGFIX: ombokföring kunde radera posten ur böckerna (2026-09).**
+      Rapporterat från verkligt bruk: "Rätta baskonto" lämnade **bara** en rättelse — ingen
+      ombokföring — så inköpet nollades och beloppet försvann helt. `rebook_transaktion`
+      anropade `reverse_verifikation` (som **committar direkt**) och byggde därefter den nya
+      verifikationen; misslyckades den var rättelsen redan ett faktum. TVÅ vägar dit, båda
+      reproducerade:
+      (1) `keep` vitlistade bara bank + öresavrundning, så **avräkningsposten för ett inköp
+      betalt med privat insättning (2018)** föll bort → ImbalancedPostings. Nu behålls
+      ALLA konteringar som ombokföringen inte själv räknar om (bank, 2018, leverantörsskuld,
+      öresavrundning …); de omräknade är gamla + nya kategorikonton plus `_moms_konton()`.
+      (2) Rättelsen dateras **idag** men ombokföringen daterades till **originalets** datum —
+      är den perioden låst (momsdeklaration inlämnad) kastas PeriodLocked efter att
+      rättelsen committats. Dessutom dubbelräknades kostnaden i originalperioden när det
+      lyckades. Båda halvorna dateras nu till korrigeringsdagen (`reg_date`, default idag),
+      så paret alltid nettar i SAMMA period.
+      Dessutom **förhandsvalideras** balans och periodlås INNAN något backas — misslyckas
+      det ändras ingenting alls. Regressionstester: privat insättning bevaras, låst period
+      ger 409 med böckerna orörda, båda halvorna samma datum + resultatneutral omklassning.
+- [x] **Årsbokslutet: tidigare års resultat bärs till eget kapital (2026-09).** Rapporterat
+      som "Balansräkningen balanserar inte — differens −16,00 kr". Balansräkningen är
+      KUMULATIV men resultaträkningen bara årets rörelse, så en kontering på ett
+      resultatkonto **daterad före räkenskapsåret** låg redan i balansräkningen via sin
+      motpost medan resultatsidan inte fanns i R11 — differensen blev exakt det beloppet.
+      För en enskild näringsidkare rullas tidigare års resultat in i eget kapital, så B10
+      innehåller nu även **"Balanserat resultat (tidigare år)"** (`tidigare_resultat_ore`).
+      Därmed stämmer de två summarutorna för VILKET räkenskapsår som helst, inte bara
+      bokens första. Tester: ett 2025-daterat verifikat ger balanserar=True med beloppet i
+      B10; första året oförändrat.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
