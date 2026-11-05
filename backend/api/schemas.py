@@ -588,6 +588,15 @@ class CreateInvoiceReq(BaseModel):
     support_enabled: bool = True                # gratis distanssupport: earn time + print the note
 
 
+class CancelInvoiceReq(BaseModel):
+    """Only a husavdrag follow-up invoice reads these: makulering books the shortfall
+    off 1510, and the user picks where it lands (1513 back to Skatteverket, or a cost
+    konto if the firm absorbs it)."""
+    write_off_konto: Optional[int] = None
+    date: Optional[str] = None
+    reason: Optional[str] = None
+
+
 class ReceiptUploadReq(BaseModel):
     image_base64: str             # the raw image bytes, base64-encoded
     mime: str                     # e.g. 'image/jpeg', 'image/png'

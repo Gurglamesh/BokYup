@@ -854,8 +854,11 @@ def _build_router():
         return fac(request).h_get_invoice({"book_id": book_id, "invoice_id": invoice_id}, {}, {})
 
     @r.post("/books/{book_id}/invoices/{invoice_id}/cancel", status_code=201)
-    def cancel_invoice(book_id: str, invoice_id: int, request: Request):
-        return fac(request).h_cancel_invoice({"book_id": book_id, "invoice_id": invoice_id}, {}, {})
+    def cancel_invoice(book_id: str, invoice_id: int, request: Request,
+                       body: sc.CancelInvoiceReq | None = None):
+        return fac(request).h_cancel_invoice(
+            {"book_id": book_id, "invoice_id": invoice_id},
+            body.model_dump() if body else {}, {})
 
     @r.post("/books/{book_id}/invoices/{invoice_id}/pay", status_code=201)
     def pay_invoice(book_id: str, invoice_id: int, body: sc.PayInvoiceReq, request: Request):

@@ -1088,6 +1088,36 @@ class TestInvoices:
         assert paid.status_code == 201
         assert paid.json()["outstanding_ore"] == 0
 
+    def test_makulera_followup_via_api(self, client, book):
+        cat, kid = self._setup(client, book)
+        inv = client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": cat, "invoice_date": "2026-03-01",
+            "due_date": "2026-03-31",
+            "lines": [{"description": "Städ", "quantity_centi": 100, "unit_price_ore": 1000000,
+                       "rate_code": "25", "reduction_type": "rut"}],
+            "recipients": [{"customer_id": kid, "share_pct": 100}]}).json()
+        client.post(f"/books/{book}/transaktioner/{inv['transaktion_id']}/pay",
+                    json={"payment_date": "2026-03-10"})
+        claim_id = [x for x in client.get(f"/books/{book}/invoices").json()
+                    if x["id"] == inv["invoice_id"]][0]["rut_claim_id"]
+        H = inv["rut_total_ore"] + inv["rot_total_ore"]
+        fid = client.post(f"/books/{book}/rut/{claim_id}/skatteverket-payment",
+                          json={"payment_date": "2026-04-15", "received_ore": H - 50000,
+                                "mode": "partial"}).json()["shortfall_invoice_id"]
+
+        # A konto is required — without one nothing happens.
+        assert client.post(f"/books/{book}/invoices/{fid}/cancel", json={}).status_code == 400
+
+        r = client.post(f"/books/{book}/invoices/{fid}/cancel",
+                        json={"write_off_konto": 6351, "date": "2026-05-01"})
+        assert r.status_code == 201
+        ver = [v for v in client.get(f"/books/{book}/verifikationer-full").json()
+               if v["id"] == r.json()["verifikation_id"]][0]
+        assert {p["bas_konto"]: p["amount_ore"] for p in ver["postings"]} == {
+            6351: 50000, 1510: -50000}
+        row = [x for x in client.get(f"/books/{book}/invoices").json() if x["id"] == fid][0]
+        assert row["state"] == "cancelled"
+
     def test_skatteverket_reference_and_kvittens(self, client, book):
         import base64
         cat, kid = self._setup(client, book)

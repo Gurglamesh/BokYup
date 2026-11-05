@@ -1024,7 +1024,12 @@ class AppFacade:
         return self._ops(p["book_id"]).get_invoice(int(p["invoice_id"]))
 
     def h_cancel_invoice(self, p, b, q):
-        return self._ops(p["book_id"]).cancel_invoice(int(p["invoice_id"]))
+        # The three fields are only read for a husavdrag follow-up invoice, whose
+        # makulering has to post a counter-entry against 1510.
+        b = b or {}
+        return self._ops(p["book_id"]).cancel_invoice(
+            int(p["invoice_id"]), write_off_konto=b.get("write_off_konto"),
+            date=b.get("date"), reason=b.get("reason"))
 
     def h_pay_invoice(self, p, b, q):
         return self._ops(p["book_id"]).pay_invoice(

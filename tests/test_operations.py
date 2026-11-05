@@ -318,6 +318,62 @@ class TestRUT:
         with pytest.raises(InvalidState):
             ops.credit_invoice(fi_id)
 
+    def test_makulera_followup_writes_the_shortfall_off_to_a_cost(self, ops: BookOps):
+        # "Jag står för mellanskillnaden": the customer is not billed after all, so the
+        # 1510 receivable must go — but the moms stays where it was booked at the sale.
+        _, claim_id, H = self._rut_invoice(ops)
+        sk = ops.register_rut_skatteverket_payment(
+            claim_id, "2026-06-01", received_ore=H - 50000, mode="partial")
+        fi_id = sk["shortfall_invoice_id"]
+        res = ops.cancel_invoice(fi_id, write_off_konto=6351, date="2026-07-01",
+                                 reason="Står för mellanskillnaden")
+        rows = {p["bas_konto"]: p["amount_ore"] for p in _postings(ops, res["verifikation_id"])}
+        assert _balance(ops, res["verifikation_id"]) == 0
+        assert rows[6351] == 50000 and rows[1510] == -50000
+        assert 2610 not in rows                 # moms untouched
+        assert res["claim_reopened"] is False
+        fi = ops.get_invoice(fi_id)
+        assert fi["cancelled_at"] and fi["state"] == "cancelled"
+        claim = ops.conn.execute("SELECT * FROM rut_claim WHERE id=?", (claim_id,)).fetchone()
+        assert claim["shortfall_invoice_id"] is None
+        assert claim["state"] == "skatteverket_paid"   # the payout itself still stands
+
+    def test_makulera_followup_back_to_1513_reopens_the_claim(self, ops: BookOps):
+        # Skatteverket is expected to pay after all (or the payout was classified as a
+        # partial by mistake): resultatneutral, and the claim goes back on the worklist.
+        _, claim_id, H = self._rut_invoice(ops)
+        sk = ops.register_rut_skatteverket_payment(
+            claim_id, "2026-06-01", received_ore=H - 50000, mode="partial")
+        res = ops.cancel_invoice(sk["shortfall_invoice_id"], write_off_konto=1513)
+        rows = {p["bas_konto"]: p["amount_ore"] for p in _postings(ops, res["verifikation_id"])}
+        assert _balance(ops, res["verifikation_id"]) == 0
+        assert rows[1513] == 50000 and rows[1510] == -50000
+        assert res["claim_reopened"] is True
+        claim = ops.conn.execute("SELECT * FROM rut_claim WHERE id=?", (claim_id,)).fetchone()
+        assert claim["state"] == "customer_paid" and claim["shortfall_invoice_id"] is None
+
+    def test_makulera_followup_needs_a_konto_and_refuses_1510(self, ops: BookOps):
+        _, claim_id, H = self._rut_invoice(ops)
+        sk = ops.register_rut_skatteverket_payment(
+            claim_id, "2026-06-01", received_ore=H - 50000, mode="partial")
+        fi_id = sk["shortfall_invoice_id"]
+        with pytest.raises(ValueError, match="Ange vilket konto"):
+            ops.cancel_invoice(fi_id)
+        with pytest.raises(InvalidState, match="samma kundfordran"):
+            ops.cancel_invoice(fi_id, write_off_konto=1510)
+        with pytest.raises(ValueError):
+            ops.cancel_invoice(fi_id, write_off_konto=9999)
+        assert ops.get_invoice(fi_id)["cancelled_at"] is None   # nothing happened
+
+    def test_a_paid_followup_cannot_be_makulerad(self, ops: BookOps):
+        _, claim_id, H = self._rut_invoice(ops)
+        sk = ops.register_rut_skatteverket_payment(
+            claim_id, "2026-06-01", received_ore=H - 50000, mode="partial")
+        fi_id = sk["shortfall_invoice_id"]
+        ops.pay_invoice(fi_id, date="2026-07-01")
+        with pytest.raises(InvalidState, match="betalningar"):
+            ops.cancel_invoice(fi_id, write_off_konto=6351)
+
     def test_skatteverket_overpaid_beyond_tolerance_refused(self, ops: BookOps):
         _, claim_id, H = self._rut_invoice(ops)
         with pytest.raises(InvalidState):

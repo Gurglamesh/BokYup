@@ -4185,21 +4185,29 @@ class BookOps:
             "WHERE invoice_id=? ORDER BY id", (invoice_id,)).fetchall()]
         return inv
 
-    def cancel_invoice(self, invoice_id: int) -> dict:
+    def cancel_invoice(self, invoice_id: int, *,
+                       write_off_konto: Optional[int] = None,
+                       date: Optional[str] = None,
+                       reason: Optional[str] = None) -> dict:
         """
         Makulera (void) an UNBOOKED invoice. Only allowed while the underlying income
         is still pending (kontantmetod: nothing has hit the ledger). The pending
         transaktion + its moms_lines/rut_claim are removed so it is no longer payable;
         the invoice_number stays reserved (a gap-free series) and the invoice row is
         kept and flagged makulerad. A booked invoice must be credited instead.
+
+        A **husavdrag follow-up invoice** is different and takes the three keyword
+        arguments: see `_cancel_husavdrag_shortfall_invoice`.
         """
         inv = self.conn.execute(
-            "SELECT transaktion_id, cancelled_at, credited_at FROM invoice WHERE id=?",
-            (invoice_id,)).fetchone()
+            "SELECT * FROM invoice WHERE id=?", (invoice_id,)).fetchone()
         if inv is None:
             raise KeyError(f"No invoice {invoice_id}")
         if inv["cancelled_at"] or inv["credited_at"]:
             raise InvalidState("Invoice is already makulerad/krediterad")
+        if inv["husavdrag_shortfall_ore"]:
+            return self._cancel_husavdrag_shortfall_invoice(
+                inv, write_off_konto=write_off_konto, date=date, reason=reason)
         tid = inv["transaktion_id"]
         t = self.conn.execute("SELECT verifikation_id FROM transaktion WHERE id=?",
                               (tid,)).fetchone() if tid else None
@@ -4228,6 +4236,71 @@ class BookOps:
                 self.conn.execute("DELETE FROM rut_claim WHERE transaktion_id=?", (tid,))
                 self.conn.execute("DELETE FROM transaktion WHERE id=?", (tid,))
         return {"invoice_id": invoice_id, "cancelled": True}
+
+    # A husavdrag follow-up invoice is the only faktura whose makulering has to POST
+    # something. An ordinary unbooked faktura has never touched the ledger, so voiding
+    # it is a pure document act. The follow-up is the opposite: it documents a 1510
+    # receivable that the Skatteverket-payment verifikation already created by moving
+    # the unpaid husavdrag off 1513. Flagging the document void without touching the
+    # ledger would leave that receivable standing with no document behind it.
+    #
+    # So makulering books the counter-entry, and the user says where the amount goes —
+    # the app will not guess, because the two realistic answers differ in kind:
+    #
+    #   * BACK TO 1513 — Skatteverket is expected to pay after all, or the payout was
+    #     classified as a partial by mistake. Resultatneutral; the claim is reopened.
+    #   * WRITTEN OFF (6351) — "jag står för mellanskillnaden". This is a cost, and it
+    #     does NOT reduce the utgående moms: the moms was booked on the full labour
+    #     price at the sale, and lowering it afterwards is a price reduction that needs
+    #     a kreditfaktura on the ORIGINAL invoice. That is a question for a revisor, so
+    #     this entry deliberately leaves moms alone and says so.
+    def _cancel_husavdrag_shortfall_invoice(self, inv, *, write_off_konto, date, reason) -> dict:
+        if self.conn.execute("SELECT 1 FROM invoice_event WHERE invoice_id=? LIMIT 1",
+                             (inv["id"],)).fetchone():
+            raise InvalidState(
+                "Uppföljningsfakturan har betalningar — den kan inte makuleras. "
+                "Betala tillbaka beloppet i stället om det blev fel.")
+        if write_off_konto is None:
+            raise ValueError(
+                "Ange vilket konto mellanskillnaden ska bokas på när uppföljnings"
+                "fakturan makuleras (t.ex. 1513 tillbaka till Skatteverket, eller "
+                "6351 om du står för den själv)")
+        konto = int(write_off_konto)
+        if not (1000 <= konto <= 8999):
+            raise ValueError(f"Konto {konto} är inte ett giltigt BAS-konto")
+        amount = inv["husavdrag_shortfall_ore"]
+        date = date or _now()[:10]
+        kundfordran = self._sys_account("account_kundfordran")
+        if konto == kundfordran:
+            raise InvalidState(
+                "Mellanskillnaden kan inte bokas tillbaka på samma kundfordran — "
+                "välj 1513 (Skatteverket) eller ett kostnadskonto")
+        self.ensure_account(konto, self._account_name(konto)
+                            or _bas_catalog_name(konto) or f"Konto {konto}")
+        text = f"Makulering uppföljningsfaktura {inv['invoice_number']}" + (
+            f" – {reason.strip()}" if reason and reason.strip() else "")
+        postings = [(konto, amount, "makulerad husavdragsfordran"),
+                    (kundfordran, -amount, "kvitta kundfordran")]
+        with self.conn:
+            vid, number = self._post_verifikation(date, _now()[:10], text, postings)
+            self.conn.execute("UPDATE invoice SET cancelled_at=? WHERE id=?",
+                              (_now(), inv["id"]))
+            # The claim must stop pointing at a void document. Sending the amount back
+            # to 1513 also reopens the claim, so the RUT worklist shows it as still
+            # awaiting Skatteverket.
+            back_to_skv = konto == self._sys_account("account_rut_fordran")
+            if back_to_skv:
+                self.conn.execute(
+                    "UPDATE rut_claim SET state='customer_paid', shortfall_invoice_id=NULL, "
+                    "skatteverket_payment_date=NULL, skatteverket_received_ore=NULL "
+                    "WHERE shortfall_invoice_id=?", (inv["id"],))
+            else:
+                self.conn.execute(
+                    "UPDATE rut_claim SET shortfall_invoice_id=NULL WHERE shortfall_invoice_id=?",
+                    (inv["id"],))
+        return {"invoice_id": inv["id"], "cancelled": True, "verifikation_id": vid,
+                "ver_number": number, "amount_ore": amount, "bas_konto": konto,
+                "claim_reopened": back_to_skv}
 
     def update_invoice(self, invoice_id: int, *, customer_id: int,
                        category_id: Optional[int] = None, invoice_date: str, due_date: str,

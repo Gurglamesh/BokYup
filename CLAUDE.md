@@ -1133,6 +1133,30 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       underlag view — `receiptCard` factored out of `receiptsFlow` and reused — with a file
       picker + originalformat (papper/digitalt). Tests pass (521); browser-smoke-tested
       (PDF uploaded onto an egenupprättat verifikat, count in the grundbok, delete → 409).
+- [x] **Makulera husavdrag-uppföljningsfaktura (2026-11).** The follow-up invoice created
+      when Skatteverket pays less husavdrag than claimed could only be PAID — makulera was
+      not offered, and `cancel_invoice` would have flagged it void while leaving the 1510
+      receivable standing with no document behind it. It is the one faktura whose
+      makulering has to **post** something: an ordinary unbooked faktura never touched the
+      ledger, but this one documents a receivable the Skatteverket-payment verifikation
+      already created by moving the unpaid husavdrag off 1513.
+      `cancel_invoice` now routes a shortfall invoice to
+      `_cancel_husavdrag_shortfall_invoice`, which books `<konto> debet / 1510 kredit` in
+      one balanced verifikation and **requires the user to name the konto** — the app does
+      not guess, because the two realistic answers differ in kind. **1513** = Skatteverket
+      is expected to pay after all, or the payout was classified as a partial by mistake:
+      resultatneutral, and the claim is set back to `customer_paid` so it reappears on the
+      RUT worklist. **6351** = "jag står för mellanskillnaden": a cost that deliberately
+      does **not** touch the moms — it was booked on the full labour price at the sale, and
+      lowering it afterwards is a price reduction needing a kreditfaktura on the ORIGINAL
+      invoice, which is a revisor question. The UI says so in the dialog. Guards: a konto is
+      required (→400), 1510 itself is refused, a non-BAS konto is refused, and a follow-up
+      with any payment recorded cannot be makulerad (refund instead). `rut_claim.
+      shortfall_invoice_id` is cleared so no claim points at a void document. API
+      `POST /invoices/{id}/cancel` gained `CancelInvoiceReq` (write_off_konto/date/reason;
+      ignored for an ordinary faktura). UI: a **Makulera** button on unpaid follow-ups
+      opening a konto chooser with the moms warning. Tests pass (526); browser-smoke-tested
+      (6351 500,00 / 1510 −500,00 balanced, state cancelled).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

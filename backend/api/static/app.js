@@ -2230,6 +2230,9 @@ const SECTION_RENDERERS = {
         if (iv.state === "pending" || iv.state === "partial") {
           actions.appendChild(act("Betala", "", () => payInvoiceFlow(iv)));
         }
+        if (iv.state === "pending" && iv.paid_ore === 0) {
+          actions.appendChild(act("Makulera", "ghost danger", () => makuleraShortfallFlow(iv)));
+        }
       } else if (isRut) {
         // RUT/ROT invoices: first book the customer payment, then (once that's done)
         // book the Skatteverket husavdrag payout — the button stays here until it lands.
@@ -5325,6 +5328,64 @@ async function makuleraInvoiceFlow(iv) {
   if (!f) return;
   await api("POST", `/books/${bid()}/invoices/${iv.id}/cancel`);
   toast(`Faktura ${iv.invoice_number} makulerad`);
+  renderWorkspace();
+}
+
+// Makulera a HUSAVDRAG FOLLOW-UP invoice. Unlike an ordinary faktura, this one has a
+// ledger side: the Skatteverket-payment verifikation already moved the unpaid husavdrag
+// from 1513 to 1510, and this document is what stands behind that receivable. Voiding it
+// therefore has to book the counter-entry, and the user decides where the amount goes.
+async function makuleraShortfallFlow(iv) {
+  const amount = toKr(iv.husavdrag_shortfall_ore);
+  const choice = el("select", {},
+    el("option", { value: "skv" }, "Tillbaka till Skatteverket (1513) — de ska betala ändå"),
+    el("option", { value: "writeoff" }, "Jag står för mellanskillnaden (6351) — kostnad"),
+    el("option", { value: "other" }, "Annat konto…"));
+  const konto = el("input", { type: "text", style: "width:110px", placeholder: "konto" });
+  const kontoWrap = wrap("Konto", konto);
+  const date = el("input", { type: "date", value: new Date().toISOString().slice(0, 10) });
+  const reason = el("input", { type: "text", placeholder: "valfritt" });
+  const note = el("div", { class: "muted", style: "margin-top:8px;font-size:12px" });
+  const sync = () => {
+    kontoWrap.style.display = choice.value === "other" ? "" : "none";
+    note.textContent = choice.value === "skv"
+      ? "Resultatneutralt. Fordran flyttas tillbaka till 1513 och RUT-ärendet öppnas "
+        + "igen i listan \u201dInväntar husavdrag från Skatteverket\u201d."
+      : choice.value === "writeoff"
+        ? "Bokförs som en kostnad. OBS: momsen ändras INTE av den här posten — den "
+          + "bokfördes på hela arbetspriset vid försäljningen, och att sänka den i "
+          + "efterhand är en prisnedsättning som kräver en kreditfaktura på "
+          + "ursprungsfakturan. Stäm av med en revisor om du vill ha ned momsen."
+        : "Beloppet debiteras kontot du anger och kvittas mot kundfordran 1510.";
+  };
+  choice.onchange = sync;
+
+  const body = $("#modal-body");
+  $("#modal-title").textContent = `Makulera uppföljningsfaktura ${iv.invoice_number}`;
+  body.innerHTML = "";
+  body.appendChild(el("p", { class: "muted", style: "margin:0 0 8px" },
+    `Fakturan blir ogiltig men numret behålls (obruten serie). Till skillnad från en `
+    + `vanlig faktura har den här en bokföringssida: kundfordran på ${amount} kr `
+    + `skapades när Skatteverkets utbetalning bokfördes. Den måste bokas bort — välj `
+    + `mot vilket konto.`));
+  body.appendChild(wrap("Mellanskillnaden bokas", choice));
+  body.appendChild(kontoWrap);
+  body.appendChild(note);
+  body.appendChild(el("div", { class: "row", style: "gap:10px;margin-top:10px" },
+    wrap("Bokföringsdatum", date), wrap("Orsak", reason)));
+  sync();
+
+  const ok = await openModalPromise("Makulera");
+  if (!ok) return;
+  const target = choice.value === "skv" ? 1513
+    : choice.value === "writeoff" ? 6351
+    : parseInt(konto.value.trim(), 10);
+  if (!target) { toast("Ange ett konto", true); return; }
+  const res = await api("POST", `/books/${bid()}/invoices/${iv.id}/cancel`, {
+    write_off_konto: target, date: date.value || null,
+    reason: reason.value.trim() || null });
+  toast(`Faktura ${iv.invoice_number} makulerad (ver ${res.ver_number})`
+        + (res.claim_reopened ? " — RUT-ärendet öppnat igen" : ""));
   renderWorkspace();
 }
 
