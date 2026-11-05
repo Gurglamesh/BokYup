@@ -1157,6 +1157,20 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       ignored for an ordinary faktura). UI: a **Makulera** button on unpaid follow-ups
       opening a konto chooser with the moms warning. Tests pass (526); browser-smoke-tested
       (6351 500,00 / 1510 −500,00 balanced, state cancelled).
+- [x] **Inventarieinköp märks med sitt konto i alla listor (frontend, 2026-11).** Reported
+      from real use: an inventarieinköp showed a blank Kategori. It has none by design —
+      the konto is frozen straight onto the `moms_line` — and the facade already exposed
+      `konto_label` ("1220 Inventarier och verktyg") for exactly this, but only the **Inköp**
+      list used it. **Transaktioner** and the **Borttagna** list still printed "—". Both now
+      fall back to `konto_label` in display, free-text search AND the column sort, and the
+      Transaktioner cell carries the transaktion's note as a tooltip (the asset's
+      description + assessed useful life) with the note added to the search. Works for a
+      PENDING one too: `book_asset_purchase` stamps `bas_konto` at insert, not at booking.
+      Found while smoke-testing: **"Rätta baskonto" was offered on these rows but
+      `rebook_transaktion` refuses a category-less entry with 409** — a dead-end button on
+      both lists. Its gate now also requires `t.category_id`. Browser-smoke-tested (1220
+      booked + 5410 pending labelled in Transaktioner and Inköp, search by konto and by
+      description, no dead-end button).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

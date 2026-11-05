@@ -605,7 +605,10 @@ const SECTION_RENDERERS = {
     const rowFn = (t) => [
       t.trans_date,
       t.direction === "in" ? "Utgift" : "Inkomst",
-      catName[t.category_id] || "—",
+      // An inventarieinköp has no category — its konto is frozen on the moms_line and
+      // comes back as konto_label ("1220 Inventarier och verktyg"), so the row says what
+      // it is instead of showing a blank. The note carries the asset's description.
+      el("span", { title: t.note || "" }, catName[t.category_id] || t.konto_label || "—"),
       t.ext_ref || "",
       el("span", { class: "num" }, toKr(t.amount_ore || 0) + " kr"),
       el("span", { style: "display:inline-flex;gap:4px" },
@@ -620,22 +623,25 @@ const SECTION_RENDERERS = {
         t.status === "pending"
           ? el("button", { class: "btn small", onclick: () => guard(() => payFlow(t.id, { allowFee: t.direction === "in" })) }, "Bokför betalning")
           : null,
-        // Ombokning gäller bara fristående inkomster/utgifter — fakturor/RUT rättas med kreditfaktura.
-        (t.verifikation_id && !t.corrected && !t.invoice_backed && !t.rut)
+        // Ombokning gäller bara fristående inkomster/utgifter — fakturor/RUT rättas med
+        // kreditfaktura, och ett inventarieinköp har inget konto via kategori att byta
+        // (backend vägrar med 409), så knappen visas inte där.
+        (t.verifikation_id && !t.corrected && !t.invoice_backed && !t.rut && t.category_id)
           ? el("button", { class: "btn small ghost", title: "Rätta baskonto/moms — backar och bokför om med samma belopp",
               onclick: () => guard(() => rebookFlow(t, cats)) }, "Rätta baskonto")
           : null),
     ];
     panel.appendChild(searchTable(
-      "Sök transaktion (datum, kategori, kvitto-/fakturanr)…",
+      "Sök transaktion (datum, kategori/konto, beskrivning, kvitto-/fakturanr)…",
       ["Datum", "Typ", "Kategori", "Kvitto/Faktura-nr", "Belopp", "Status", "Verifikat", ""],
       txs,
       (t, q) => [t.trans_date, t.direction === "in" ? "utgift" : "inkomst",
-        catName[t.category_id] || "", t.ext_ref || ""].join(" ").toLowerCase().includes(q),
+        catName[t.category_id] || t.konto_label || "", t.note || "",
+        t.ext_ref || ""].join(" ").toLowerCase().includes(q),
       rowFn,
       [(t) => t.trans_date,
        (t) => (t.direction === "in" ? "Utgift" : "Inkomst"),
-       (t) => catName[t.category_id] || "",
+       (t) => catName[t.category_id] || t.konto_label || "",
        (t) => t.ext_ref || "",
        (t) => t.amount_ore || 0,
        (t) => (t.status === "paid" ? 1 : 0),
@@ -700,7 +706,8 @@ const SECTION_RENDERERS = {
         el("summary", { style: "cursor:pointer;color:var(--muted,#777)" }, `Borttagna (${del.length})`));
       box.appendChild(simpleTable(
         ["Datum", "Leverantör", "Kategori", "Kvitto/Faktura-nr", "Belopp", ""],
-        del.map((t) => [t.trans_date, supName[t.supplier_id] || "—", catName[t.category_id] || "—",
+        del.map((t) => [t.trans_date, supName[t.supplier_id] || "—",
+          catName[t.category_id] || t.konto_label || "—",
           t.ext_ref || "", toKr(t.amount_ore || 0) + " kr",
           el("button", { class: "btn small ghost", onclick: () => guard(() => restoreInkop(t.id)) }, "Återställ")])));
       panel.appendChild(box);
@@ -718,7 +725,7 @@ const SECTION_RENDERERS = {
             onclick: () => guard(() => editInkopFull(t.id, panel)) }, "Ändra")
         : el("button", { class: "btn small ghost", title: "Ändra leverantör, nr, notering, kvittoformat (bokföringen berörs ej)",
             onclick: () => guard(() => editPurchaseFlow(t, suppliers)) }, "Ändra"),
-      (t.verifikation_id && !t.corrected && !t.invoice_backed && !t.rut)
+      (t.verifikation_id && !t.corrected && !t.invoice_backed && !t.rut && t.category_id)
         ? el("button", { class: "btn small ghost", title: "Rätta baskonto/moms — backar och bokför om med samma belopp",
             onclick: () => guard(() => rebookFlow(t, cats)) }, "Rätta baskonto")
         : null,
