@@ -1195,6 +1195,20 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       live posting preview that names the konton as you type. Tests pass (535);
       browser-smoke-tested (10 000 ut + 3 000 in → 2013/2018/1930 −7 000 balanced,
       equal amounts → no bank leg, no transaktion created).
+- [x] **Vyn fyller fönstret (frontend, 2026-11).** `.view` was capped at `max-width:
+      1000px`, so on a wide window the content sat in a narrow centred column and the
+      tables overflowed: in the Kunder list the **Hushåll** button was clipped mid-word
+      and **Ta bort** was invisible entirely. Now `max-width: none` with a 24px gutter —
+      the heavy screens (Kunder, Inköp, Ordrar, Huvudbok) are wide tables that want the
+      room. Helper paragraphs are capped at 95ch so prose stays readable while tables
+      spread. Verified at 2000px (all five row buttons inside the window, no table
+      overflow) and at 390px (hamburger nav, no horizontal page scroll).
+      **A field-width cap was tried and reverted.** `.row > div { max-width: 520px }`
+      looked right for a lone "0,00" box, but `.order-line` IS a `.row` and its whole
+      line editor is a single direct child — the cap squeezed all eleven fields of the
+      faktura line editor into 520px. The browser check caught it (the editor measured
+      520 instead of ~1800). Forms are therefore airy on a very wide screen; tuning
+      individual field widths is a separate, deliberate pass, not a one-line CSS rule.
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

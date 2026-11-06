@@ -47,7 +47,13 @@ body {
 .book-tab .lock { opacity: .7; margin-left: 6px; }
 
 /* ---- layout ---- */
-.view { max-width: 1000px; margin: 22px auto; padding: 0 16px; }
+/* Full window width: the heavy screens are wide tables (Kunder, Inköp, Ordrar,
+   Huvudbok) whose action buttons were clipped by a fixed 1000px column. The gutter
+   stays so nothing touches the edge. */
+.view { max-width: none; margin: 22px auto; padding: 0 24px; }
+/* Prose does not benefit from the extra width — a helper text running 2000px wide is
+   unreadable — so cap the explanatory paragraphs while tables and rows spread out. */
+.panel > p, .panel > .muted { max-width: 95ch; }
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
