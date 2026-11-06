@@ -115,6 +115,39 @@ systemctl status docker-bokyup-server        # the container's systemd unit
 docker logs docker-bokyup-server             # server logs
 ```
 
+## Uppdatera BokYup (och bara BokYup)
+
+Kör i katalogen där din system-flake ligger, oftast `/etc/nixos`:
+
+```bash
+cd /etc/nixos
+sudo nix flake update bokyup                 # bara den här inputen
+sudo nixos-rebuild switch --flake .#myhost
+```
+
+Att **namnge inputen** är hela poängen. `sudo nix flake update` utan argument uppdaterar
+**alla** inputs, nixpkgs inkluderat, och då byggs halva systemet om i onödan.
+
+Har du Nix äldre än 2.19 heter det i stället:
+
+```bash
+sudo nix flake lock --update-input bokyup
+```
+
+Pekar din input på en lokal sökväg (`path:/home/du/BokYup`) måste ändringarna vara
+**committade** i den katalogen innan `flake update` ser dem — en path-input låses på
+innehållet, inte på arbetskatalogen.
+
+Kolla efteråt att servern kom upp:
+
+```bash
+systemctl status docker-bokyup-server
+docker logs --tail 50 docker-bokyup-server
+```
+
+Böckerna ligger i `/var/lib/bokyup`, utanför det som byggs om, så en uppdatering rör dem
+aldrig. Har schemat bumpats migreras varje bok automatiskt när den öppnas.
+
 ## 4. Publish to your tailnet + connect
 
 ```bash
