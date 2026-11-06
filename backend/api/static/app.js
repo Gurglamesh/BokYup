@@ -74,6 +74,12 @@ async function downloadFile(path, filename) {
 async function mediaUrl(path) {
   if (!isServer() && window.__BOKYUP_NATIVE__) {
     const r = await api("GET", path);
+    // A raw TEXT result (CSV, SIE, granskning) is unwrapped to a string by nativeApi;
+    // only binary comes back as {media_type, base64}.
+    if (typeof r === "string") {
+      const url = URL.createObjectURL(new Blob([r], { type: "text/plain;charset=utf-8" }));
+      return { src: url, revoke: url };
+    }
     return { src: `data:${r.media_type};base64,${r.base64}`, revoke: null };
   }
   if (isServer()) {
@@ -1390,6 +1396,42 @@ const SECTION_RENDERERS = {
       "CSV laddar ner vyn du valt ovan (samma datumintervall). Behöver din revisor "
       + "importera bokföringen är SIE-filen under Rapporter rätt format — CSV:en är "
       + "till för att läsa, filtrera och pivotera."));
+
+    // ---- AI-granskning: the whole book as one readable file ------------------
+    // `input { width: 100% }` from the stylesheet would stretch the box away from its
+    // label, so this one sizes itself.
+    const namesCb = el("input", { type: "checkbox", style: "width:auto;flex:0 0 auto" });
+    panel.appendChild(el("div", { class: "box", style: "margin:10px 0" },
+      el("div", { class: "row" },
+        el("div", { style: "flex:3" },
+          el("strong", {}, "Skicka bokföringen på granskning"),
+          el("p", { class: "muted", style: "margin:4px 0 0;font-size:12px" },
+            "Laddar ner HELA bokföringen som en läsbar textfil (.md) — kontoplan, "
+            + "saldolista, resultat, moms, årsbokslut, alla affärshändelser med "
+            + "momsrader och hela grundboken, plus en färdig instruktion om vad "
+            + "granskaren ska leta efter. Klistra in den hos en AI eller ge den till "
+            + "din revisor. Filen innehåller inga personnummer, adresser eller "
+            + "kontaktuppgifter, och kundnamn maskeras till \"Kund N\". "
+            + "Datumfälten ovan begränsar även den här filen — lämna dem tomma för "
+            + "hela boken.")),
+        el("div", { style: "align-self:flex-end;flex:0 0 auto" },
+          el("label", { class: "muted",
+                        style: "font-size:12px;display:flex;align-items:center;"
+                               + "gap:6px;white-space:nowrap" },
+            namesCb, "Ta med kundnamn")),
+        el("div", { style: "align-self:flex-end" },
+          el("button", { class: "btn", onclick: () => guard(exportReview) },
+            "⬇ Granskningsfil")))));
+
+    async function exportReview() {
+      const q = new URLSearchParams();
+      if (start.value) q.set("start", start.value);
+      if (end.value) q.set("end", end.value);
+      if (namesCb.checked) q.set("names", "1");
+      const name = `granskning-${start.value || "start"}-${end.value || "slut"}.md`;
+      await downloadFile(`/books/${bid()}/granskning.md?${q.toString()}`, name);
+      toast(`${name} nedladdad`);
+    }
 
     // The CSV goes through the authed media path so it works in server mode too.
     async function exportCsv() {

@@ -1209,6 +1209,37 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       faktura line editor into 520px. The browser check caught it (the editor measured
       520 instead of ~1800). Forms are therefore airy on a very wide screen; tuning
       individual field widths is a separate, deliberate pass, not a one-line CSS rule.
+- [x] **Granskningsexport — hela bokföringen som en läsbar fil (2026-11).** En
+      "⬇ Granskningsfil"-knapp i **Bokföring → Huvudbok** laddar ner HELA boken som EN
+      Markdown-fil att klistra in hos en AI eller ge till en revisor.
+      `backend/reports/review.py` (`review_markdown`) + `BookOps.review_export`; API
+      `GET /books/{id}/granskning.md?start=&end=&names=`. Skiljer sig från de export-
+      format som redan fanns: SIE är för import hos revisorn, CSV:en för Excel — båda
+      förutsätter att läsaren redan känner boken. Den här filen ger **sammanhanget**:
+      bokföringsmetod, bokens egna kontonamn, vilka verifikat som är egenupprättade och
+      var underlag saknas, plus samma siffror från flera håll (saldolista, resultat per
+      konto, momsdeklaration, förenklat årsbokslut, affärshändelser med momsrader,
+      kundfakturor och hela grundboken) så att ett fel syns som en motsägelse. Överst
+      ligger ett färdigt **uppdrag till granskaren** (tio frågor + konventionerna i
+      filen) som avslutas med att granskaren bara ser bokföringen, inte underlagen, och
+      ska skilja på "detta ÄR fel" och "detta bör kontrolleras" i stället för att hitta
+      på regler. Innan det körs **maskinella kontroller** (`kontroller()`, ren funktion
+      av datat och enhetstestad var för sig): att varje verifikation balanserar, obruten
+      nummerserie (hoppas över när exporten är datumfiltrerad — då är serien beskuren i
+      båda ändar), saknat underlag (rättelser och egenupprättade undantagna), egen-
+      upprättad utan motivering, obokförda affärshändelser, saldolistan jämn, negativt
+      banksaldo, framtidsdaterat, sen bokföring och **samma kvitto-/fakturanummer på
+      flera verifikationer** (dubbelbokföringen som faktiskt inträffat i verkligt bruk).
+      **Integritet:** filen är gjord för att lämna maskinen, så den bär bokföringen och
+      inget annat — inga personnummer (de är krypterade och dekrypteras aldrig hit),
+      inga adresser, e-post eller telefonnummer, och **kundnamn maskeras till
+      "[Kund N]"** i både kolumner och fritext (`_review_customer_mask`, längsta namnet
+      först); leverantörsnamn behålls, de är oftast hela skälet till att ett konto är
+      rätt eller fel. En kryssruta "Ta med kundnamn" (`names=1`) stänger av maskningen.
+      Datumfälten i fliken begränsar även den här filen; tomma = hela boken. Även fixat:
+      `mediaUrl` byggde en trasig `data:`-URL för ett rått TEXT-svar på telefonen (WASM),
+      så CSV-nedladdningen där var trasig — den blir nu en blob. Tester passerar (550);
+      browser-smoke-testat (nedladdning, maskering, kryssrutan).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same

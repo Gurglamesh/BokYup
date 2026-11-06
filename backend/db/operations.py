@@ -2394,6 +2394,141 @@ class BookOps:
                 "amount_ore": amt, "saldo_ore": acc["saldo_ore"], "text": r["text"]})
         return [accounts[k] for k in sorted(accounts)]
 
+    # ---- review export (the whole book as one readable file) --------------------
+    def _review_customer_mask(self) -> list[tuple[str, str]]:
+        """
+        Literal name -> "[Kund N]" replacements, longest first. The review export is
+        meant to leave the machine, and a customer's name is personal data that adds
+        nothing to a bookkeeping review (the konto is right or wrong regardless of who
+        bought). Supplier names are NOT masked — the counterparty is usually the whole
+        reason a cost konto is right or wrong.
+        """
+        pairs: list[tuple[str, str]] = []
+        for r in self.conn.execute(
+                "SELECT kundnummer, first_name, last_name, company_name, contact_person "
+                "FROM customer"):
+            tag = f"[Kund {r['kundnummer']}]"
+            fn = (r["first_name"] or "").strip()
+            ln = (r["last_name"] or "").strip()
+            names = []
+            if fn and ln:
+                names += [f"{fn} {ln}", f"{ln} {fn}"]
+            for s in (r["company_name"], r["contact_person"], fn, ln):
+                s = (s or "").strip()
+                # A 3-letter first name would mask fragments of unrelated words; a full
+                # name is always tried first, so over-masking short parts gains little.
+                if len(s) >= 4:
+                    names.append(s)
+            pairs += [(n, tag) for n in names]
+        pairs.sort(key=lambda p: -len(p[0]))
+        return pairs
+
+    def _review_transaktioner(self, start: Optional[str], end: Optional[str]) -> list[dict]:
+        """
+        The book's business events with their moms lines — the layer where the momssats
+        and the omvänd-moms marking live, neither of which is visible in the postings.
+        Synthetic report clones (rättelse/periodisering/fakturabetalning …) are left out:
+        they are bookkeeping artefacts, and their effect is already in the verifikationer.
+        """
+        where = ["t.deleted_at IS NULL",
+                 "(t.note IS NULL OR t.note NOT IN (%s))"
+                 % ",".join("?" for _ in SYNTHETIC_TRANSAKTION_NOTES)]
+        args: list = list(SYNTHETIC_TRANSAKTION_NOTES)
+        if start:
+            where.append("t.trans_date >= ?"); args.append(start)
+        if end:
+            where.append("t.trans_date <= ?"); args.append(end)
+        rows = [dict(r) for r in self.conn.execute(
+            "SELECT t.id, t.direction, t.trans_date, t.status, t.payment_date, t.note, "
+            "t.ext_ref, t.ores_rounding, t.customer_id, s.name AS supplier_name, "
+            "v.series, v.ver_number, "
+            "(SELECT COUNT(*) FROM receipt r WHERE r.transaktion_id = t.id "
+            " AND r.rut_claim_id IS NULL) AS receipts "
+            "FROM transaktion t "
+            "LEFT JOIN supplier s ON s.id = t.supplier_id "
+            "LEFT JOIN verifikation v ON v.id = t.verifikation_id "
+            "WHERE " + " AND ".join(where) + " ORDER BY t.trans_date, t.id", args)]
+        for t in rows:
+            t["lines"] = [dict(r) for r in self.conn.execute(
+                "SELECT ml.rate_code, ml.reverse_charge, ml.ex_moms_ore, ml.moms_ore, "
+                "ml.inc_moms_ore, "
+                "COALESCE(ml.bas_konto, lc.bas_konto, tc.bas_konto) AS konto "
+                "FROM moms_line ml "
+                "LEFT JOIN category lc ON lc.id = ml.category_id "
+                "LEFT JOIN transaktion t ON t.id = ml.transaktion_id "
+                "LEFT JOIN category tc ON tc.id = t.category_id "
+                "WHERE ml.transaktion_id=? ORDER BY ml.id", (t["id"],))]
+        return rows
+
+    def review_export(self, start: Optional[str] = None, end: Optional[str] = None,
+                      *, mask_customers: bool = True) -> str:
+        """
+        The whole bookkeeping as one Markdown file, for handing to a reviewer (a revisor,
+        or an AI) with the question "är något fel här?". See `backend/reports/review.py`
+        for what goes in it and why.
+        """
+        from backend.reports import arsbokslut as arsbokslut_report
+        from backend.reports import review as review_report
+        from backend.reports import result as result_report
+        from backend.reports import vat as vat_report
+
+        vers = self.verifikationer_full(start, end)
+        # Underlag may hang on the verifikation itself (a manual entry) or on the
+        # transaktion behind it; a reviewer only cares that there is one.
+        via_trans: dict[int, int] = {}
+        for r in self.conn.execute(
+                "SELECT t.verifikation_id AS vid, COUNT(*) AS n FROM receipt r "
+                "JOIN transaktion t ON t.id = r.transaktion_id "
+                "WHERE r.rut_claim_id IS NULL AND t.verifikation_id IS NOT NULL "
+                "GROUP BY t.verifikation_id"):
+            via_trans[r["vid"]] = r["n"]
+        for v in vers:
+            v["underlag"] = (v.get("receipt_count") or 0) + via_trans.get(v["id"], 0)
+
+        dates = [v["ver_date"] for v in vers if v["ver_date"]]
+        today = _now()[:10]
+        p_start = start or (min(dates) if dates else today)
+        p_end = end or (max(dates) if dates else today)
+
+        invoices = self.list_invoices()
+        cust_names = {}
+        if not mask_customers:
+            for r in self.conn.execute(
+                    "SELECT kundnummer, type, first_name, last_name, company_name "
+                    "FROM customer"):
+                cust_names[r["kundnummer"]] = (
+                    r["company_name"] if r["type"] == "business"
+                    else " ".join(x for x in (r["first_name"], r["last_name"]) if x))
+        for iv in invoices:
+            iv["customer_name"] = cust_names.get(iv.get("customer_id"))
+
+        trans = self._review_transaktioner(start, end)
+        for t in trans:
+            t["customer_name"] = cust_names.get(t.get("customer_id"))
+
+        data = {
+            "today": today,
+            "schema_version": S.get_schema_version(self.conn),
+            "company_name": (self.get_company() or {}).get("name"),
+            "method": self.get_accounting_method(),
+            "period": {"start": p_start, "end": p_end,
+                       "filtered": bool(start or end)},
+            "verifikationer": vers,
+            "accounts": self.huvudbok(start, end),
+            "transaktioner": trans,
+            "invoices": invoices,
+            "locks": [dict(r) for r in self.conn.execute(
+                "SELECT period_start, period_end, kind, locked_at FROM period_lock "
+                "ORDER BY period_start")],
+            "bank_konto": self._sys_account("account_bank"),
+            "moms": vat_report.momsdeklaration(self.conn, p_start, p_end),
+            "resultat": result_report.result_report(self.conn, p_start, p_end),
+            "arsbokslut": arsbokslut_report.forenklat_arsbokslut(
+                self.conn, p_start, p_end),
+            "mask": self._review_customer_mask() if mask_customers else [],
+        }
+        return review_report.review_markdown(data)
+
     def add_manual_verifikation(self, ver_date: str, text: str, lines: list[dict],
                                 reg_date: Optional[str] = None,
                                 egenupprattad: bool = False,

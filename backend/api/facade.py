@@ -743,6 +743,17 @@ class AppFacade:
             raise ValueError("kind måste vara huvudbok, grundbok eller saldolista")
         return RawResult(text, "text/csv; charset=utf-8", f"{kind}{span}.csv")
 
+    def h_review_export(self, p, b, q):
+        """The whole book as one Markdown file, for handing to a reviewer (or an AI)."""
+        ops = self._ops(p["book_id"])
+        start, end = q.get("start"), q.get("end")
+        # Customer names are masked unless the user explicitly asks for them: the file is
+        # made to be sent somewhere, and the review does not need who bought.
+        names = q.get("names") in ("1", "true", True)
+        text = ops.review_export(start, end, mask_customers=not names)
+        span = f"-{start or 'start'}-{end or 'slut'}"
+        return RawResult(text, "text/markdown; charset=utf-8", f"granskning{span}.md")
+
     def h_manual_verifikation(self, p, b, q):
         ops = self._ops(p["book_id"])
         # The UI works in debit/credit columns; the ledger stores signed amounts.
@@ -1194,6 +1205,7 @@ _route("GET", "/books/{book_id}/verifikationer", "h_list_verifikationer")
 _route("GET", "/books/{book_id}/verifikationer-full", "h_verifikationer_full")
 _route("GET", "/books/{book_id}/huvudbok", "h_huvudbok")
 _route("GET", "/books/{book_id}/huvudbok.csv", "h_huvudbok_csv")
+_route("GET", "/books/{book_id}/granskning.md", "h_review_export")
 _route("POST", "/books/{book_id}/verifikationer/manual", "h_manual_verifikation", 201)
 _route("POST", "/books/{book_id}/private-transfer", "h_private_transfer", 201)
 _route("GET", "/books/{book_id}/opening-balance", "h_opening_balance_template")

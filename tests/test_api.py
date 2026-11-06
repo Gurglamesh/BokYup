@@ -2960,6 +2960,95 @@ class TestHuvudbokCsv:
                           params={"kind": "nonsens"}).status_code == 400
 
 
+class TestReviewExport:
+    """The whole book as one Markdown file, for handing to a reviewer (or an AI)."""
+
+    def _seed(self, client, book):
+        cat = client.post(f"/books/{book}/categories",
+                          json={"name": "Förbrukning", "kind": "expense",
+                                "bas_konto": 5460}).json()["id"]
+        inc = client.post(f"/books/{book}/categories",
+                          json={"name": "Tjänster", "kind": "income",
+                                "bas_konto": 3001}).json()["id"]
+        sup = client.post(f"/books/{book}/suppliers",
+                          json={"name": "Inet", "default_moms_rate": "25"}).json()["id"]
+        kid = client.post(f"/books/{book}/customers", json={
+            "type": "private", "first_name": "Annika", "last_name": "Andersson"
+        }).json()["kundnummer"]
+        client.post(f"/books/{book}/expenses", json={
+            "category_id": cat, "supplier_id": sup, "trans_date": "2026-02-10",
+            "paid_date": "2026-02-10", "ext_ref": "KV-7",
+            "lines": [{"rate_code": "25", "amount_ore": 125000}]})
+        t = client.post(f"/books/{book}/incomes", json={
+            "customer_id": kid, "category_id": inc, "trans_date": "2026-03-01",
+            "note": "Jobb hos Annika Andersson",
+            "lines": [{"rate_code": "25", "amount_ore": 250000}]}).json()
+        client.post(f"/books/{book}/transaktioner/{t['transaktion_id']}/pay",
+                    json={"payment_date": "2026-03-05"})
+        return cat, inc, kid
+
+    def test_contains_every_section(self, client, book):
+        self._seed(client, book)
+        r = client.get(f"/books/{book}/granskning.md")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/markdown")
+        assert "granskning" in r.headers["content-disposition"]
+        md = r.text
+        for heading in ("## Uppdrag till granskaren", "## Om boken",
+                        "## Maskinella kontroller", "## Kontoplan",
+                        "## Saldolista", "## Resultat per konto",
+                        "## Momsdeklaration", "## Förenklat årsbokslut",
+                        "## Affärshändelser", "## Grundbok"):
+            assert heading in md, heading
+        # the reviewer needs the method and the konto names, not just the numbers
+        assert "kontantmetod" in md
+        assert "5460" in md and "Förbrukning" in md
+        assert "Inet" in md                      # supplier names are kept
+        assert "1250,00" in md                   # decimal comma, no grouping
+        assert "Alla 2 verifikationer balanserar" in md
+
+    def test_customer_names_masked_by_default(self, client, book):
+        self._seed(client, book)
+        md = client.get(f"/books/{book}/granskning.md").text
+        assert "Annika" not in md and "Andersson" not in md
+        assert "[Kund 1]" in md                  # the note was redacted, not dropped
+        named = client.get(f"/books/{book}/granskning.md", params={"names": True}).text
+        assert "Annika Andersson" in named
+
+    def test_flags_missing_underlag_and_pending(self, client, book):
+        cat, _inc, _kid = self._seed(client, book)
+        # an unpaid supplier invoice is not in the books yet; the file must say so
+        client.post(f"/books/{book}/expenses", json={
+            "category_id": cat, "trans_date": "2026-04-01",
+            "lines": [{"rate_code": "25", "amount_ore": 50000}]})
+        md = client.get(f"/books/{book}/granskning.md").text
+        assert "saknar bifogat underlag" in md
+        assert "1 obokförd affärshändelse" in md
+
+    def test_date_range_skips_the_series_check(self, client, book):
+        self._seed(client, book)
+        md = client.get(f"/books/{book}/granskning.md",
+                        params={"start": "2026-03-01", "end": "2026-03-31"}).text
+        assert "Nummerserien kontrolleras inte" in md
+        assert "(filtrerad)" in md
+
+    def test_empty_book_does_not_crash(self, client, book):
+        md = client.get(f"/books/{book}/granskning.md").text
+        assert "## Grundbok" in md
+
+    def test_invoices_get_their_own_section(self, client, book):
+        _cat, inc, kid = self._seed(client, book)
+        client.post(f"/books/{book}/invoices", json={
+            "customer_id": kid, "category_id": inc, "invoice_date": "2026-05-01",
+            "due_date": "2026-05-31",
+            "lines": [{"description": "Arbete", "quantity_centi": 100,
+                       "unit_price_ore": 100000, "rate_code": "25", "category_id": inc}]})
+        md = client.get(f"/books/{book}/granskning.md").text
+        assert "## Kundfakturor" in md
+        assert "| 1 | 2026-05-01 | 2026-05-31 | [Kund 1] |" in md
+        assert "1250,00" in md                        # inkl moms, still unpaid
+
+
 class TestOpeningBalanceApi:
     def test_template_and_booking_round_trip(self, client, book):
         tpl = client.get(f"/books/{book}/opening-balance").json()

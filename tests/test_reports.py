@@ -245,3 +245,104 @@ class TestTaxEstimate:
         assert est["egenavgifter"]["netto_ore"] == 0
         assert est["firma_income_tax_ore"] == 0
         assert est["firma_total_ore"] == max(0, est["moms_ore"])   # only moms
+
+
+class TestReviewKontroller:
+    """
+    The mechanical checks in the review export. They are a pure function of the data,
+    so each one is driven with a hand-built book — including states the app itself
+    cannot produce (an unbalanced verifikation means the file was edited outside BokYup,
+    and the reviewer has to be told that first of all).
+    """
+
+    @staticmethod
+    def _ver(n, postings, **kw):
+        v = {"id": n, "series": "A", "ver_number": n, "ver_date": "2026-03-01",
+             "registration_date": "2026-03-01", "text": f"Ver {n}", "posted": 1,
+             "rattelse_of": None, "egenupprattad": 0, "motivering": None,
+             "ext_ref": None, "kommentar": None, "underlag": 1,
+             "postings": [{"bas_konto": k, "konto_namn": str(k), "amount_ore": a,
+                           "text": None} for k, a in postings]}
+        v.update(kw)
+        return v
+
+    def _data(self, vers, **kw):
+        d = {"verifikationer": vers, "accounts": [], "transaktioner": [],
+             "period": {"start": "2026-01-01", "end": "2026-12-31", "filtered": False},
+             "bank_konto": 1930, "today": "2026-06-30"}
+        d.update(kw)
+        return d
+
+    def _levels(self, data):
+        from backend.reports import review as review_mod
+        return {k["text"]: k["level"] for k in review_mod.kontroller(data)}
+
+    def test_balanced_book_passes(self):
+        vers = [self._ver(1, [(5410, 1000), (1930, -1000)]),
+                self._ver(2, [(5410, 500), (1930, -500)])]
+        texts = self._levels(self._data(vers))
+        assert any(t.startswith("Alla 2 verifikationer balanserar") for t in texts)
+        assert all(v != "flag" for v in texts.values())
+
+    def test_unbalanced_verifikation_is_flagged_first(self):
+        from backend.reports import review as review_mod
+        vers = [self._ver(1, [(5410, 1000), (1930, -900)])]
+        first = review_mod.kontroller(self._data(vers))[0]
+        assert first["level"] == "flag"
+        assert "ALLVARLIGT" in first["text"] and "A1 (diff 1,00)" in first["text"]
+
+    def test_gap_in_the_number_series(self):
+        vers = [self._ver(1, [(5410, 100), (1930, -100)]),
+                self._ver(3, [(5410, 100), (1930, -100)])]
+        flags = [t for t, lv in self._levels(self._data(vers)).items() if lv == "flag"]
+        assert any("hopp i nummerserien" in t and "A2" in t for t in flags)
+
+    def test_a_date_filter_skips_the_series_check(self):
+        """A filtered export is cut at both ends, so its holes are not holes in the book."""
+        vers = [self._ver(1, [(5410, 100), (1930, -100)]),
+                self._ver(3, [(5410, 100), (1930, -100)])]
+        data = self._data(vers)
+        data["period"]["filtered"] = True
+        texts = self._levels(data)
+        assert not any("hopp i nummerserien" in t for t in texts)
+        assert any("Nummerserien kontrolleras inte" in t for t in texts)
+
+    def test_missing_underlag_excludes_rattelse_and_egenupprattad(self):
+        vers = [
+            self._ver(1, [(5410, 100), (1930, -100)], underlag=0),              # flagged
+            self._ver(2, [(5410, 100), (1930, -100)], underlag=0, rattelse_of=1),
+            self._ver(3, [(5410, 100), (2018, -100)], underlag=0,
+                      egenupprattad=1, motivering="Privat dator, marknadsvärde 1 kr"),
+        ]
+        flags = [t for t, lv in self._levels(self._data(vers)).items() if lv == "flag"]
+        miss = [t for t in flags if "saknar bifogat underlag" in t]
+        assert len(miss) == 1 and "A1" in miss[0] and "A2" not in miss[0] and "A3" not in miss[0]
+
+    def test_egenupprattad_without_motivering_is_flagged(self):
+        vers = [self._ver(1, [(5410, 100), (2018, -100)], egenupprattad=1, motivering="  ")]
+        flags = [t for t, lv in self._levels(self._data(vers)).items() if lv == "flag"]
+        assert any("utan motivering" in t for t in flags)
+
+    def test_same_ext_ref_twice_is_flagged_as_possible_double_booking(self):
+        vers = [self._ver(1, [(5410, 100), (1930, -100)], ext_ref="INET-123"),
+                self._ver(2, [(5410, 100), (1930, -100)], ext_ref="inet-123")]
+        flags = [t for t, lv in self._levels(self._data(vers)).items() if lv == "flag"]
+        assert any("Samma kvitto-/fakturanummer" in t and "A1, A2" in t for t in flags)
+
+    def test_negative_bank_and_future_dates(self):
+        vers = [self._ver(1, [(5410, 100), (1930, -100)], ver_date="2026-12-24")]
+        accounts = [{"bas_konto": 1930, "konto_namn": "Företagskonto", "debit_ore": 0,
+                     "credit_ore": 100, "saldo_ore": -100, "lines": []},
+                    {"bas_konto": 5410, "konto_namn": "Förbrukning", "debit_ore": 100,
+                     "credit_ore": 0, "saldo_ore": 100, "lines": []}]
+        flags = [t for t, lv in self._levels(
+            self._data(vers, accounts=accounts)).items() if lv == "flag"]
+        assert any("NEGATIVT saldo" in t for t in flags)
+        assert any("daterade i framtiden" in t and "A1" in t for t in flags)
+
+    def test_late_bookkeeping_is_informational(self):
+        vers = [self._ver(1, [(5410, 100), (1930, -100)],
+                          ver_date="2026-01-01", registration_date="2026-06-01")]
+        texts = self._levels(self._data(vers))
+        late = [t for t, lv in texts.items() if "dagar" in t]
+        assert late and texts[late[0]] == "info"

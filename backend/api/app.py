@@ -616,6 +616,14 @@ def _build_router():
                                           {"start": start, "end": end, "kind": kind})
         return _raw_response(res)
 
+    @r.get("/books/{book_id}/granskning.md")
+    def review_export(book_id: str, request: Request, start: str = None, end: str = None,
+                      names: bool = False):
+        res = fac(request).h_review_export(
+            {"book_id": book_id}, {},
+            {"start": start, "end": end, "names": "1" if names else "0"})
+        return _raw_response(res)
+
     @r.post("/books/{book_id}/verifikationer/manual", status_code=201)
     def manual_verifikation(book_id: str, body: sc.ManualVerifikationReq, request: Request):
         return fac(request).h_manual_verifikation({"book_id": book_id}, body.model_dump(), {})
