@@ -92,6 +92,7 @@ def _bas_catalog_name(bas_konto: int) -> Optional[str]:
 _SYS_ACCOUNT_NAMES = {
     "account_bank": "Företagskonto / bank",
     "account_egna_insattningar": "Egna insättningar (privat)",
+    "account_egna_uttag": "Egna uttag (privat)",
     "account_ingaende_moms": "Ingående moms",
     "account_utgaende_moms_25": "Utgående moms 25 %",
     "account_utgaende_moms_12": "Utgående moms 12 %",
@@ -2588,6 +2589,80 @@ class BookOps:
                 egenupprattad=True, motivering=motivering, kommentar=kommentar)
         return {"verifikation_id": vid, "ver_number": number,
                 "postings": [{"bas_konto": k, "amount_ore": a} for k, a, _ in postings]}
+
+    # ------------------------------------------------------------------
+    # Överföring privat <-> företagskonto
+    # ------------------------------------------------------------------
+    #
+    # An enskild näringsidkare and the firma are the same legal person, so moving money
+    # between a private account and the företagskonto is NOT an affärshändelse in the
+    # ordinary sense: no income, no cost, no moms. It only moves eget kapital, and the
+    # two directions have their own konton:
+    #
+    #   out of the firm, to private   -> 2013 Egna uttag        (debit)
+    #   into the firm, from private   -> 2018 Egna insättningar (credit)
+    #
+    # BOTH may be given in one call. A month of back-and-forth transfers is then a single
+    # verifikation that shows each direction gross with the bank taking the net — which
+    # reads far better against a kontoutdrag than one netted figure, and is what the
+    # kontoutdrag can actually be checked against.
+    #
+    # Unlike a privat tillgång this is NOT egenupprättad: the kontoutdrag is the external
+    # document. So no motivering is demanded; `ext_ref` carries the statement's reference
+    # and the underlag can be attached to the verifikation afterwards.
+
+    def book_private_transfer(self, date: str, *, uttag_ore: int = 0,
+                              insattning_ore: int = 0, note: Optional[str] = None,
+                              ext_ref: Optional[str] = None,
+                              kommentar: Optional[str] = None,
+                              konto: Optional[int] = None) -> dict:
+        """
+        Book money moved between a private account and the företagskonto.
+
+        `uttag_ore` left the firm (to private), `insattning_ore` came in (from private).
+        Give one for a single transfer, or both to summarise a period gross. `konto`
+        overrides the bank konto (default the config 1930). No moms, no transaktion —
+        it is a pure eget-kapital movement.
+        """
+        uttag = int(uttag_ore or 0)
+        insattning = int(insattning_ore or 0)
+        if uttag < 0 or insattning < 0:
+            raise ValueError("Belopp kan inte vara negativa — använd rätt riktning i stället")
+        if uttag == 0 and insattning == 0:
+            raise ValueError("Ange ett belopp i minst en riktning")
+
+        bank = int(konto) if konto else self._sys_account("account_bank")
+        uttag_konto = self._sys_account("account_egna_uttag")
+        ins_konto = self._sys_account("account_egna_insattningar")
+
+        postings: list[tuple[int, int, Optional[str]]] = []
+        if uttag:
+            postings.append((uttag_konto, uttag, "uttag till privat"))
+        if insattning:
+            postings.append((ins_konto, -insattning, "insättning från privat"))
+        # The bank takes the net. Equal amounts in both directions cancel here, which is
+        # correct: the gross flows are still visible on their own konton.
+        net = insattning - uttag
+        if net:
+            postings.append((bank, net,
+                             "inbetalning från privat" if net > 0 else "utbetalning till privat"))
+
+        if note and note.strip():
+            text = note.strip()
+        elif uttag and insattning:
+            text = "Överföringar privat/företag"
+        elif uttag:
+            text = "Eget uttag"
+        else:
+            text = "Egen insättning"
+
+        with self.conn:
+            vid, number = self._post_verifikation(
+                date, _now()[:10], text, postings, ext_ref=ext_ref, kommentar=kommentar)
+        return {"verifikation_id": vid, "ver_number": number,
+                "uttag_ore": uttag, "insattning_ore": insattning,
+                "bank_ore": net, "bas_konto_bank": bank,
+                "bas_konto_uttag": uttag_konto, "bas_konto_insattning": ins_konto}
 
     # ------------------------------------------------------------------
     # Privat tillgång in i verksamheten (tillskott)

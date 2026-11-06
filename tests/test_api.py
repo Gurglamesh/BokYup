@@ -3029,3 +3029,24 @@ class TestVerifikationReceiptApi:
             "mime": "image/png"}).json()["id"]
         r = client.delete(f"/books/{book}/receipts/{rid}")
         assert r.status_code == 409 and "kan inte tas bort" in r.json()["detail"]
+
+
+class TestPrivateTransferApi:
+    def test_both_directions_in_one_verifikation(self, client, book):
+        r = client.post(f"/books/{book}/private-transfer", json={
+            "date": "2026-10-31", "uttag_ore": 1000000, "insattning_ore": 300000,
+            "ext_ref": "kontoutdrag okt", "kommentar": "Samlade överföringar"})
+        assert r.status_code == 201
+        ver = client.get(f"/books/{book}/verifikationer-full").json()[0]
+        assert {p["bas_konto"]: p["amount_ore"] for p in ver["postings"]} == {
+            2013: 1000000, 2018: -300000, 1930: -700000}
+        assert ver["ext_ref"] == "kontoutdrag okt"
+        assert ver["kommentar"] == "Samlade överföringar"
+        # Not egenupprättad — the kontoutdrag is the underlag.
+        assert ver["egenupprattad"] == 0
+        # And no transaktion was created, so it stays out of the inköp/income lists.
+        assert client.get(f"/books/{book}/transaktioner").json() == []
+
+    def test_empty_is_rejected(self, client, book):
+        r = client.post(f"/books/{book}/private-transfer", json={"date": "2026-10-31"})
+        assert r.status_code == 400

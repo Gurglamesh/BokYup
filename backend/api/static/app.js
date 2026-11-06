@@ -774,12 +774,17 @@ const SECTION_RENDERERS = {
       api("GET", `/books/${bid()}/customers`),
       api("GET", `/books/${bid()}/suppliers`),
     ]);
-    const recHead = el("div", { style: "display:flex;align-items:center;justify-content:space-between" },
+    const recHead = el("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap" },
       el("h2", { style: "margin:0" }, "Bokför"),
-      el("button", { class: "btn ghost", title:
-        "Egendom du äger privat och börjar använda i firman — bokförs mot eget kapital, "
-        + "ingen moms och inga pengar rör sig",
-        onclick: () => guard(privateAssetFlow) }, "💻 Privat tillgång in i verksamheten"));
+      el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" },
+        el("button", { class: "btn ghost", title:
+          "Pengar flyttade mellan ditt privatkonto och företagskontot — eget kapital, "
+          + "ingen moms, ingen intäkt eller kostnad",
+          onclick: () => guard(privateTransferFlow) }, "🔁 Överföring privat ↔ företag"),
+        el("button", { class: "btn ghost", title:
+          "Egendom du äger privat och börjar använda i firman — bokförs mot eget kapital, "
+          + "ingen moms och inga pengar rör sig",
+          onclick: () => guard(privateAssetFlow) }, "💻 Privat tillgång in i verksamheten")));
     panel.appendChild(recHead);
 
     const kind = el("select", {},
@@ -5877,6 +5882,70 @@ async function recurringHistoryFlow(r) {
     };
     $("#modal-backdrop").classList.remove("hidden");
   });
+}
+
+// ---------------------------------------------------------------------------
+// Överföring privat <-> företagskonto
+// ---------------------------------------------------------------------------
+// For an enskild näringsidkare this is not an affärshändelse: no income, no cost, no
+// moms — only eget kapital moving, with a konto per direction (2013 out, 2018 in).
+//
+// Both directions can be filled in at once. A month of back-and-forth transfers then
+// becomes ONE verifikation showing each direction gross with the bank taking the net,
+// which is what a kontoutdrag can actually be checked against. The kontoutdrag is the
+// underlag, so this is NOT egenupprättat and needs no motivering — attach the statement
+// to the verifikation afterwards with the 📎 in grundboken.
+async function privateTransferFlow() {
+  const today = new Date().toISOString().slice(0, 10);
+  const date = el("input", { type: "date", value: today });
+  const ut = el("input", { type: "text", placeholder: "0,00", style: "width:140px" });
+  const inn = el("input", { type: "text", placeholder: "0,00", style: "width:140px" });
+  const extRef = el("input", { type: "text", placeholder: "t.ex. kontoutdrag okt 2026" });
+  const kommentar = el("input", { type: "text", placeholder: "valfri notering" });
+  const preview = el("div", { class: "muted", style: "margin-top:10px;font-weight:600" });
+
+  const refresh = () => {
+    const u = ut.value.trim() ? toOre(ut.value) : 0;
+    const i = inn.value.trim() ? toOre(inn.value) : 0;
+    if (!u && !i) { preview.textContent = "Ange ett belopp i minst en riktning."; return; }
+    const net = i - u;
+    const rows = [];
+    if (u) rows.push(`2013 Egna uttag debet ${toKr(u)}`);
+    if (i) rows.push(`2018 Egna insättningar kredit ${toKr(i)}`);
+    if (net > 0) rows.push(`1930 Företagskonto debet ${toKr(net)}`);
+    else if (net < 0) rows.push(`1930 Företagskonto kredit ${toKr(-net)}`);
+    else rows.push("1930 Företagskonto rörs inte (lika mycket åt båda håll)");
+    preview.textContent = rows.join(" · ");
+  };
+  ut.oninput = refresh; inn.oninput = refresh;
+
+  const body = $("#modal-body");
+  $("#modal-title").textContent = "Överföring privat ↔ företag";
+  body.innerHTML = "";
+  body.appendChild(el("p", { class: "muted", style: "margin:0 0 8px" },
+    "Du och firman är samma juridiska person, så en överföring är varken intäkt eller "
+    + "kostnad — bara eget kapital som flyttar sig. Ingen moms. Fyll i en riktning för "
+    + "en enskild överföring, eller båda för att summera en period (då syns varje "
+    + "riktning för sig och banken tar nettot)."));
+  body.appendChild(el("div", { class: "row", style: "gap:10px;flex-wrap:wrap" },
+    wrap("Datum", date),
+    wrap("Ut till privat (uttag)", ut),
+    wrap("In från privat (insättning)", inn)));
+  body.appendChild(el("div", { class: "row", style: "gap:10px;flex-wrap:wrap" },
+    wrap("Kvitto-/kontoutdragsreferens", extRef), wrap("Kommentar", kommentar)));
+  body.appendChild(preview);
+  refresh();
+
+  const ok = await openModalPromise("Bokför");
+  if (!ok) return;
+  const u = ut.value.trim() ? toOre(ut.value) : 0;
+  const i = inn.value.trim() ? toOre(inn.value) : 0;
+  if (!u && !i) { toast("Ange ett belopp i minst en riktning", true); return; }
+  const res = await api("POST", `/books/${bid()}/private-transfer`, {
+    date: date.value, uttag_ore: u, insattning_ore: i,
+    ext_ref: extRef.value.trim() || null, kommentar: kommentar.value.trim() || null });
+  toast(`Överföring bokförd (ver ${res.ver_number})`);
+  renderWorkspace();
 }
 
 // ---------------------------------------------------------------------------

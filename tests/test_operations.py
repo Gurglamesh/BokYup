@@ -1967,3 +1967,60 @@ class TestVerifikationReceipts:
         # An unbooked transaktion's receipt is still deletable.
         ops.delete_receipt(ops.list_receipts(tid)[0]["id"])
         assert ops.list_receipts(tid) == []
+
+
+class TestPrivateTransfer:
+    """Överföring privat <-> företagskonto: pure eget-kapital movement, no moms."""
+
+    def test_uttag_only(self, ops: BookOps):
+        res = ops.book_private_transfer("2026-10-05", uttag_ore=500000)
+        rows = {p["bas_konto"]: p["amount_ore"] for p in _postings(ops, res["verifikation_id"])}
+        assert rows == {2013: 500000, 1930: -500000}
+        assert _balance(ops, res["verifikation_id"]) == 0
+        v = ops.verifikationer_full()[0]
+        assert v["text"] == "Eget uttag" and v["egenupprattad"] == 0
+
+    def test_insattning_only(self, ops: BookOps):
+        res = ops.book_private_transfer("2026-10-05", insattning_ore=300000)
+        rows = {p["bas_konto"]: p["amount_ore"] for p in _postings(ops, res["verifikation_id"])}
+        assert rows == {2018: -300000, 1930: 300000}
+        assert ops.verifikationer_full()[0]["text"] == "Egen insättning"
+
+    def test_both_directions_show_gross_with_the_bank_taking_the_net(self, ops: BookOps):
+        # A month of back-and-forth: each direction stays visible on its own konto.
+        res = ops.book_private_transfer("2026-10-31", uttag_ore=1000000,
+                                        insattning_ore=300000,
+                                        ext_ref="kontoutdrag okt")
+        rows = {p["bas_konto"]: p["amount_ore"] for p in _postings(ops, res["verifikation_id"])}
+        assert rows == {2013: 1000000, 2018: -300000, 1930: -700000}
+        assert _balance(ops, res["verifikation_id"]) == 0
+        v = ops.verifikationer_full()[0]
+        assert v["text"] == "Överföringar privat/företag" and v["ext_ref"] == "kontoutdrag okt"
+
+    def test_equal_amounts_leave_the_bank_untouched(self, ops: BookOps):
+        res = ops.book_private_transfer("2026-10-31", uttag_ore=250000,
+                                        insattning_ore=250000)
+        rows = {p["bas_konto"]: p["amount_ore"] for p in _postings(ops, res["verifikation_id"])}
+        assert rows == {2013: 250000, 2018: -250000}      # no 1930 leg at all
+        assert res["bank_ore"] == 0
+
+    def test_it_never_touches_the_result_or_the_moms(self, ops: BookOps):
+        from backend.reports.result import result_report
+        from backend.reports.vat import momsdeklaration
+        ops.book_private_transfer("2026-10-05", uttag_ore=500000, insattning_ore=120000)
+        r = result_report(ops.conn, "2026-01-01", "2026-12-31")
+        assert r["income_ore"] == 0 and r["expense_ore"] == 0
+        m = momsdeklaration(ops.conn, "2026-01-01", "2026-12-31")
+        assert m["boxes"]["48"] == 0 and m["boxes"]["49"] == 0
+
+    def test_validation(self, ops: BookOps):
+        with pytest.raises(ValueError, match="minst en riktning"):
+            ops.book_private_transfer("2026-10-05")
+        with pytest.raises(ValueError, match="negativa"):
+            ops.book_private_transfer("2026-10-05", uttag_ore=-100)
+        assert ops.verifikationer_full() == []
+
+    def test_a_locked_period_is_refused(self, ops: BookOps):
+        ops.lock_period("2026-01-01", "2026-03-31")
+        with pytest.raises(PeriodLocked):
+            ops.book_private_transfer("2026-02-10", uttag_ore=100000)

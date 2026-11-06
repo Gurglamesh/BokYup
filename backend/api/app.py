@@ -620,6 +620,10 @@ def _build_router():
     def manual_verifikation(book_id: str, body: sc.ManualVerifikationReq, request: Request):
         return fac(request).h_manual_verifikation({"book_id": book_id}, body.model_dump(), {})
 
+    @r.post("/books/{book_id}/private-transfer", status_code=201)
+    def private_transfer(book_id: str, body: sc.PrivateTransferReq, request: Request):
+        return fac(request).h_private_transfer({"book_id": book_id}, body.model_dump(), {})
+
     @r.get("/books/{book_id}/opening-balance")
     def opening_balance_template(book_id: str, request: Request):
         return fac(request).h_opening_balance_template({"book_id": book_id}, {}, {})

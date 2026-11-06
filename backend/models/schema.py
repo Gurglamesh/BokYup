@@ -46,7 +46,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Versioning (also written to PRAGMA user_version for migrations / import checks)
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION = 45
+SCHEMA_VERSION = 46
 
 # ---------------------------------------------------------------------------
 # Domain enumerations (kept in sync with the CHECK constraints in the DDL)
@@ -699,6 +699,9 @@ _DEFAULT_CONFIG = {
     # revisor can map them to the entity's chart. Defaults follow standard BAS.
     "account_bank": "1930",                 # Företagskonto / bank
     "account_egna_insattningar": "2018",    # Egna insättningar (paid with private money)
+    # The other direction: money taken out of the firm for private use. Both sit in eget
+    # kapital and are the two legs of a privat<->företag transfer.
+    "account_egna_uttag": "2013",           # Egna uttag (money out to private)
     "account_ingaende_moms": "2640",        # Ingående moms (deductible)
     "account_utgaende_moms_25": "2610",     # Utgående moms 25 %
     "account_utgaende_moms_12": "2620",     # Utgående moms 12 %
@@ -1162,6 +1165,7 @@ _MIGRATIONS: dict[int, str] = {
     """,
     38: """
         INSERT OR IGNORE INTO config(key, value) VALUES ('account_egna_insattningar', '2018');
+        INSERT OR IGNORE INTO config(key, value) VALUES ('account_egna_uttag', '2013');
         INSERT OR IGNORE INTO config(key, value) VALUES ('account_eget_kapital', '2010');
     """,
     # v39: freeze each booked moms_line's BAS-konto so editing a category's konto later
@@ -1301,6 +1305,9 @@ _MIGRATIONS: dict[int, str] = {
         DROP TABLE receipt_old;
         CREATE INDEX IF NOT EXISTS idx_receipt_trans ON receipt(transaktion_id);
         CREATE INDEX IF NOT EXISTS idx_receipt_ver ON receipt(verifikation_id);
+    """,
+    46: """
+        INSERT OR IGNORE INTO config(key, value) VALUES ('account_egna_uttag', '2013');
     """,
 }
 

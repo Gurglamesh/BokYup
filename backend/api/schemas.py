@@ -310,6 +310,18 @@ class ManualVerifikationReq(BaseModel):
     kommentar: Optional[str] = None        # free note kept with the entry
 
 
+class PrivateTransferReq(BaseModel):
+    """Money moved between a private account and the företagskonto. Give one direction
+    for a single transfer, or both to summarise a period gross."""
+    date: str
+    uttag_ore: int = 0          # left the firm, to private    -> 2013
+    insattning_ore: int = 0     # came into the firm, from private -> 2018
+    note: Optional[str] = None       # overrides the verifikation text
+    ext_ref: Optional[str] = None    # the kontoutdrag's reference
+    kommentar: Optional[str] = None
+    konto: Optional[int] = None      # bank konto, default the config 1930
+
+
 class OpeningBalanceRowReq(BaseModel):
     bas_konto: int
     # The konto's balance in its NATURAL direction: an asset (1xxx) positive is a debit

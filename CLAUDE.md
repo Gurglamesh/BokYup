@@ -1171,6 +1171,30 @@ Envelope encryption, pure-Python (`argon2-cffi` + `cryptography`):
       both lists. Its gate now also requires `t.category_id`. Browser-smoke-tested (1220
       booked + 5410 pending labelled in Transaktioner and Inköp, search by konto and by
       description, no dead-end button).
+- [x] **Överföring privat ↔ företagskonto (schema v46, 2026-11).** Moving money between a
+      private account and the företagskonto is not an affärshändelse for an enskild
+      näringsidkare — no income, no cost, no moms — but it still has to be booked, and it
+      was the one everyday event with no button: you had to hand-write a manual verifikat
+      and remember which konto went on which side.
+      `book_private_transfer(date, uttag_ore=, insattning_ore=)` posts ONE balanced
+      verifikation: **2013 Egna uttag** debit for money that left the firm, **2018 Egna
+      insättningar** credit for money that came in, and the **bank takes the net**
+      (`insattning − uttag`). **Both directions may be given at once**, so a month of
+      back-and-forth is a single verifikation showing each direction GROSS — which is what
+      a kontoutdrag can actually be checked against, unlike one netted figure. Equal
+      amounts both ways leave the bank leg out entirely (correct: the gross flows still
+      stand on their own konton). New config `account_egna_uttag` (2013), the counterpart
+      to the existing `account_egna_insattningar`.
+      Unlike a privat tillgång this is **NOT egenupprättad** — the kontoutdrag IS the
+      external document — so no motivering is demanded; `ext_ref` carries the statement's
+      reference and the underlag attaches to the verifikation with 📎. No `transaktion` is
+      created either, so it stays out of the inköp/income lists. Guards: at least one
+      direction, no negative amounts, period locks respected. API
+      `POST /private-transfer` (`PrivateTransferReq`). UI: a **"🔁 Överföring privat ↔
+      företag"**-knapp beside the privat-tillgång one on **Bokföring → Bokför**, with a
+      live posting preview that names the konton as you type. Tests pass (535);
+      browser-smoke-tested (10 000 ut + 3 000 in → 2013/2018/1930 −7 000 balanced,
+      equal amounts → no bank leg, no transaktion created).
 - [ ] Later — **OCR** to auto-extract total + per-rate moms and prefill the lines editor
       (DEFERRED by decision: clashes with pure-pip/offline/privacy). Drop in behind a
       provider seam — `backend/ocr/` + `POST …/receipts/ocr-suggest` returning the same
